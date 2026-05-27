@@ -1,2 +1,6 @@
 *.pkl
 data/
+.venv/
+__pycache__/
+*.egg-info/
+result.json

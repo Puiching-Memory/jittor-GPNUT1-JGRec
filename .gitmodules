@@ -1,0 +1,6 @@
+[submodule "third_party/jittor"]
+	path = third_party/jittor
+	url = https://github.com/Jittor/jittor
+[submodule "third_party/JittorGeometric"]
+	path = third_party/JittorGeometric
+	url = https://github.com/AlgRUC/JittorGeometric

@@ -1,0 +1,28 @@
+[project]
+name = "jittor-gpnut1-jgrec"
+version = "0.1.0"
+description = "Example code for Jittor GPNUT1 JGRec"
+requires-python = ">=3.10,<3.12"
+dependencies = [
+	"einops>=0.8.0",
+	"jittor",
+	"jittor-geometric",
+	"networkx>=3.2",
+	"nvidia-cudnn-cu12==8.9.7.29",
+	"numpy==1.24.0",
+	"pyparsing==3.2.1",
+	"scikit-learn==1.6.1",
+	"scipy==1.15.1",
+	"sympy==1.13.3",
+]
+
+[tool.uv.sources]
+jittor = { path = "third_party/jittor", editable = true }
+jittor-geometric = { path = "third_party/JittorGeometric", editable = true }
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["sitecustomize"]
