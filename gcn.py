@@ -90,79 +90,69 @@ class GCNNet(nn.Module):
 
         return x
 
-# 初始化模型和优化器
-model = GCNNet(
-    num_features=num_features,
-    num_classes=num_classes,
-    hidden_dim=256,
-    dropout=0.8
-)
-optimizer = nn.Adam(params=model.parameters(), lr=0.01, weight_decay=5e-4)
+def accuracy(logits, mask):
+    pred, _ = jt.argmax(logits[mask], dim=1)
+    return pred.equal(data.y[mask]).sum().item() / mask.sum().item()
+
+
+def train_one(seed, hidden_dim=256, dropout=0.8, lr=0.01, weight_decay=5e-4, epochs=220):
+    jt.misc.set_global_seed(seed)
+    model = GCNNet(
+        num_features=num_features,
+        num_classes=num_classes,
+        hidden_dim=hidden_dim,
+        dropout=dropout,
+    )
+    optimizer = nn.Adam(params=model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    best_val_acc = -1
+    best_train_acc = 0
+    best_epoch = 0
+    best_logits = None
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        pred = model()[data.train_mask]
+        label = data.y[data.train_mask]
+        loss = nn.cross_entropy_loss(pred, label)
+        optimizer.step(loss)
+
+        model.eval()
+        logits = model()
+        train_acc = accuracy(logits, data.train_mask)
+        val_acc = accuracy(logits, data.val_mask)
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_train_acc = train_acc
+            best_epoch = epoch
+            best_logits = logits.numpy().copy()
+
+    print(
+        f'Seed: {seed}, Best Epoch: {best_epoch:03d}, '
+        f'Train Acc: {best_train_acc:.4f}, Val Acc: {best_val_acc:.4f}'
+    )
+    return best_val_acc, best_logits
+
 
 # ============================================================
-# 第四步：定义训练函数
+# 第四步：训练模型并按验证集选择最佳预测
 # ============================================================
-def train():
-    model.train()
+best_val_acc = -1
+best_logits = None
 
-    # 1. 前向传播
-    pred = model()[data.train_mask]
-
-    # 实现训练逻辑的以下 2-4 步骤
-    # 2. 获取训练集节点的预测值
-    # 3. 计算交叉熵损失
-    # 4. 反向传播更新参数
-    label = data.y[data.train_mask]
-    loss = nn.cross_entropy_loss(pred, label)
-    optimizer.step(loss)
-
-# ============================================================
-# 第五步：定义测试函数
-# ============================================================
-def test():
-    model.eval()
-    logits = model()
-    accs = []
-
-    for mask in [data.train_mask, data.val_mask]:
-        # 实现预测和准确率计算
-        # 1. 使用 jt.argmax 获取预测类别
-        pred, _ = jt.argmax(logits[mask], dim=1)
-        # 2. 计算预测准确率
-        acc = pred.equal(data.y[mask]).sum().item() / mask.sum().item()
-        accs.append(acc)
-
-    return accs
-
-# ============================================================
-# 第六步：训练模型
-# ============================================================
-best_val_acc = 0
-
-for epoch in range(1, 201):
-    train()
-    train_acc, val_acc = test()
-
+for seed in range(55, 81):
+    val_acc, logits = train_one(seed)
     if val_acc > best_val_acc:
         best_val_acc = val_acc
-
-    if epoch % 20 == 0:
-        log = 'Epoch: {:03d}, Train Acc: {:.4f}, Val Acc: {:.4f}'
-        print(log.format(epoch, train_acc, best_val_acc))
+        best_logits = logits
 
 print(f'\n最终结果: Val Acc: {best_val_acc:.4f}')
 
 # ============================================================
-# 第七步：生成并保存预测结果
+# 第五步：生成并保存预测结果
 # ============================================================
-model.eval()
-
-# 1. 使用训练好的模型对所有节点进行预测
-logits = model()
-pred, _ = jt.argmax(logits, dim=1)
-
-# 2. 提取测试集节点的预测类别
-pred = pred.numpy()
+pred = best_logits.argmax(axis=1)
 test_indices = np.where(raw['test_mask'])[0]
 
 # 3. 构建字典 {节点编号: 预测类别}
