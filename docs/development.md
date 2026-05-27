@@ -17,7 +17,7 @@ uv run python -m compileall -q src
 冒烟测试：
 
 ```bash
-uv run jgrec-build --limit-rows 100 --zip-path result-smoke.zip
+uv run jgrec-build --limit-rows 2 --max-fit-events 512 --max-train-events 32 --max-val-events 16 --num-negatives 3 --epochs 1 --gnn-epochs 1 --gnn-embedding-dim 16 --gnn-layers 1 --gnn-max-graph-edges 256 --gnn-max-train-edges 128 --seq-epochs 1 --seq-max-samples 128 --seq-max-len 16 --seq-hidden-size 16 --fusion-hidden-dim 16 --quiet-ranker
 ```
 
 完整生成：
@@ -42,6 +42,8 @@ uv run zensical build
 - 是否会显著增加内存占用。
 - 是否已经写入 `pyproject.toml` 并更新 `uv.lock`。
 
+当前 CLI 依赖 Rich 做运行面板、进度条和结果表格；它只影响终端输出，不参与提交文件内容生成。
+
 ## 代码边界
 
 修改建议：
@@ -59,8 +61,6 @@ uv run zensical build
 
 - `data/`
 - `result/`
-- `result.zip`
-- `result-smoke.zip`
 - `site/`
 - `.venv/`
 
@@ -70,7 +70,7 @@ uv run zensical build
 
 ```bash
 uv run python -m compileall -q src
-uv run jgrec-build --limit-rows 100 --zip-path result-smoke.zip
+uv run jgrec-build --limit-rows 2 --max-fit-events 512 --max-train-events 32 --max-val-events 16 --num-negatives 3 --epochs 1 --gnn-epochs 1 --gnn-embedding-dim 16 --gnn-layers 1 --gnn-max-graph-edges 256 --gnn-max-train-edges 128 --seq-epochs 1 --seq-max-samples 128 --seq-max-len 16 --seq-hidden-size 16 --fusion-hidden-dim 16 --quiet-ranker
 uv lock --check
 ```
 
@@ -81,11 +81,13 @@ uv sync --group dev
 uv run zensical build
 ```
 
+性能优化需要记录前后基准，统一写入 [性能基准](performance.md)。
+
 ## 当前已知限制
 
-- 当前 baseline 不是训练型模型，性能上限有限。
 - `fit()` 会把单个数据集训练交互加载到内存中。
-- 没有内置本地验证集切分和 MRR 评估。
-- 没有模型权重搜索或自动调参。
+- 负采样还是随机采样，没有 hard negatives。
+- 当前图塔是静态窗口图，不是严格事件级 TGN memory。
+- 没有模型权重持久化，每次运行都会重新训练。
 
 这些限制不影响生成合规提交文件，但会影响榜单分数。后续优化应优先补本地验证闭环。

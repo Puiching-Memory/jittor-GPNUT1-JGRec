@@ -5,9 +5,11 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from .data import DatasetPaths, count_csv_data_rows, read_interactions, read_test_queries
 from .data import TestQuery
-from .model import HeuristicJittorRanker
+from .model import TemporalHybridRanker, TrainingConfig, TrainingReport
 
 
 @dataclass(frozen=True)
@@ -15,6 +17,7 @@ class DatasetResult:
     name: str
     rows: int
     output_path: Path
+    training_report: TrainingReport
 
 
 def build_dataset_submission(
@@ -22,18 +25,20 @@ def build_dataset_submission(
     output_dir: Path,
     recent_window: int = 32,
     batch_size: int = 2048,
+    training_config: TrainingConfig | None = None,
     limit_rows: int | None = None,
 ) -> DatasetResult:
     interactions = list(read_interactions(dataset.train_path))
-    ranker = HeuristicJittorRanker(recent_window=recent_window)
-    ranker.fit(interactions)
+    if training_config is None:
+        training_config = TrainingConfig()
+    ranker = TemporalHybridRanker(recent_window=recent_window)
+    training_report = ranker.fit(interactions, training_config=training_config)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{dataset.name}.csv"
 
     row_count = 0
     with output_path.open("w", newline="") as f:
-        writer = csv.writer(f)
         batch: list[TestQuery] = []
         for query in read_test_queries(dataset.test_path):
             batch.append(query)
@@ -44,26 +49,30 @@ def build_dataset_submission(
             if should_flush:
                 if limit_rows is not None:
                     batch = batch[: limit_rows - row_count]
-                row_count += _write_batch(writer, ranker, batch)
+                row_count += _write_batch(f, ranker, batch)
                 batch.clear()
                 if limit_rows is not None and row_count >= limit_rows:
                     break
         if batch and (limit_rows is None or row_count < limit_rows):
             if limit_rows is not None:
                 batch = batch[: limit_rows - row_count]
-            row_count += _write_batch(writer, ranker, batch)
+            row_count += _write_batch(f, ranker, batch)
 
-    return DatasetResult(name=dataset.name, rows=row_count, output_path=output_path)
+    return DatasetResult(
+        name=dataset.name,
+        rows=row_count,
+        output_path=output_path,
+        training_report=training_report,
+    )
 
 
 def _write_batch(
-    writer: csv.writer,
-    ranker: HeuristicJittorRanker,
+    output_file,
+    ranker: TemporalHybridRanker,
     batch: list[TestQuery],
 ) -> int:
     probs_batch = ranker.predict_batch(batch)
-    for probs in probs_batch:
-        writer.writerow([f"{value:.8f}" for value in probs])
+    np.savetxt(output_file, probs_batch, delimiter=",", fmt="%.8f")
     return len(batch)
 
 

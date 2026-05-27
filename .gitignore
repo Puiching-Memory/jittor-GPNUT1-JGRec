@@ -6,5 +6,5 @@ __pycache__/
 result.json
 site/
 result/
-result.zip
-result-smoke.zip
+*.zip
+.cache/

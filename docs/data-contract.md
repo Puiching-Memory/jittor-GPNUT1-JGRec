@@ -10,7 +10,7 @@ data/<dataset_name>/
 └── test.csv
 ```
 
-`<dataset_name>` 会用于输出文件名：`result/<dataset_name>.csv`。
+`<dataset_name>` 会用于输出文件名：`result/<run_id>/csv/<dataset_name>.csv`。
 
 ## 训练集
 
@@ -57,7 +57,7 @@ src,time,c1,c2,...,c100
 每个数据集生成一个同名 CSV：
 
 ```text
-result/<dataset_name>.csv
+result/<run_id>/csv/<dataset_name>.csv
 ```
 
 输出约束：
@@ -80,13 +80,13 @@ result/<dataset_name>.csv
 最终提交文件：
 
 ```text
-result.zip
+result/<run_id>/result.zip
 ├── dataset1.csv
 ├── dataset2.csv
 └── ...
 ```
 
-压缩包根目录直接包含 CSV 文件，不包含 `result/` 目录层级。
+压缩包文件名固定为 `result.zip`，根目录直接包含 CSV 文件，不包含 `result/` 或 `csv/` 目录层级。
 
 ## 校验规则
 

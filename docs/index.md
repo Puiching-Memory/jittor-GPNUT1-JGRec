@@ -7,10 +7,10 @@
 本仓库当前目标是提供一个满足赛道一提交要求的端到端 MVP：
 
 - 自动发现 `data/` 下的多个数据集场景。
-- 从 `train.csv` 构建时序交互统计。
+- 从 `train.csv` 构建图塔、序列塔和时序统计特征。
 - 对 `test.csv` 中每行 100 个候选目标节点输出概率分布。
 - 为每个数据集生成同名 CSV，并打包为 `result.zip`。
-- 使用 Jittor 完成候选批量打分与 softmax 归一化。
+- 使用 JittorGeometric 做图推荐/序列建模，使用 Jittor 完成候选融合和 softmax 归一化。
 
 ## 文档导航
 
@@ -19,7 +19,8 @@
 | [运行手册](runbook.md)                              | 环境、命令、输出、验证、常见问题       |
 | [系统架构](architecture.md)                         | 包结构、数据流、模块边界               |
 | [数据契约](data-contract.md)                        | 输入 CSV、输出 CSV、压缩包、校验规则   |
-| [模型方案](modeling.md)                             | 当前 baseline 特征、打分方式、升级路线 |
+| [模型方案](modeling.md)                             | 因果训练、特征、打分方式、升级路线     |
+| [性能基准](performance.md)                           | 已验证性能改进、基准方法、后续方向     |
 | [开发规范](development.md)                          | 本地开发、测试、依赖、提交前检查       |
 | [赛题原文整理](赛道一：基于图学习的动态推荐任务.md) | 赛题说明、指标、提交格式               |
 | [开源参考项目](开源参考项目.md)                     | 后续建模可参考的外部项目               |
@@ -34,9 +35,11 @@ uv run jgrec-build
 完成后检查：
 
 ```text
-result.zip
-├── dataset1.csv
-└── dataset2.csv
+result/<run_id>/
+├── csv/
+│   ├── dataset1.csv
+│   └── dataset2.csv
+└── result.zip
 ```
 
 每个 CSV 无表头，每行 100 个保留 8 位小数的概率。

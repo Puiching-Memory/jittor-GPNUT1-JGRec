@@ -12,6 +12,7 @@ nav = [
   { "系统架构" = "architecture.md" },
   { "数据契约" = "data-contract.md" },
   { "模型方案" = "modeling.md" },
+  { "性能基准" = "performance.md" },
   { "开发规范" = "development.md" },
   { "赛道一：动态推荐任务" = "赛道一：基于图学习的动态推荐任务.md" },
   { "开源参考项目" = "开源参考项目.md" },

@@ -2,50 +2,123 @@
 
 ## 当前定位
 
-当前模型是工程 MVP，不是最终竞赛上限方案。目标是：
+当前实现已经从统计线性模型切换为激进的混合图推荐模型：
 
-- 保证端到端可运行。
-- 满足 Jittor 框架使用要求。
-- 输出符合比赛提交格式。
-- 为后续可训练模型留下稳定接口。
+```text
+TemporalHybridRanker =
+  因果时间切分
+  + JittorGeometric XSimGCL/LightGCN 图塔
+  + JittorGeometric SASRec 序列塔
+  + 时序统计特征
+  + Jittor MLP 候选重排序
+```
 
-## Baseline 类
+目标不是做通用 link prediction，而是直接优化赛题的 100 个候选节点重排序。
+
+## 模块划分
 
 实现位置：
 
 ```text
-src/jgrec/model.py
+src/jgrec/
+├── idmap.py      # 原始 src/dst ID 到连续 ID 的映射
+├── stats.py      # 时序统计特征
+├── gnn.py        # XSimGCL/LightGCN 图塔
+├── sequence.py   # SASRec 序列塔
+├── reranker.py   # 融合 MLP
+└── model.py      # TemporalHybridRanker 对外接口
 ```
 
-核心类：
+对外接口保持稳定：
 
 ```python
-HeuristicJittorRanker
-```
-
-使用方式：
-
-```python
-ranker = HeuristicJittorRanker(recent_window=32)
-ranker.fit(interactions)
+ranker = TemporalHybridRanker(recent_window=32)
+report = ranker.fit(interactions, training_config=config)
 probs = ranker.predict_batch(queries)
 ```
 
-## 统计索引
+## 因果训练流程
 
-`fit()` 会按时间排序训练交互，并构建以下索引：
+每个数据集单独训练：
 
-| 索引               | 说明                                                   |
-| ------------------ | ------------------------------------------------------ |
-| `src_histories`    | 每个源节点的交互次数、最近时间、目标频次、最近目标序列 |
-| `dst_counts`       | 每个目标节点作为目标出现的次数                         |
-| `dst_recent_time`  | 每个目标节点最近被交互的时间                           |
-| `pair_counts`      | `(src, dst)` 历史交互次数                              |
-| `pair_recent_time` | `(src, dst)` 最近交互时间                              |
+```text
+完整 train.csv 时间排序
+        │
+        ├── context events
+        │       ├── 训练图塔
+        │       ├── 训练序列塔
+        │       └── 构建统计索引
+        │
+        ├── supervised train events
+        │       └── 正样本 + 负采样候选
+        │
+        └── validation tail
+                └── 本地 MRR
+```
 
-## 候选特征
+监督样本第一个候选固定为真实目标：
 
-对每个测试查询 `(src, time, c1...c100)`，每个候选目标节点会生成 6 个特征：
+```text
+[positive_dst, negative_1, negative_2, ...]
+```
+
+融合层使用候选集 softmax cross entropy：
+
+```python
+loss = -log_softmax(logits, dim=1)[:, 0].mean()
+```
+
+验证指标是 MRR：
+
+```text
+rank = 1 + count(score_negative > score_positive)
+MRR = mean(1 / rank)
+```
+
+训练完成后，模型会用完整训练历史重新训练图塔、序列塔和统计索引，再对正式 `test.csv` 输出概率。
+
+## 图塔
+
+图塔使用 `third_party/JittorGeometric`：
+
+- 默认模型：`XSimGCL`
+- 可选模型：`LightGCN`
+- 图结构：二部图 `src <-> dst`
+- 训练目标：BPR，XSimGCL 额外使用对比学习扰动
+
+当前训练三个时间窗口：
+
+| 特征名       | 边窗口       | 目的         |
+| ------------ | ------------ | ------------ |
+| `gnn_full`   | 全量历史边   | 长期协同过滤 |
+| `gnn_recent` | 最近 35% 边  | 近期偏好     |
+| `gnn_short`  | 最近 10% 边  | 短期趋势     |
+
+每个窗口输出：
+
+```text
+dot(src_embedding, dst_embedding)
+```
+
+## 序列塔
+
+序列塔使用 JittorGeometric 的 `SASRec` 实现。每个 `src` 的历史目标节点序列作为行为序列：
+
+```text
+src: dst_1, dst_2, dst_3, ...
+```
+
+训练时用历史前缀预测下一个 `dst`，使用 BPR 损失。预测时对每个候选输出：
+
+```text
+sasrec_score = dot(sequence_embedding(src_history), candidate_embedding)
+```
+
+序列塔用于补图塔的短板：LightGCN/XSimGCL 更偏静态协同过滤，SASRec 负责顺序兴趣变化。
+
+## 统计特征
+
+统计特征继续保留，作为强规则信号和冷启动兜底：
 
 | 特征             | 含义                                             |
 | ---------------- | ------------------------------------------------ |
@@ -54,58 +127,68 @@ probs = ranker.predict_batch(queries)
 | `pair_recency`   | 源目标最近交互相对查询时间的衰减                 |
 | `dst_popularity` | 目标节点全局热度                                 |
 | `dst_recency`    | 目标节点最近被交互的时间衰减                     |
-| `recent_hit`     | 目标是否命中源节点最近交互序列，越近分值越高     |
+| `recent_hit`     | 目标是否命中源节点最近交互序列                   |
+| `src_activity`   | 源节点历史活跃度                                 |
+| `src_recency`    | 源节点最近活跃度                                 |
 
-## Jittor 打分
+## 融合层
 
-特征组装为：
+最终候选特征为：
 
 ```text
-batch_size x 100 x 6
+8 个统计特征
++ 3 个图塔分数
++ 1 个序列塔分数
+= 12 维候选特征
 ```
 
-随后通过 Jittor 张量进行线性融合：
+融合层是 Jittor MLP：
 
-```python
-logits = (features * weights).sum(dim=2)
-probs = softmax(logits, dim=1)
+```text
+feature_dim -> hidden_dim -> hidden_dim/2 -> 1
 ```
 
-输出 `batch_size x 100` 的概率矩阵。
+输出 logits 后在每行 100 个候选内做 softmax，得到提交概率。
 
-## 设计取舍
+融合训练会同时比较以下候选特征组：
 
-| 取舍       | 当前选择                | 原因                                 |
-| ---------- | ----------------------- | ------------------------------------ |
-| CSV 读取   | 标准库 `csv`            | 低依赖、流式、内存可控               |
-| 特征计算   | Python 字典和 `Counter` | MVP 简单可靠，便于调试               |
-| 打分       | Jittor batch 张量       | 满足框架要求，减少逐行开销           |
-| 训练       | 无监督启发式            | 没有公开标签文件，先保证可提交       |
-| 模型持久化 | 不保存                  | 当前统计可快速重建，避免状态文件管理 |
+- `stats`
+- `stats_gnn`
+- `stats_gnn_seq`
 
-## 升级路线
+最终使用本地验证 MRR 最高的一组。若验证选择 `stats`，最终全量拟合阶段会跳过图塔和序列塔训练，避免未收敛图特征拖慢并拖垮提交结果。
 
-优先级建议：
+## 关键参数
 
-1. **本地验证切分**：从训练集尾部按时间切出验证集，用 MRR 选择权重。
-2. **权重学习**：把当前 6 个特征作为输入，用 Jittor 训练 logistic/BPR/listwise reranker。
-3. **负采样策略**：对每个正样本采样同时间附近或高热度负样本，减少训练评估偏差。
-4. **序列模型**：按源节点构建目标序列，引入 GRU/SASRec 类模型。
-5. **图模型**：用 JittorGeometric 的 TGN/JODIE/GraphMixer 思路替换统计 ranker。
-6. **大规模优化**：对 B 榜千万级边，改造为分块读取、压缩索引或磁盘缓存。
+| 参数                    | 默认值     | 说明                         |
+| ----------------------- | ---------- | ---------------------------- |
+| `--gnn-model`           | `xsimgcl`  | 图塔模型，可选 `lightgcn`    |
+| `--gnn-embedding-dim`   | `128`      | 图 embedding 维度            |
+| `--gnn-layers`          | `2`        | 图传播层数                   |
+| `--gnn-epochs`          | `3`        | 每个图窗口训练轮数           |
+| `--gnn-max-graph-edges` | `0`        | 每个图窗口最多建图边数       |
+| `--gnn-max-train-edges` | `40000`    | 每轮图训练采样边数           |
+| `--seq-epochs`          | `3`        | SASRec 训练轮数              |
+| `--seq-max-samples`     | `50000`    | SASRec 最多训练样本          |
+| `--seq-max-len`         | `64`       | 源节点历史序列长度           |
+| `--seq-hidden-size`     | `128`      | SASRec hidden size           |
+| `--fusion-hidden-dim`   | `64`       | 最终 MLP hidden width        |
+| `--max-fit-events`      | `0`        | 训练历史尾部截断，0 表示全量 |
 
-## 接口稳定性
+## 当前取舍
 
-后续模型应优先兼容当前接口：
+- 选择 XSimGCL/LightGCN 作为主图模型，因为它直接服务推荐排序，工程风险低于 TGN/DyGFormer。
+- 保留 SASRec，因为测试查询带时间，源节点近期行为顺序很可能有收益。
+- 保留统计特征，因为重复交互、目标热度和近因信号在该赛题中非常强。
+- 使用 MLP 融合而不是直接加权，避免手工调不同模型分数尺度。
+- TGN/DyGFormer 暂不作为主线；它们更适合事件级动态 link prediction，直接迁移到 100 候选 MRR 风险更高。
 
-```python
-fit(interactions: list[Interaction]) -> None
-predict_batch(queries: list[TestQuery]) -> np.ndarray
-```
+## 验证策略
 
-`predict_batch()` 必须返回：
+每次模型改动至少记录：
 
-- shape: `(len(queries), 100)`
-- dtype: 可转为 float
-- value range: `[0, 1]`
-- 每行对应测试集候选顺序
+- `stats + MLP`
+- `LightGCN + SASRec + stats + MLP`
+- `XSimGCL + SASRec + stats + MLP`
+
+需要同时记录本地 MRR、训练耗时、推理耗时和输出校验结果。性能与质量数据统一写入 [性能基准](performance.md)。
