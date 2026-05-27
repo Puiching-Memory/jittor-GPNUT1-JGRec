@@ -4,3 +4,7 @@ data/
 __pycache__/
 *.egg-info/
 result.json
+site/
+result/
+result.zip
+result-smoke.zip

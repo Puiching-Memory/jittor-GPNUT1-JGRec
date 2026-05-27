@@ -1,7 +1,7 @@
 [project]
 name = "jittor-gpnut1-jgrec"
 version = "0.1.0"
-description = "Example code for Jittor GPNUT1 JGRec"
+description = "MVP code for Jittor GPNUT1 dynamic recommendation"
 requires-python = ">=3.10,<3.12"
 dependencies = [
 	"einops>=0.8.0",
@@ -16,6 +16,9 @@ dependencies = [
 	"sympy==1.13.3",
 ]
 
+[project.scripts]
+jgrec-build = "jgrec.cli:main"
+
 [tool.uv.sources]
 jittor = { path = "third_party/jittor", editable = true }
 jittor-geometric = { path = "third_party/JittorGeometric", editable = true }
@@ -24,5 +27,12 @@ jittor-geometric = { path = "third_party/JittorGeometric", editable = true }
 requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[dependency-groups]
+dev = [
+    "zensical>=0.0.43",
+]
+
 [tool.setuptools]
+package-dir = { "jgrec" = "src/jgrec" }
+packages = ["jgrec"]
 py-modules = ["sitecustomize"]

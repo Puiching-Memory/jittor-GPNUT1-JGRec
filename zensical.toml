@@ -1,0 +1,63 @@
+[project]
+site_name = "jittor-GPNUT1-JGRec"
+site_description = "第六届计图人工智能挑战赛赛道一文档"
+site_author = "jittor-GPNUT1-JGRec contributors"
+docs_dir = "docs"
+site_dir = "site"
+copyright = "Copyright &copy; 2026 jittor-GPNUT1-JGRec contributors"
+
+nav = [
+  { "首页" = "index.md" },
+  { "运行手册" = "runbook.md" },
+  { "系统架构" = "architecture.md" },
+  { "数据契约" = "data-contract.md" },
+  { "模型方案" = "modeling.md" },
+  { "开发规范" = "development.md" },
+  { "赛道一：动态推荐任务" = "赛道一：基于图学习的动态推荐任务.md" },
+  { "开源参考项目" = "开源参考项目.md" },
+]
+
+[project.theme]
+language = "zh"
+features = [
+  "content.code.copy",
+  "navigation.footer",
+  "navigation.instant",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+]
+
+[[project.theme.palette]]
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "切换到深色模式"
+
+[[project.theme.palette]]
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "切换到浅色模式"
+
+[project.theme.icon]
+logo = "lucide/network"
+
+[project.markdown_extensions.abbr]
+[project.markdown_extensions.admonition]
+[project.markdown_extensions.attr_list]
+[project.markdown_extensions.def_list]
+[project.markdown_extensions.footnotes]
+[project.markdown_extensions.md_in_html]
+[project.markdown_extensions.tables]
+[project.markdown_extensions.toc]
+permalink = true
+
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+line_spans = "__span"
+pygments_lang_class = true
+
+[project.markdown_extensions.pymdownx.inlinehilite]
+[project.markdown_extensions.pymdownx.superfences]
+[project.markdown_extensions.pymdownx.tasklist]
+custom_checkbox = true

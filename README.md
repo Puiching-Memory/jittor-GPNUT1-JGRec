@@ -1,30 +1,58 @@
 # jittor-GPNUT1-JGRec
 
-# 赛道一热身赛 - 示例代码
+第六届计图人工智能挑战赛赛道一动态推荐项目。当前代码提供一个可复现、可提交的 MVP 管线：读取 `data/dataset*/train.csv` 和 `test.csv`，对每个测试查询的 100 个候选目标节点生成概率分布，并打包为 `result.zip`。
 
-本赛题提供示例代码框架，提供数据加载、模型定义、训练步骤等功能。
+## Quick Start
 
-选手可以基于示例代码填充注释为 TODO 的部分完成该赛题：
+```bash
+uv sync
+uv run jgrec-build
+```
 
+输出文件：
 
-## 使用说明
+```text
+result/
+├── dataset1.csv
+└── dataset2.csv
+result.zip
+```
 
-1. 配置环境：参考 [JittorGeometric 官方安装指南](https://github.com/AlgRUC/JittorGeometric?tab=readme-ov-file#installation)，安装 Jittor、JittorGeometric 和依赖。
-2. 数据集文件 `cora.pkl` 应放置于 `data/` 目录下
-3. 完成 `gcn.py` 中的 TODO
-4. 运行 `python gcn.py` 进行训练和预测
+冒烟测试：
 
-## 数据集说明
+```bash
+uv run jgrec-build --limit-rows 100 --zip-path result-smoke.zip
+```
 
-数据集文件 `data/cora.pkl` 为 pickle 格式，包含以下字段：
+CPU 环境：
 
-| 字段           | 类型                       | 说明                        |
-| -------------- | -------------------------- | --------------------------- |
-| `x`            | numpy array (2708, 1433)   | 节点特征矩阵                |
-| `y`            | numpy array (2708,)        | 节点标签（测试集标签为 -1） |
-| `edge_index`   | numpy array (2, num_edges) | 边列表                      |
-| `train_mask`   | numpy bool array (2708,)   | 训练集掩码                  |
-| `val_mask`     | numpy bool array (2708,)   | 验证集掩码                  |
-| `test_mask`    | numpy bool array (2708,)   | 测试集掩码                  |
-| `num_classes`  | int                        | 类别数（7）                 |
-| `num_features` | int                        | 特征维度（1433）            |
+```bash
+uv run jgrec-build --cpu
+```
+
+## Documentation
+
+工程文档从 [docs/index.md](docs/index.md) 开始：
+
+- [运行手册](docs/runbook.md)
+- [系统架构](docs/architecture.md)
+- [数据契约](docs/data-contract.md)
+- [模型方案](docs/modeling.md)
+- [开发规范](docs/development.md)
+
+构建本地文档站点：
+
+```bash
+uv sync --group dev
+uv run zensical build
+```
+
+预览：
+
+```bash
+uv run zensical serve
+```
+
+## Current Baseline
+
+MVP 模型位于 `src/jgrec/model.py`。它使用历史边统计、源节点重复交互、目标节点热度、时序近因和最近邻命中等特征，通过 Jittor 张量批量融合并 softmax 归一化。该方案优先保证端到端可运行、格式正确、内存可控，后续可替换为可训练的 Jittor/JittorGeometric 时序图模型。
