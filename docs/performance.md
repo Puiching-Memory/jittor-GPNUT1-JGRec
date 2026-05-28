@@ -25,6 +25,46 @@
 - 训练交互数：2261283 行
 - 指标：多次运行 median 时间
 
+## 线上提交记录
+
+### 第一版完整提交
+
+提交时间：2026-05-27
+
+提交产物：
+
+```text
+result/rw32-bs2048-vr0p1-cr0p75-tr20000-va5000-neg31-fit0-ep5-tbs512-lr0p001-wd0-fh64-gnnxsimgcl-ge3-gd128-gl2-gmge0-gmte40000-seqon-se3-sd128-sl64-s42/result.zip
+```
+
+本地时间切分验证：
+
+| 数据集     | 本地 MRR | 选择的融合特征 |
+| ---------- | -------: | -------------- |
+| `dataset1` |  0.80293 | `stats_gnn`    |
+| `dataset2` |  0.51770 | `stats_gnn`    |
+
+线上总分：
+
+| 版本                | 线上得分 |
+| ------------------- | -------: |
+| 第一版完整 GNN 提交 |   1.1452 |
+
+提交前结构校验：
+
+| 文件           |   行数 | 每行列数 | 概率范围 | 行和       |
+| -------------- | -----: | -------: | -------- | ---------- |
+| `dataset1.csv` |  61051 |      100 | 合法     | 约等于 `1` |
+| `dataset2.csv` | 153420 |      100 | 合法     | 约等于 `1` |
+
+结论：
+
+- 第一版端到端链路已经满足比赛提交格式，并且线上成功计分，可作为后续优化的正式基线。
+- 本地验证 MRR 加和为 `1.32063`，高于线上总分 `1.1452`，说明当前本地时间切分偏乐观，不能只按本地 MRR 判断改动是否有效。
+- 线上只反馈总分，暂时无法拆分 `dataset1` 和 `dataset2` 的真实贡献；后续需要保留每次提交的本地分项 MRR、线上总分、运行参数和产物路径。
+- `dataset1` 本地 MRR 已经较高，短期主要风险是过拟合历史重复边；`dataset2` 本地 MRR 较低且规模更大，后续提分优先级更高。
+- 当前默认模型在两个数据集上都选择了 `stats_gnn`，说明图塔特征在本地验证中有收益；序列塔没有进入最终选择，后续要么改进序列建模，要么降低它的默认训练成本。
+
 ## 已验证改进
 
 ### CSV 批量写出
@@ -65,6 +105,32 @@
 
 结论：有效。该改动直接减少候选级 Python dict 查询，适合作为后续特征工程的默认方向。当前实现保留 `DENSE_NODE_LIMIT`，避免异常大的节点 ID 造成不可控内存占用。
 
+### 批量目标节点特征填充
+
+`features_for_queries` 原实现每个 query 单独调用 `_fill_dst_features`，每行都重复创建候选数组并计算 dense array 有效掩码。改为先构造 batch 级候选矩阵，再一次性填充 `dst_popularity` 和 `dst_recency`，pair 相关特征仍保留原来的逐候选 dict 查询。
+
+基准命令：
+
+```bash
+uv run python scripts/bench_stats_features.py --repeats 5 --warmups 1
+```
+
+| 指标                   |  改动前 |  改动后 |  收益 |
+| ---------------------- | ------: | ------: | ----: |
+| `features_cold_median` | 0.7591s | 0.2930s | 2.59x |
+| `features_warm_median` | 0.7865s | 0.2776s | 2.83x |
+| `fit_median`           | 2.9293s | 2.6004s | 1.13x |
+
+输出校验：
+
+| 项目                    | 结果               |
+| ----------------------- | ------------------ |
+| `feature_shape`         | `(8192, 100, 8)`   |
+| `feature_checksum`      | `1625183.75162584` |
+| `cold_feature_checksum` | `1625183.75162584` |
+
+结论：有效。该改动在 cold 口径下仍有稳定收益，并且 checksum 完全一致，保留实现。
+
 ## 无明显收益改进
 
 ### 小样本 GNN 融合消融
@@ -98,6 +164,17 @@
 
 结论：单独看这个改动没有明显收益。保留预分配实现的原因是它让后续向量化改造更直接，但不能把它计入主要性能收益。
 
+### Per-source 排序索引批量查 pair 特征
+
+尝试为每个源节点按需构建排序后的 `dst`、pair 计数、pair 最近时间和 recent rank 数组，再用 `np.searchsorted` 批量查询 `pair_strength`、`repeat_rate`、`pair_recency`、`recent_hit`。
+
+| 指标                   |  改动前 |  改动后 | 结论       |
+| ---------------------- | ------: | ------: | ---------- |
+| `features_cold_median` | 0.7489s | 0.9468s | 变慢       |
+| `features_warm_median` | 0.7489s | 0.4915s | 缓存后变快 |
+
+结论：不保留。测试 batch 中重复 `src` 的历史较长，首次为这些源节点排序建索引的成本高于节省的 dict 查询成本；warm 口径收益不能代表正式提交路径的首次推理成本。
+
 ## 当前结论
 
 已经确认有效的方向：
@@ -126,9 +203,15 @@
 基础正确性检查：
 
 ```bash
-uv run python -m compileall -q src
+uv run python -m compileall -q src scripts
 uv run jgrec-build --limit-rows 2 --max-fit-events 512 --max-train-events 32 --max-val-events 16 --num-negatives 3 --epochs 1 --gnn-epochs 1 --gnn-embedding-dim 16 --gnn-layers 1 --gnn-max-graph-edges 256 --gnn-max-train-edges 128 --seq-epochs 1 --seq-max-samples 128 --seq-max-len 16 --seq-hidden-size 16 --fusion-hidden-dim 16 --quiet-ranker
 uv lock --check
+```
+
+统计特征性能基准：
+
+```bash
+uv run python scripts/bench_stats_features.py --repeats 5 --warmups 1
 ```
 
 文档检查：
