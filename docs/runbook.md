@@ -60,17 +60,21 @@ result/<run_id>/
 └── result.zip
 ```
 
-`result.zip` 是固定文件名，始终位于本次运行目录内。`<run_id>` 由关键训练参数按固定字符串规则生成，不能手动指定。
+`result.zip` 是固定文件名，始终位于本次运行目录内。`<run_id>` 使用人类可读短名，最后追加 8 位配置哈希避免不同隐藏参数写入同一目录。
 
 默认规则：
 
 ```text
-model{model}-rw{recent_window}-bs{batch_size}-vr{val_ratio}-tr{max_train_events}-va{max_val_events}-neg{num_negatives}-ep{epochs}-tbs{train_batch_size}-lr{lr}-s{seed}
+{model}_{full|sample-N-rows}_{cpu|cuda}_seed-{seed}_{hash}
 ```
 
-`hybrid` 后端会额外追加图塔、序列塔和 `max_fit_events` 相关字段。
+`hybrid` 后端会额外追加图塔和序列塔状态：
 
-如果使用 `--limit-rows` 或 `--cpu`，会追加 `limit{N}` 或 `cpu` 后缀。浮点数中的 `.` 会转换为 `p`，例如 `0.05` 写作 `0p05`。
+```text
+hybrid_full_cuda_seed-42_gnn-xsimgcl_sequence-on_1a2b3c4d
+hybrid_sample-2-rows_cpu_seed-42_gnn-off_sequence-off_1a2b3c4d
+third-party_full_cuda_seed-42_1a2b3c4d
+```
 
 ## 冒烟测试
 

@@ -27,6 +27,8 @@ result/<run_id>/
 └── result.zip
 ```
 
+`<run_id>` 使用可读短名，例如 `hybrid_full_cuda_seed-42_gnn-xsimgcl_sequence-on_<hash>`。
+
 冒烟测试：
 
 ```bash

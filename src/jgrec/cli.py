@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -199,36 +201,42 @@ def _ranker_config(args: CLIConfig):
 
 
 def _build_run_name(args: CLIConfig, config) -> str:
-    parts = [
-        f"model{args.model}",
-        f"rw{args.recent_window}",
-        f"bs{args.batch_size}",
-        f"vr{_num(args.val_ratio)}",
-        f"tr{getattr(config, 'max_train_events', 0)}",
-        f"va{getattr(config, 'max_val_events', 0)}",
-        f"neg{getattr(config, 'num_negatives', 0)}",
-        f"ep{getattr(config, 'epochs', 0)}",
-        f"tbs{getattr(config, 'batch_size', getattr(config, 'train_batch_size', 0))}",
-        f"lr{_num(getattr(config, 'lr', 0.0))}",
-        f"s{args.seed}",
-    ]
+    rows = f"sample-{args.limit_rows}-rows" if args.limit_rows is not None else "full"
+    parts = [_slug(args.model), rows, "cpu" if args.cpu else "cuda", f"seed-{args.seed}"]
     if args.model == "hybrid":
         parts.extend(
             [
-                f"gnn{config.gnn_model if config.gnn_enabled else 'off'}",
-                f"seq{'on' if config.seq_enabled else 'off'}",
-                f"fit{config.max_fit_events}",
+                f"gnn-{_slug(config.gnn_model) if config.gnn_enabled else 'off'}",
+                f"sequence-{'on' if config.seq_enabled else 'off'}",
             ]
         )
-    if args.limit_rows is not None:
-        parts.append(f"limit{args.limit_rows}")
-    if args.cpu:
-        parts.append("cpu")
-    return "-".join(parts)
+    parts.append(_config_digest(args, config))
+    return "_".join(parts)
 
 
-def _num(value: float) -> str:
-    return f"{value:g}".replace(".", "p").replace("-", "m")
+def _config_digest(args: CLIConfig, config) -> str:
+    payload = {
+        "cli": _jsonable(args),
+        "ranker": _jsonable(config),
+    }
+    encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.blake2s(encoded, digest_size=4).hexdigest()
+
+
+def _jsonable(value):
+    if is_dataclass(value):
+        return _jsonable(asdict(value))
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _slug(value: object) -> str:
+    return str(value).strip().lower().replace("_", "-").replace(" ", "-")
 
 
 def _run_panel(run_dir: Path, zip_path: Path, args: CLIConfig, config) -> Panel:
