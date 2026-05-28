@@ -48,8 +48,8 @@ uv run zensical build
 
 修改建议：
 
-- 数据格式变化优先改 `jgrec.data`。
-- 模型或特征变化优先改 `jgrec.model`。
+- 数据格式变化优先改 `jgrec.core.io` 和 `jgrec.core.types`。
+- 模型或特征变化优先改 `jgrec.rankers/<model>/`。
 - 输出格式、打包和校验变化优先改 `jgrec.submission`。
 - 命令行参数和主流程变化优先改 `jgrec.cli`。
 

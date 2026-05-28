@@ -7,8 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
-from jgrec.data import read_interactions, read_test_queries
-from jgrec.stats import TemporalStats
+from jgrec.core.io import read_interactions, read_test_queries
+from jgrec.rankers.hybrid.stats import TemporalStats
 
 
 def main() -> int:

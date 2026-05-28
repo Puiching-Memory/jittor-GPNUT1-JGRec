@@ -21,12 +21,13 @@ TemporalHybridRanker =
 
 ```text
 src/jgrec/
-├── idmap.py      # 原始 src/dst ID 到连续 ID 的映射
-├── stats.py      # 时序统计特征
-├── gnn.py        # XSimGCL/LightGCN 图塔
-├── sequence.py   # SASRec 序列塔
-├── reranker.py   # 融合 MLP
-└── model.py      # TemporalHybridRanker 对外接口
+├── idmap.py
+└── rankers/hybrid/
+    ├── stats.py      # 时序统计特征
+    ├── gnn.py        # XSimGCL/LightGCN 图塔
+    ├── sequence.py   # SASRec 序列塔
+    ├── fusion.py     # 融合 MLP
+    └── ranker.py     # TemporalHybridRanker 对外接口
 ```
 
 对外接口保持稳定：
@@ -53,7 +54,8 @@ probs = ranker.predict_batch(queries)
         │       └── 正样本 + 负采样候选
         │
         └── validation tail
-                └── 本地 MRR
+                ├── 本地 AP
+                └── 本地 MRR 诊断
 ```
 
 监督样本第一个候选固定为真实目标：
@@ -68,7 +70,13 @@ probs = ranker.predict_batch(queries)
 loss = -log_softmax(logits, dim=1)[:, 0].mean()
 ```
 
-验证指标是 MRR：
+默认验证选择指标是 AP，对齐官方 CRAFT baseline 的 early stopping 口径；融合 MLP 的 early stop patience 默认为 10。MRR 继续保留为比赛指标诊断：
+
+```text
+AP = average_precision_score(flat_labels, flat_scores)
+```
+
+MRR 计算方式：
 
 ```text
 rank = 1 + count(score_negative > score_positive)
@@ -88,11 +96,11 @@ MRR = mean(1 / rank)
 
 当前训练三个时间窗口：
 
-| 特征名       | 边窗口       | 目的         |
-| ------------ | ------------ | ------------ |
-| `gnn_full`   | 全量历史边   | 长期协同过滤 |
-| `gnn_recent` | 最近 35% 边  | 近期偏好     |
-| `gnn_short`  | 最近 10% 边  | 短期趋势     |
+| 特征名       | 边窗口      | 目的         |
+| ------------ | ----------- | ------------ |
+| `gnn_full`   | 全量历史边  | 长期协同过滤 |
+| `gnn_recent` | 最近 35% 边 | 近期偏好     |
+| `gnn_short`  | 最近 10% 边 | 短期趋势     |
 
 每个窗口输出：
 
@@ -156,24 +164,24 @@ feature_dim -> hidden_dim -> hidden_dim/2 -> 1
 - `stats_gnn`
 - `stats_gnn_seq`
 
-最终使用本地验证 MRR 最高的一组。若验证选择 `stats`，最终全量拟合阶段会跳过图塔和序列塔训练，避免未收敛图特征拖慢并拖垮提交结果。
+最终默认使用本地验证 AP 最高的一组。若验证选择 `stats`，最终全量拟合阶段会跳过图塔和序列塔训练，避免未收敛图特征拖慢并拖垮提交结果。
 
 ## 关键参数
 
-| 参数                    | 默认值     | 说明                         |
-| ----------------------- | ---------- | ---------------------------- |
-| `--gnn-model`           | `xsimgcl`  | 图塔模型，可选 `lightgcn`    |
-| `--gnn-embedding-dim`   | `128`      | 图 embedding 维度            |
-| `--gnn-layers`          | `2`        | 图传播层数                   |
-| `--gnn-epochs`          | `3`        | 每个图窗口训练轮数           |
-| `--gnn-max-graph-edges` | `0`        | 每个图窗口最多建图边数       |
-| `--gnn-max-train-edges` | `40000`    | 每轮图训练采样边数           |
-| `--seq-epochs`          | `3`        | SASRec 训练轮数              |
-| `--seq-max-samples`     | `50000`    | SASRec 最多训练样本          |
-| `--seq-max-len`         | `64`       | 源节点历史序列长度           |
-| `--seq-hidden-size`     | `128`      | SASRec hidden size           |
-| `--fusion-hidden-dim`   | `64`       | 最终 MLP hidden width        |
-| `--max-fit-events`      | `0`        | 训练历史尾部截断，0 表示全量 |
+| 参数                    | 默认值    | 说明                         |
+| ----------------------- | --------- | ---------------------------- |
+| `--gnn-model`           | `xsimgcl` | 图塔模型，可选 `lightgcn`    |
+| `--gnn-embedding-dim`   | `128`     | 图 embedding 维度            |
+| `--gnn-layers`          | `2`       | 图传播层数                   |
+| `--gnn-epochs`          | `3`       | 每个图窗口训练轮数           |
+| `--gnn-max-graph-edges` | `0`       | 每个图窗口最多建图边数       |
+| `--gnn-max-train-edges` | `40000`   | 每轮图训练采样边数           |
+| `--seq-epochs`          | `3`       | SASRec 训练轮数              |
+| `--seq-max-samples`     | `50000`   | SASRec 最多训练样本          |
+| `--seq-max-len`         | `64`      | 源节点历史序列长度           |
+| `--seq-hidden-size`     | `128`     | SASRec hidden size           |
+| `--fusion-hidden-dim`   | `64`      | 最终 MLP hidden width        |
+| `--max-fit-events`      | `0`       | 训练历史尾部截断，0 表示全量 |
 
 ## 当前取舍
 
@@ -191,4 +199,4 @@ feature_dim -> hidden_dim -> hidden_dim/2 -> 1
 - `LightGCN + SASRec + stats + MLP`
 - `XSimGCL + SASRec + stats + MLP`
 
-需要同时记录本地 MRR、训练耗时、推理耗时和输出校验结果。性能与质量数据统一写入 [性能基准](performance.md)。
+需要同时记录本地 AP、本地 MRR、训练耗时、推理耗时和输出校验结果。性能与质量数据统一写入 [性能基准](performance.md)。

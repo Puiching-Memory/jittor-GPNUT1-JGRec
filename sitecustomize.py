@@ -2,6 +2,7 @@ import os
 import shutil
 import stat
 import sys
+import time
 from pathlib import Path
 
 
@@ -34,11 +35,14 @@ def _find_package_dir(*parts):
 
 
 def _link_child(src, dst, replace_symlink=False):
-    if dst.exists() or dst.is_symlink():
-        if dst.is_symlink() and replace_symlink:
-            dst.unlink()
-        else:
-            return
+    try:
+        if dst.exists() or dst.is_symlink():
+            if dst.is_symlink() and replace_symlink:
+                dst.unlink(missing_ok=True)
+            else:
+                return
+    except FileNotFoundError:
+        pass
     dst.symlink_to(src, target_is_directory=src.is_dir())
 
 
@@ -88,6 +92,41 @@ def _create_cuda_overlay(nvcc, cudnn_dir):
     _prepend_path_env("LD_LIBRARY_PATH", overlay_lib)
 
 
+def _overlay_is_complete(overlay):
+    include = overlay / "include"
+    lib = overlay / "lib64"
+    return (
+        (include / "cudnn.h").exists()
+        and (include / "cudnn_cnn_infer_v8.h").exists()
+        and (lib / "libcudnn.so").exists()
+    )
+
+
+def _with_file_lock(lock_path, callback):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + 30.0
+    fd = None
+    while fd is None:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+        except FileExistsError:
+            if time.monotonic() > deadline:
+                try:
+                    lock_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
+            time.sleep(0.05)
+    try:
+        return callback()
+    finally:
+        os.close(fd)
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 if "python_config_path" not in os.environ:
     version = f"{sys.version_info.major}.{sys.version_info.minor}"
     names = (f"python{version}-config", "python3-config")
@@ -133,6 +172,24 @@ if "nvcc_path" not in os.environ:
             Path("/usr/include/cudnn.h"),
         )
         if cudnn_dir and (cudnn_dir / "include" / "cudnn.h").exists():
-            _create_cuda_overlay(nvcc, cudnn_dir)
+            overlay = Path(sys.prefix) / "jittor_nv126_overlay"
+            if not _overlay_is_complete(overlay):
+                _with_file_lock(overlay.with_suffix(".lock"), lambda: _create_cuda_overlay(nvcc, cudnn_dir))
+            if _overlay_is_complete(overlay):
+                overlay_bin = overlay / "bin"
+                overlay_include = overlay / "include"
+                overlay_lib = overlay / "lib64"
+                os.environ["nvcc_path"] = str(overlay_bin / "nvcc")
+                os.environ.setdefault("CUDA_HOME", str(overlay))
+                os.environ.setdefault("CUDA_PATH", str(overlay))
+                os.environ.setdefault("JITTOR_CUDA126_OVERLAY", str(overlay))
+                for name in ("PATH", "CPATH", "LIBRARY_PATH", "LD_LIBRARY_PATH"):
+                    _drop_cuda_path_env(name)
+                _prepend_path_env("PATH", overlay_bin)
+                _prepend_path_env("CPATH", overlay_include)
+                _prepend_path_env("LIBRARY_PATH", overlay_lib)
+                _prepend_path_env("LD_LIBRARY_PATH", overlay_lib)
+            else:
+                os.environ["nvcc_path"] = ""
         elif not any(candidate.exists() for candidate in cudnn_candidates):
             os.environ["nvcc_path"] = ""

@@ -4,18 +4,18 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from .data import Interaction, TestQuery
+from jgrec.core.types import FitContext, Interaction, TestQuery, TrainingReport
 from .gnn import GRAPH_WINDOW_NAMES, GraphTower, GraphTowerConfig
-from .idmap import NodeIdMap
-from .logging import log
-from .reranker import FusionConfig, FusionMLP, FusionResult, fit_fusion_mlp, predict_logits
+from jgrec.idmap import NodeIdMap
+from jgrec.logging import log
+from .fusion import FusionConfig, FusionMLP, FusionResult, fit_fusion_mlp, predict_logits
 from .sequence import SEQUENCE_FEATURE_NAMES, SequenceTower, SequenceTowerConfig
 from .stats import STAT_FEATURE_NAMES, TemporalStats
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    val_ratio: float = 0.10
+    val_ratio: float = 0.15
     context_ratio: float = 0.75
     max_train_events: int = 20_000
     max_val_events: int = 5_000
@@ -25,6 +25,8 @@ class TrainingConfig:
     train_batch_size: int = 512
     lr: float = 0.001
     weight_decay: float = 0.0
+    selection_metric: str = "ap"
+    early_stop_patience: int = 10
     seed: int = 42
     verbose: bool = True
     gnn_enabled: bool = True
@@ -87,17 +89,9 @@ class TrainingConfig:
             lr=self.lr,
             weight_decay=self.weight_decay,
             hidden_dim=self.fusion_hidden_dim,
+            selection_metric=self.selection_metric,
+            early_stop_patience=self.early_stop_patience,
         )
-
-
-@dataclass(frozen=True)
-class TrainingReport:
-    train_events: int
-    val_events: int
-    best_val_mrr: float
-    weights: tuple[float, ...] = ()
-    feature_names: tuple[str, ...] = ()
-    selected_fusion: str = ""
 
 
 class HybridFeatureEncoder:
@@ -233,9 +227,11 @@ class TemporalHybridRanker:
         report = TrainingReport(
             train_events=len(train_queries),
             val_events=len(val_queries),
+            best_val_ap=result.best_val_ap,
             best_val_mrr=result.best_val_mrr,
             feature_names=tuple(self.feature_names[idx] for idx in result.feature_indices),
             selected_fusion=result.candidate_name,
+            model_name="hybrid",
         )
         return fusion, result, report
 
@@ -261,14 +257,23 @@ class TemporalHybridRanker:
                 feature_indices=indices,
                 candidate_name=name,
             )
-            log(f"[fusion-select] candidate={name} val_mrr={result.best_val_mrr:.5f}", enabled=verbose)
-            if best_result is None or result.best_val_mrr >= best_result.best_val_mrr:
+            selected_score = _selected_report_metric(result, config.selection_metric)
+            log(
+                f"[fusion-select] candidate={name} "
+                f"val_ap={result.best_val_ap:.5f} val_mrr={result.best_val_mrr:.5f}",
+                enabled=verbose,
+            )
+            if best_result is None or selected_score >= _selected_report_metric(best_result, config.selection_metric):
                 best_model = model
                 best_result = result
 
         if best_model is None or best_result is None:
             raise RuntimeError("no fusion candidate was trained")
-        log(f"[fusion-select] chosen={best_result.candidate_name} best_mrr={best_result.best_val_mrr:.5f}", enabled=verbose)
+        log(
+            f"[fusion-select] chosen={best_result.candidate_name} "
+            f"best_ap={best_result.best_val_ap:.5f} best_mrr={best_result.best_val_mrr:.5f}",
+            enabled=verbose,
+        )
         return best_model, best_result
 
     def _fit_encoder(
@@ -318,6 +323,15 @@ def _feature_masks(feature_count: int) -> list[tuple[str, tuple[int, ...]]]:
         seen.add(indices)
         unique.append((name, indices))
     return unique
+
+
+def _selected_report_metric(result: FusionResult, metric: str) -> float:
+    normalized = metric.lower()
+    if normalized == "ap":
+        return result.best_val_ap
+    if normalized == "mrr":
+        return result.best_val_mrr
+    raise ValueError(f"unsupported fusion selection metric: {metric}")
 
 
 def _config_for_selected_features(config: TrainingConfig, feature_indices: tuple[int, ...]) -> TrainingConfig:
@@ -384,3 +398,23 @@ def _sample_negatives(
     if len(negatives) < num_negatives:
         negatives.extend([positive_dst] * (num_negatives - len(negatives)))
     return tuple(negatives)
+
+
+class HybridRankerAdapter:
+    name = "hybrid"
+
+    def __init__(self, config: TrainingConfig | None = None, recent_window: int = 32) -> None:
+        self.config = config or TrainingConfig()
+        self.recent_window = recent_window
+        self.impl = TemporalHybridRanker(recent_window=recent_window)
+
+    def fit(self, interactions: list[Interaction], context: FitContext) -> TrainingReport:
+        config = replace(
+            self.config,
+            seed=context.seed,
+            verbose=context.verbose,
+        )
+        return self.impl.fit(interactions, training_config=config)
+
+    def predict_batch(self, queries: list[TestQuery]) -> np.ndarray:
+        return self.impl.predict_batch(queries)

@@ -6,9 +6,9 @@ import jittor as jt
 import numpy as np
 from jittor_geometric.nn.models import LightGCN, XSimGCL
 
-from .data import Interaction, TestQuery
-from .idmap import NodeIdMap
-from .logging import log, track
+from jgrec.core.types import Interaction, TestQuery
+from jgrec.idmap import NodeIdMap
+from jgrec.logging import log, track
 
 
 GRAPH_WINDOW_NAMES = ("gnn_full", "gnn_recent", "gnn_short")

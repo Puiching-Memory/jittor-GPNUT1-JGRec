@@ -4,8 +4,9 @@ from dataclasses import dataclass
 
 import jittor as jt
 import numpy as np
+from sklearn.metrics import average_precision_score
 
-from .logging import log, track
+from jgrec.logging import log, track
 
 
 @dataclass(frozen=True)
@@ -15,10 +16,13 @@ class FusionConfig:
     lr: float = 0.001
     weight_decay: float = 0.0
     hidden_dim: int = 64
+    selection_metric: str = "ap"
+    early_stop_patience: int = 10
 
 
 @dataclass(frozen=True)
 class FusionResult:
+    best_val_ap: float
     best_val_mrr: float
     state: dict[str, np.ndarray]
     mean: np.ndarray
@@ -60,13 +64,18 @@ def fit_fusion_mlp(
     mean, std = _feature_normalizer(train_features)
     train_x = _normalize(train_features, mean, std)
     val_x = _normalize(val_features, mean, std)
+    selection_metric = config.selection_metric.lower()
+    if selection_metric not in {"ap", "mrr"}:
+        raise ValueError(f"unsupported fusion selection metric: {config.selection_metric}")
 
     model = FusionMLP(input_dim=input_dim, hidden_dim=config.hidden_dim)
     optimizer = jt.nn.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
 
-    best_mrr = _mrr_from_model(model, val_x)
+    best_ap, best_mrr = _metrics_from_model(model, val_x)
+    best_score = _selected_metric(best_ap, best_mrr, selection_metric)
     best_state = _snapshot_state(model)
     train_size = train_x.shape[0]
+    patience_counter = 0
 
     epochs = range(1, config.epochs + 1)
     for epoch in track(epochs, description=f"fusion:{candidate_name}", total=config.epochs, enabled=verbose):
@@ -82,21 +91,32 @@ def fit_fusion_mlp(
             optimizer.step(loss)
             losses.append(float(loss.item()))
 
-        val_mrr = _mrr_from_model(model, val_x)
-        if val_mrr >= best_mrr:
+        val_ap, val_mrr = _metrics_from_model(model, val_x)
+        val_score = _selected_metric(val_ap, val_mrr, selection_metric)
+        if val_score >= best_score:
+            best_ap = val_ap
             best_mrr = val_mrr
+            best_score = val_score
             best_state = _snapshot_state(model)
+            patience_counter = 0
+        else:
+            patience_counter += 1
         mean_loss = float(np.mean(losses)) if losses else 0.0
         log(
             f"[fusion:{candidate_name}] epoch={epoch} loss={mean_loss:.5f} "
-            f"val_mrr={val_mrr:.5f} best={best_mrr:.5f}",
+            f"val_ap={val_ap:.5f} val_mrr={val_mrr:.5f} "
+            f"best_{selection_metric}={best_score:.5f} patience={patience_counter}",
             enabled=verbose,
         )
+        if config.early_stop_patience > 0 and patience_counter >= config.early_stop_patience:
+            log(f"[fusion:{candidate_name}] early_stop epoch={epoch}", enabled=verbose)
+            break
 
     _load_state(model, best_state)
     if feature_indices is None:
         feature_indices = tuple(range(input_dim))
     return model, FusionResult(
+        best_val_ap=float(best_ap),
         best_val_mrr=float(best_mrr),
         state=best_state,
         mean=mean,
@@ -134,9 +154,33 @@ def _normalize(features: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.nd
 def _mrr_from_model(model: FusionMLP, features: np.ndarray) -> float:
     with jt.no_grad():
         scores = np.asarray(model(jt.array(features, dtype=jt.float32)).numpy(), dtype=np.float32)
+    return _mrr_from_scores(scores)
+
+
+def _metrics_from_model(model: FusionMLP, features: np.ndarray) -> tuple[float, float]:
+    with jt.no_grad():
+        scores = np.asarray(model(jt.array(features, dtype=jt.float32)).numpy(), dtype=np.float32)
+    return _ap_from_scores(scores), _mrr_from_scores(scores)
+
+
+def _ap_from_scores(scores: np.ndarray) -> float:
+    labels = np.zeros(scores.shape, dtype=np.int8)
+    labels[:, 0] = 1
+    return float(average_precision_score(labels.ravel(), scores.ravel()))
+
+
+def _mrr_from_scores(scores: np.ndarray) -> float:
     positive_scores = scores[:, 0:1]
     ranks = 1 + (scores[:, 1:] > positive_scores).sum(axis=1)
     return float(np.mean(1.0 / ranks))
+
+
+def _selected_metric(ap: float, mrr: float, metric: str) -> float:
+    if metric == "ap":
+        return ap
+    if metric == "mrr":
+        return mrr
+    raise ValueError(f"unsupported fusion selection metric: {metric}")
 
 
 def _snapshot_state(model: FusionMLP) -> dict[str, np.ndarray]:

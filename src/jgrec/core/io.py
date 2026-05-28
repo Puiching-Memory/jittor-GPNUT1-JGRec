@@ -1,31 +1,10 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-
-@dataclass(frozen=True)
-class Interaction:
-    src: int
-    dst: int
-    time: int
-
-
-@dataclass(frozen=True)
-class TestQuery:
-    src: int
-    time: int
-    candidates: tuple[int, ...]
-
-
-@dataclass(frozen=True)
-class DatasetPaths:
-    name: str
-    root: Path
-    train_path: Path
-    test_path: Path
+from .types import DatasetPaths, Interaction, TestQuery
 
 
 def discover_datasets(data_dir: Path) -> list[DatasetPaths]:
@@ -90,3 +69,4 @@ def read_test_queries(path: Path) -> Iterable[TestQuery]:
 def count_csv_data_rows(path: Path) -> int:
     with path.open("r", newline="") as f:
         return max(sum(1 for _ in f) - 1, 0)
+

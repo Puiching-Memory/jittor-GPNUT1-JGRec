@@ -7,9 +7,9 @@ import jittor as jt
 import numpy as np
 from jittor_geometric.nn.models.sasrec import SASRec
 
-from .data import Interaction, TestQuery
-from .idmap import NodeIdMap
-from .logging import log, track
+from jgrec.core.types import Interaction, TestQuery
+from jgrec.idmap import NodeIdMap
+from jgrec.logging import log, track
 
 
 SEQUENCE_FEATURE_NAMES = ("sasrec_score",)

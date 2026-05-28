@@ -9,6 +9,14 @@ uv sync
 uv run jgrec-build
 ```
 
+选择模型后端：
+
+```bash
+uv run jgrec-build --model hybrid       # 当前默认模型
+uv run jgrec-build --model craft        # 官方 CRAFT baseline 适配器
+uv run jgrec-build --model third_party  # 多尺度统计/结构特征重排器
+```
+
 输出文件：
 
 ```text
@@ -23,6 +31,12 @@ result/<run_id>/
 
 ```bash
 uv run jgrec-build --limit-rows 100
+```
+
+运行单元测试：
+
+```bash
+uv run --group dev pytest
 ```
 
 CPU 环境：
@@ -57,6 +71,8 @@ uv run zensical serve
 
 ## Current Model
 
-当前模型位于 `src/jgrec/model.py`。它使用因果时间切分训练 JittorGeometric XSimGCL/LightGCN 图塔、SASRec 序列塔和时序统计特征，并用 Jittor MLP 在候选集内做 softmax 重排序。
+当前默认模型位于 `src/jgrec/rankers/hybrid/`。它使用因果时间切分训练 JittorGeometric XSimGCL/LightGCN 图塔、SASRec 序列塔和时序统计特征，并用 Jittor MLP 在候选集内做 softmax 重排序。
+
+统一入口还支持 `src/jgrec/rankers/craft/` 中的 CRAFT baseline 适配器，以及 `src/jgrec/rankers/third_party/` 中根据 `architecture.md` 落地的多尺度统计/结构特征重排器。
 
 CLI 使用 Rich 展示运行配置、训练进度和结果表格；`--quiet-ranker` 可隐藏训练细节。

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .data import Interaction
+from .core.types import Interaction
 
 
 @dataclass(frozen=True)

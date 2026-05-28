@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .data import Interaction, TestQuery
+from jgrec.core.types import Interaction, TestQuery
 
 
 STAT_FEATURE_NAMES = (

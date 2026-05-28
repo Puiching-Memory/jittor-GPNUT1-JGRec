@@ -39,8 +39,16 @@ uv sync --group dev
 uv run jgrec-build
 ```
 
-默认会为每个数据集做一次时间切分训练，训练 XSimGCL 图塔、SASRec 序列塔和融合 MLP，并打印本地验证 MRR。
+默认会为每个数据集做一次时间切分训练，训练 XSimGCL 图塔、SASRec 序列塔和融合 MLP；验证协议对齐官方 baseline，使用 train.csv 尾部 15% 做验证，融合早停和特征组选择默认看 AP，同时打印 MRR 作为诊断指标。
 CLI 使用 Rich 输出运行面板、训练进度和结果表格；提交文件仍只写入 `result/`，终端样式不会影响 CSV/ZIP 内容。
+
+模型后端通过 `--model` 选择：
+
+```bash
+uv run jgrec-build --model hybrid
+uv run jgrec-build --model craft
+uv run jgrec-build --model third_party
+```
 
 默认输出：
 
@@ -57,8 +65,10 @@ result/<run_id>/
 默认规则：
 
 ```text
-rw{recent_window}-bs{batch_size}-vr{val_ratio}-cr{context_ratio}-tr{max_train_events}-va{max_val_events}-neg{num_negatives}-fit{max_fit_events}-ep{epochs}-tbs{train_batch_size}-lr{lr}-wd{weight_decay}-fh{fusion_hidden_dim}-gnn{gnn_model}-ge{gnn_epochs}-gd{gnn_embedding_dim}-gl{gnn_layers}-gmge{gnn_max_graph_edges}-gmte{gnn_max_train_edges}-seq{on|off}-se{seq_epochs}-sd{seq_hidden_size}-sl{seq_max_len}-s{seed}
+model{model}-rw{recent_window}-bs{batch_size}-vr{val_ratio}-tr{max_train_events}-va{max_val_events}-neg{num_negatives}-ep{epochs}-tbs{train_batch_size}-lr{lr}-s{seed}
 ```
+
+`hybrid` 后端会额外追加图塔、序列塔和 `max_fit_events` 相关字段。
 
 如果使用 `--limit-rows` 或 `--cpu`，会追加 `limit{N}` 或 `cpu` 后缀。浮点数中的 `.` 会转换为 `p`，例如 `0.05` 写作 `0p05`。
 
@@ -78,6 +88,12 @@ uv run jgrec-build --limit-rows 2 --max-fit-events 512 --max-train-events 32 --m
 uv run jgrec-build --limit-rows 100 --max-fit-events 2048 --max-train-events 256 --max-val-events 128 --epochs 1 --disable-gnn --disable-seq --quiet-ranker
 ```
 
+验证第三方统计/结构重排器：
+
+```bash
+uv run jgrec-build --model third_party --limit-rows 2 --max-train-events 32 --max-val-events 16 --num-negatives 3 --epochs 1 --train-batch-size 8 --fusion-hidden-dim 8 --batch-size 2 --quiet-ranker --cpu
+```
+
 并行调参时必须使用不同参数组合，使生成的 `<run_id>` 不同；相同参数组合会写入同一个运行目录。
 
 ## CPU 运行
@@ -90,32 +106,35 @@ uv run jgrec-build --cpu
 
 ## 常用参数
 
-| 参数                  |       默认值 | 说明                                 |
-| --------------------- | -----------: | ------------------------------------ |
-| `--data-dir`          |       `data` | 数据根目录                           |
-| `--recent-window`     |         `32` | 每个源节点保留的最近目标节点数量     |
-| `--batch-size`        |       `2048` | 每次送入 Jittor 的测试查询数         |
-| `--limit-rows`        |           无 | 每个数据集最多输出的测试行数         |
-| `--val-ratio`         |       `0.10` | `train.csv` 尾部验证比例             |
-| `--context-ratio`     |       `0.75` | 用于训练监督样本的因果上下文比例     |
-| `--max-train-events`  |      `20000` | 每个数据集最多训练监督事件           |
-| `--max-val-events`    |       `5000` | 每个数据集最多验证事件               |
-| `--num-negatives`     |         `31` | 每个正样本采样负候选数               |
-| `--max-fit-events`    |          `0` | 模型训练历史尾部截断，0 表示全量     |
-| `--epochs`            |          `5` | 融合 MLP 训练轮数                    |
-| `--train-batch-size`  |        `512` | 融合 MLP 训练 batch size             |
-| `--lr`                |      `0.001` | SASRec 和融合 MLP 学习率             |
-| `--gnn-model`         |    `xsimgcl` | 图塔模型，可选 `lightgcn`            |
-| `--gnn-epochs`        |          `3` | 每个图窗口训练轮数                   |
-| `--gnn-max-train-edges` |      `40000` | 每轮图训练采样边数                 |
-| `--seq-epochs`        |          `3` | SASRec 训练轮数                      |
-| `--seq-max-samples`   |      `50000` | SASRec 最多训练样本                  |
-| `--disable-gnn`       |         关闭 | 禁用图塔                             |
-| `--disable-seq`       |         关闭 | 禁用序列塔                           |
-| `--seed`              |         `42` | 采样随机种子                         |
-| `--quiet-ranker`      |         关闭 | 隐藏训练 epoch 进度和细节日志        |
-| `--cpu`               |         关闭 | 禁用 CUDA                            |
-| `--skip-validate`     |         关闭 | 跳过输出格式校验                     |
+| 参数                    |    默认值 | 说明                             |
+| ----------------------- | --------: | -------------------------------- |
+| `--model`               |  `hybrid` | 模型后端：`hybrid`、`craft`、`third_party` |
+| `--data-dir`            |    `data` | 数据根目录                       |
+| `--recent-window`       |      `32` | 每个源节点保留的最近目标节点数量 |
+| `--batch-size`          |    `2048` | 每次送入 Jittor 的测试查询数     |
+| `--limit-rows`          |        无 | 每个数据集最多输出的测试行数     |
+| `--val-ratio`           |    `0.15` | `train.csv` 尾部验证比例         |
+| `--context-ratio`       |    `0.75` | 用于训练监督样本的因果上下文比例 |
+| `--max-train-events`    |   `20000` | 每个数据集最多训练监督事件       |
+| `--max-val-events`      |    `5000` | 每个数据集最多验证事件           |
+| `--num-negatives`       |      `31` | 每个正样本采样负候选数           |
+| `--max-fit-events`      |       `0` | 模型训练历史尾部截断，0 表示全量 |
+| `--epochs`              |       `5` | 融合 MLP 训练轮数                |
+| `--train-batch-size`    |     `512` | 融合 MLP 训练 batch size         |
+| `--lr`                  |   `0.001` | SASRec 和融合 MLP 学习率         |
+| `--selection-metric`    |      `ap` | 融合早停和特征组选择指标         |
+| `--early-stop`          |      `10` | 融合早停 patience，0 表示关闭    |
+| `--gnn-model`           | `xsimgcl` | 图塔模型，可选 `lightgcn`        |
+| `--gnn-epochs`          |       `3` | 每个图窗口训练轮数               |
+| `--gnn-max-train-edges` |   `40000` | 每轮图训练采样边数               |
+| `--seq-epochs`          |       `3` | SASRec 训练轮数                  |
+| `--seq-max-samples`     |   `50000` | SASRec 最多训练样本              |
+| `--disable-gnn`         |      关闭 | 禁用图塔                         |
+| `--disable-seq`         |      关闭 | 禁用序列塔                       |
+| `--seed`                |      `42` | 采样随机种子                     |
+| `--quiet-ranker`        |      关闭 | 隐藏训练 epoch 进度和细节日志    |
+| `--cpu`                 |      关闭 | 禁用 CUDA                        |
+| `--skip-validate`       |      关闭 | 跳过输出格式校验                 |
 
 ## 输出校验
 
@@ -147,8 +166,8 @@ PY
 
 完整生成后：
 
-| 文件                  |   行数 |
-| --------------------- | -----: |
+| 文件                               |   行数 |
+| ---------------------------------- | -----: |
 | `result/<run_id>/csv/dataset1.csv` |  61051 |
 | `result/<run_id>/csv/dataset2.csv` | 153420 |
 
