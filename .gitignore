@@ -10,4 +10,5 @@ result/
 .cache/
 .coverage*
 .pytest_cache/
+.ruff_cache/
 htmlcov/

@@ -11,7 +11,6 @@ from jgrec.core.types import Interaction, TestQuery
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log, track
 
-
 SEQUENCE_FEATURE_NAMES = ("sasrec_score",)
 
 

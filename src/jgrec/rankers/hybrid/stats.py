@@ -8,7 +8,6 @@ import numpy as np
 
 from jgrec.core.types import Interaction, TestQuery
 
-
 STAT_FEATURE_NAMES = (
     "pair_strength",
     "repeat_rate",

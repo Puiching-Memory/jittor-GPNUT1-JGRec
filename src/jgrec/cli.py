@@ -17,7 +17,6 @@ from .rankers.registry import create_ranker
 from .rankers.third_party import ThirdPartyRankerConfig
 from .submission import expected_test_rows, validate_submission_file, write_zip
 
-
 ModelName = Literal["hybrid", "craft", "third_party"]
 SelectionMetric = Literal["ap", "mrr"]
 GNNModel = Literal["xsimgcl", "lightgcn"]

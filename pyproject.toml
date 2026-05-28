@@ -34,8 +34,30 @@ build-backend = "setuptools.build_meta"
 dev = [
 	"pytest>=8.3",
 	"pytest-cov>=6.0",
-    "zensical>=0.0.43",
+	"ruff>=0.8.0",
+	"zensical>=0.0.43",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests", "scripts"]
+extend-exclude = [
+	".cache",
+	"data",
+	"result",
+	"site",
+	"third_party",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
 
 [tool.pytest.ini_options]
 minversion = "8.0"

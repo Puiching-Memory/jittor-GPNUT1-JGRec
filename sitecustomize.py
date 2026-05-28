@@ -5,7 +5,6 @@ import sys
 import time
 from pathlib import Path
 
-
 os.environ.setdefault("JITTOR_HOME", str(Path(sys.prefix) / "jittor_home"))
 
 

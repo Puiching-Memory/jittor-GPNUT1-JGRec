@@ -3,7 +3,8 @@ import csv
 import pytest
 
 from jgrec.core.io import count_csv_data_rows, discover_datasets, read_interactions, read_test_queries
-from jgrec.core.types import Interaction, TestQuery as Query
+from jgrec.core.types import Interaction
+from jgrec.core.types import TestQuery as Query
 
 
 def _candidate_header(count: int = 100) -> list[str]:

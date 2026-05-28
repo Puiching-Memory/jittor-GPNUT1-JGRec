@@ -10,7 +10,6 @@ from jgrec.core.types import Interaction, TestQuery
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log, track
 
-
 GRAPH_WINDOW_NAMES = ("gnn_full", "gnn_recent", "gnn_short")
 GRAPH_WINDOW_FRACTIONS = (1.0, 0.35, 0.10)
 

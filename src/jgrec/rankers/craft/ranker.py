@@ -14,6 +14,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 from jgrec.core.io import read_test_queries
 from jgrec.core.types import FitContext, Interaction, TestQuery, TrainingReport
 from jgrec.logging import log, track
+
 from .config import CRAFTBaselineConfig
 
 

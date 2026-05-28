@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 from .types import DatasetPaths, Interaction, TestQuery
 

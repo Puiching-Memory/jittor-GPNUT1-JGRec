@@ -3,7 +3,8 @@ import csv
 import numpy as np
 
 from jgrec.core.runner import build_dataset_submission
-from jgrec.core.types import DatasetPaths, FitContext, Interaction, TestQuery as Query, TrainingReport
+from jgrec.core.types import DatasetPaths, FitContext, Interaction, TrainingReport
+from jgrec.core.types import TestQuery as Query
 from jgrec.submission import validate_submission_file
 
 

@@ -5,10 +5,11 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from jgrec.core.types import FitContext, Interaction, TestQuery, TrainingReport
-from .gnn import GRAPH_WINDOW_NAMES, GraphTower, GraphTowerConfig
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log
+
 from .fusion import FusionConfig, FusionMLP, FusionResult, fit_fusion_mlp, predict_logits
+from .gnn import GRAPH_WINDOW_NAMES, GraphTower, GraphTowerConfig
 from .sequence import SEQUENCE_FEATURE_NAMES, SequenceTower, SequenceTowerConfig
 from .stats import STAT_FEATURE_NAMES, TemporalStats
 

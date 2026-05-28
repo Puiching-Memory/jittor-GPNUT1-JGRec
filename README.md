@@ -39,6 +39,12 @@ uv run jgrec-build --limit-rows 100
 uv run --group dev pytest
 ```
 
+运行 Ruff 检查：
+
+```bash
+uv run --group dev ruff check .
+```
+
 CPU 环境：
 
 ```bash
