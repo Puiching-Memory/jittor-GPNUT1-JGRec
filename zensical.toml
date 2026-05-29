@@ -5,17 +5,35 @@ site_author = "jittor-GPNUT1-JGRec contributors"
 docs_dir = "docs"
 site_dir = "site"
 copyright = "Copyright &copy; 2026 jittor-GPNUT1-JGRec contributors"
+extra_javascript = [
+  "assets/javascripts/mathjax.js",
+  "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js",
+  "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js",
+  "assets/javascripts/mermaid-init.js",
+]
 
 nav = [
   { "首页" = "index.md" },
-  { "运行手册" = "runbook.md" },
-  { "系统架构" = "architecture.md" },
-  { "数据契约" = "data-contract.md" },
-  { "模型方案" = "modeling.md" },
-  { "性能基准" = "performance.md" },
-  { "开发规范" = "development.md" },
-  { "赛道一：动态推荐任务" = "赛道一：基于图学习的动态推荐任务.md" },
-  { "开源参考项目" = "开源参考项目.md" },
+  { "任务与数据" = [
+    { "赛题说明" = "task/competition.md" },
+    { "数据契约" = "task/data-contract.md" },
+    { "当前数据画像" = "task/data-profile.md" },
+  ] },
+  { "系统与模型" = [
+    { "系统架构" = "system/architecture.md" },
+    { "模型设计" = "system/modeling.md" },
+  ] },
+  { "运行与开发" = [
+    { "运行手册" = "operations/runbook.md" },
+    { "开发规范" = "operations/development.md" },
+  ] },
+  { "实验与研究" = [
+    { "实验与基准" = "experiments/benchmarks.md" },
+    { "研究问题综述" = "research/problem-overview.md" },
+    { "GNN 推荐论文调研" = "research/gnn-survey.md" },
+    { "推荐系统论文调研归档" = "research/recommender-survey.md" },
+    { "开源参考" = "research/open-source-references.md" },
+  ] },
 ]
 
 [project.theme]
@@ -53,6 +71,9 @@ logo = "lucide/network"
 [project.markdown_extensions.toc]
 permalink = true
 
+[project.markdown_extensions.pymdownx.arithmatex]
+generic = true
+
 [project.markdown_extensions.pymdownx.highlight]
 anchor_linenums = true
 line_spans = "__span"
@@ -60,5 +81,8 @@ pygments_lang_class = true
 
 [project.markdown_extensions.pymdownx.inlinehilite]
 [project.markdown_extensions.pymdownx.superfences]
+custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_div_format" },
+]
 [project.markdown_extensions.pymdownx.tasklist]
 custom_checkbox = true

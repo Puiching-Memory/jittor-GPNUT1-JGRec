@@ -1,31 +1,46 @@
-# jittor-GPNUT1-JGRec 工程文档
+# jittor-GPNUT1-JGRec 文档
 
-本文档面向正式赛工程实现，不再按零散资料平铺，而是按“怎么运行、系统如何组织、输入输出如何约束、模型如何迭代”组织。
+本文档按问题域组织，而不是按文件产生顺序平铺。每个主题只回答一类问题，避免运行、数据、模型、实验和研究资料互相混杂。
 
-## 项目目标
+## 阅读路径
 
-本仓库当前目标是提供一个满足赛道一提交要求的端到端 MVP：
+| 目标 | 入口 |
+| --- | --- |
+| 先把提交文件跑出来 | [运行手册](operations/runbook.md) |
+| 确认输入输出格式 | [数据契约](task/data-contract.md) |
+| 理解赛题到底是什么 | [赛题说明](task/competition.md) 和 [研究问题综述](research/problem-overview.md) |
+| 判断数据适合什么模型 | [当前数据画像](task/data-profile.md) |
+| 理解代码如何串起来 | [系统架构](system/architecture.md) |
+| 理解当前模型为什么这样设计 | [模型设计](system/modeling.md) |
+| 判断一次实验能不能保留 | [实验与基准](experiments/benchmarks.md) |
+| 查找论文和外部实现线索 | [研究资料](research/gnn-survey.md) 与 [开源参考](research/open-source-references.md) |
+| 修改代码前看工程约束 | [开发规范](operations/development.md) |
 
-- 自动发现 `data/` 下的多个数据集场景。
-- 从 `train.csv` 构建图塔、序列塔和时序统计特征。
-- 对 `test.csv` 中每行 100 个候选目标节点输出概率分布。
-- 为每个数据集生成同名 CSV，并打包为 `result.zip`。
-- 使用 JittorGeometric 做图推荐/序列建模，使用 Jittor 完成候选融合和 softmax 归一化。
+## 文档分组
 
-## 文档导航
+### 任务与数据
 
-| 页面                                                | 内容                                 |
-| --------------------------------------------------- | ------------------------------------ |
-| [运行手册](runbook.md)                              | 环境、命令、输出、验证、常见问题     |
-| [系统架构](architecture.md)                         | 包结构、数据流、模块边界             |
-| [数据契约](data-contract.md)                        | 输入 CSV、输出 CSV、压缩包、校验规则 |
-| [模型方案](modeling.md)                             | 因果训练、特征、打分方式、升级路线   |
-| [性能基准](performance.md)                          | 已验证性能改进、基准方法、后续方向   |
-| [论文调研](research-survey.md)                      | 动态推荐、图推荐、序列推荐论文地图   |
-| [GNN 推荐论文调研](gnn-research-survey.md)          | 图协同过滤、图对比学习、谱图推荐主线 |
-| [开发规范](development.md)                          | 本地开发、测试、依赖、提交前检查     |
-| [赛题原文整理](赛道一：基于图学习的动态推荐任务.md) | 赛题说明、指标、提交格式             |
-| [开源参考项目](开源参考项目.md)                     | 后续建模可参考的外部项目             |
+- [赛题说明](task/competition.md)：比赛原文整理、评测指标、提交格式。
+- [数据契约](task/data-contract.md)：本工程接受的 `train.csv`、`test.csv` 和输出 CSV/ZIP 约束。
+- [当前数据画像](task/data-profile.md)：本地数据统计、候选分布、特征区分度和建模含义。
+
+### 系统与模型
+
+- [系统架构](system/architecture.md)：包结构、统一接口、数据流和扩展边界。
+- [模型设计](system/modeling.md)：当前 hybrid/craft/third_party 后端、训练流程、特征和融合方式。
+
+### 运行与开发
+
+- [运行手册](operations/runbook.md)：环境、命令、常用参数、输出校验和常见问题。
+- [开发规范](operations/development.md)：本地检查、依赖策略、代码边界和提交前检查。
+
+### 实验与研究
+
+- [实验与基准](experiments/benchmarks.md)：冠军基线、实验门禁、性能优化和复测命令。
+- [研究问题综述](research/problem-overview.md)：将赛题抽象成动态图候选重排序研究问题。
+- [GNN 推荐论文调研](research/gnn-survey.md)：图协同过滤、图对比学习、谱图和动态图方向。
+- [推荐系统论文调研归档](research/recommender-survey.md)：非 GNN 推荐、序列、排序和生成式推荐背景。
+- [开源参考](research/open-source-references.md)：本地 third_party 示例和可参考实现。
 
 ## 最短路径
 

@@ -199,4 +199,4 @@ feature_dim -> hidden_dim -> hidden_dim/2 -> 1
 - `LightGCN + SASRec + stats + MLP`
 - `XSimGCL + SASRec + stats + MLP`
 
-需要同时记录本地 AP、本地 MRR、训练耗时、推理耗时和输出校验结果。性能与质量数据统一写入 [性能基准](performance.md)。
+需要同时记录本地 AP、本地 MRR、训练耗时、推理耗时和输出校验结果。性能与质量数据统一写入 [实验与基准](../experiments/benchmarks.md)。

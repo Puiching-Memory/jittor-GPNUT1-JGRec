@@ -14,7 +14,7 @@ src/jgrec/
 │   ├── registry.py    # hybrid/craft/third_party 注册和懒加载
 │   ├── hybrid/        # 当前 XSimGCL/LightGCN + SASRec + stats + MLP
 │   ├── craft/         # 官方 CRAFT baseline 适配器
-│   ├── third_party/   # architecture.md 启发的统计/结构重排器
+│   ├── third_party/   # 多尺度统计/结构特征重排器
 │   └── common/        # 共享 MLP 融合头
 └── submission.py      # CSV/ZIP 写出和格式校验
 ```
@@ -32,11 +32,11 @@ ranker.predict_batch(queries) -> np.ndarray  # shape=(batch, 100)
 
 ## 模型后端
 
-| 后端 | CLI | 说明 |
-| ---- | --- | ---- |
-| 当前模型 | `--model hybrid` | 默认后端，XSimGCL/LightGCN 图塔、SASRec 序列塔、统计特征和 MLP 融合。 |
-| CRAFT baseline | `--model craft` | 官方 CRAFT baseline 逻辑已迁入 `rankers/craft`，接入统一提交管线。 |
-| 第三方方案 | `--model third_party` | 基于多尺度时间统计、反向边、共同邻居、cooccur/transition 特征的 MLP 重排器。当前只重排 test.csv 给定的 100 候选，不额外召回。 |
+| 后端           | CLI                   | 说明                                                                                                                          |
+| -------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 当前模型       | `--model hybrid`      | 默认后端，XSimGCL/LightGCN 图塔、SASRec 序列塔、统计特征和 MLP 融合。                                                         |
+| CRAFT baseline | `--model craft`       | 官方 CRAFT baseline 逻辑已迁入 `rankers/craft`，接入统一提交管线。                                                            |
+| 第三方方案     | `--model third_party` | 基于多尺度时间统计、反向边、共同邻居、cooccur/transition 特征的 MLP 重排器。当前只重排 test.csv 给定的 100 候选，不额外召回。 |
 
 ## 数据流
 

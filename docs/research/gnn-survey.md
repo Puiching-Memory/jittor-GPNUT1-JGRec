@@ -204,4 +204,4 @@ GNN 推荐通常用 BPR 或 sampled softmax。如果负样本太容易，图 emb
 5. 若谱图稳定，再加候选内 rank 特征。
 6. 若图特征稳定，再做 graph-hard negative sampler。
 
-所有结果写入 [性能基准](performance.md)，没有多 seed 稳定收益的改动不进入默认模型。
+所有结果写入 [实验与基准](../experiments/benchmarks.md)，没有多 seed 稳定收益的改动不进入默认模型。

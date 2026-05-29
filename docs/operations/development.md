@@ -81,7 +81,7 @@ uv sync --group dev
 uv run zensical build
 ```
 
-性能优化需要记录前后基准，统一写入 [性能基准](performance.md)。
+性能优化需要记录前后基准，统一写入 [实验与基准](../experiments/benchmarks.md)。
 
 ## 当前已知限制
 
