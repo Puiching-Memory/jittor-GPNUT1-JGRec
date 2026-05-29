@@ -67,23 +67,42 @@ u1, t1, v1, ..., v100
 
 A 榜评分公式：采用各场景预测结果的 MRR（Mean Reciprocal Rank，平均倒数排名）均值之和。如果第一个相关的结果出现在第 `k` 位，那么这个查询的得分（RR）就是 `1/k`。每个场景的 MRR 均值定义为：
 
-```text
-MRR = (1 / |Q|) * Σ(1 / rank_i)
-```
+\[
+\operatorname{RR}_i = \frac{1}{\operatorname{rank}_i},
+\qquad
+\operatorname{MRR}
+= \frac{1}{|\mathcal{Q}|}
+\sum_{i=1}^{|\mathcal{Q}|}
+\frac{1}{\operatorname{rank}_i}.
+\]
 
-B 榜评分公式：各场景预测结果的 MRR 之和 * 65% + 35% 答辩分数。
+B 榜评分由线上 MRR 和答辩共同决定：
+
+\[
+\operatorname{Score}_{B}
+= 0.65 \sum_{s \in \mathcal{S}} \operatorname{MRR}_s
++ 0.35 \operatorname{DefenseScore}.
+\]
 
 ## 提交格式说明
 
-A、B 榜每个数据集提交一个 csv 文件，所有文件打包为 `result.zip`。每个 csv 文件命名与数据集场景一致，每行包含源节点和 100 个候选节点发生交互的概率，每个概率之间以英文半角逗号（`,`）分隔，每个概率值需在 `[0, 1]` 之间，保留 8 位小数。
+A、B 榜每个数据集提交一个 csv 文件，所有文件打包为 `result.zip`。每个 csv 文件命名与数据集场景一致，每行包含源节点和 100 个候选节点发生交互的概率，每个概率之间以英文半角逗号（`,`）分隔。对任意查询 \(q\)，输出向量需要满足：
+
+\[
+\mathbf{p}_q = (p_{q,1}, \ldots, p_{q,100}),
+\qquad
+0 \le p_{q,j} \le 1.
+\]
+
+每个概率值保留 8 位小数。
 
 提交文件目录结果：
 
-```text
-result.zip
-├── dataset1.csv
-├── dataset2.csv
-└── ...
+```mermaid
+flowchart TB
+    A["result.zip"] --> B["dataset1.csv"]
+    A --> C["dataset2.csv"]
+    A --> D["..."]
 ```
 
 csv 文件格式：

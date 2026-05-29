@@ -2,21 +2,21 @@
 
 ## 包结构
 
-```text
-src/jgrec/
-├── cli.py
-├── core/
-│   ├── io.py          # 数据集发现、CSV 读取、行数统计
-│   ├── runner.py      # 统一 fit/predict/write/zip 执行管线
-│   └── types.py       # Interaction/TestQuery/FitContext/TrainingReport
-├── rankers/
-│   ├── base.py        # Ranker 协议
-│   ├── registry.py    # hybrid/craft/third_party 注册和懒加载
-│   ├── hybrid/        # 当前 XSimGCL/LightGCN + SASRec + stats + MLP
-│   ├── craft/         # 官方 CRAFT baseline 适配器
-│   ├── third_party/   # 多尺度统计/结构特征重排器
-│   └── common/        # 共享 MLP 融合头
-└── submission.py      # CSV/ZIP 写出和格式校验
+```mermaid
+flowchart TB
+    A["src/jgrec"] --> B["cli.py<br/>命令行入口"]
+    A --> C["core"]
+    C --> C1["io.py<br/>数据集发现、CSV 读取、行数统计"]
+    C --> C2["runner.py<br/>统一 fit / predict / write / zip 管线"]
+    C --> C3["types.py<br/>Interaction / TestQuery / FitContext / TrainingReport"]
+    A --> D["rankers"]
+    D --> D1["base.py<br/>Ranker 协议"]
+    D --> D2["registry.py<br/>hybrid / craft / third_party 懒加载"]
+    D --> D3["hybrid<br/>XSimGCL / LightGCN + SASRec + stats + MLP"]
+    D --> D4["craft<br/>官方 CRAFT baseline 适配器"]
+    D --> D5["third_party<br/>多尺度统计与结构特征重排器"]
+    D --> D6["common<br/>共享 MLP 融合头"]
+    A --> E["submission.py<br/>CSV / ZIP 写出和格式校验"]
 ```
 
 ## 统一接口
@@ -40,35 +40,22 @@ ranker.predict_batch(queries) -> np.ndarray  # shape=(batch, 100)
 
 ## 数据流
 
-```text
-data/dataset*/train.csv
-        │
-        ▼
-core.io.read_interactions()
-        │
-        ▼
-rankers.registry.create_ranker(--model)
-        │
-        ▼
-ranker.fit(interactions, FitContext)
-        │
-        ├── hybrid: NodeIdMap + stats + graph towers + SASRec + fusion MLP
-        ├── craft: TemporalData + neighbor sampler + CRAFT
-        └── third_party: TemporalIndexes + dense features + fusion MLP
+```mermaid
+flowchart TB
+    Train["data/dataset*/train.csv"] --> ReadTrain["core.io.read_interactions()"]
+    ReadTrain --> Create["rankers.registry.create_ranker(--model)"]
+    Create --> Fit["ranker.fit(interactions, FitContext)"]
+    Fit --> H["hybrid<br/>NodeIdMap + stats + graph towers + SASRec + fusion MLP"]
+    Fit --> C["craft<br/>TemporalData + neighbor sampler + CRAFT"]
+    Fit --> T["third_party<br/>TemporalIndexes + dense features + fusion MLP"]
 
-data/dataset*/test.csv
-        │
-        ▼
-core.io.read_test_queries()
-        │
-        ▼
-ranker.predict_batch()
-        │
-        ▼
-result/<run_id>/csv/<dataset>.csv
-        │
-        ▼
-result/<run_id>/result.zip
+    Test["data/dataset*/test.csv"] --> ReadTest["core.io.read_test_queries()"]
+    ReadTest --> Predict["ranker.predict_batch()"]
+    H --> Predict
+    C --> Predict
+    T --> Predict
+    Predict --> CSV["result/&lt;run_id&gt;/csv/&lt;dataset&gt;.csv"]
+    CSV --> ZIP["result/&lt;run_id&gt;/result.zip"]
 ```
 
 ## 运行边界

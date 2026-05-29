@@ -4,13 +4,16 @@
 
 当前实现已经从统计线性模型切换为激进的混合图推荐模型：
 
-```text
-TemporalHybridRanker =
-  因果时间切分
-  + JittorGeometric XSimGCL/LightGCN 图塔
-  + JittorGeometric SASRec 序列塔
-  + 时序统计特征
-  + Jittor MLP 候选重排序
+```mermaid
+flowchart LR
+    A["TemporalHybridRanker"] --> B["因果时间切分"]
+    B --> C["时序统计特征"]
+    B --> D["JittorGeometric<br/>XSimGCL / LightGCN 图塔"]
+    B --> E["JittorGeometric<br/>SASRec 序列塔"]
+    C --> F["Jittor MLP<br/>候选重排序"]
+    D --> F
+    E --> F
+    F --> G["查询内 100 候选概率"]
 ```
 
 目标不是做通用 link prediction，而是直接优化赛题的 100 个候选节点重排序。
@@ -19,15 +22,15 @@ TemporalHybridRanker =
 
 实现位置：
 
-```text
-src/jgrec/
-├── idmap.py
-└── rankers/hybrid/
-    ├── stats.py      # 时序统计特征
-    ├── gnn.py        # XSimGCL/LightGCN 图塔
-    ├── sequence.py   # SASRec 序列塔
-    ├── fusion.py     # 融合 MLP
-    └── ranker.py     # TemporalHybridRanker 对外接口
+```mermaid
+flowchart TB
+    A["src/jgrec"] --> B["idmap.py<br/>节点 ID 映射"]
+    A --> C["rankers/hybrid"]
+    C --> D["stats.py<br/>时序统计特征"]
+    C --> E["gnn.py<br/>XSimGCL / LightGCN 图塔"]
+    C --> F["sequence.py<br/>SASRec 序列塔"]
+    C --> G["fusion.py<br/>融合 MLP"]
+    C --> H["ranker.py<br/>TemporalHybridRanker 对外接口"]
 ```
 
 对外接口保持稳定：
@@ -42,20 +45,21 @@ probs = ranker.predict_batch(queries)
 
 每个数据集单独训练：
 
-```text
-完整 train.csv 时间排序
-        │
-        ├── context events
-        │       ├── 训练图塔
-        │       ├── 训练序列塔
-        │       └── 构建统计索引
-        │
-        ├── supervised train events
-        │       └── 正样本 + 负采样候选
-        │
-        └── validation tail
-                ├── 本地 AP
-                └── 本地 MRR 诊断
+```mermaid
+flowchart LR
+    A["完整 train.csv<br/>按 time 排序"] --> B["context events"]
+    A --> C["supervised train events"]
+    A --> D["validation tail"]
+    B --> B1["训练图塔"]
+    B --> B2["训练序列塔"]
+    B --> B3["构建统计索引"]
+    C --> C1["正样本 + 负采样候选"]
+    B1 --> E["融合 MLP 训练"]
+    B2 --> E
+    B3 --> E
+    C1 --> E
+    E --> D1["本地 AP"]
+    E --> D2["本地 MRR 诊断"]
 ```
 
 监督样本第一个候选固定为真实目标：
@@ -66,22 +70,39 @@ probs = ranker.predict_batch(queries)
 
 融合层使用候选集 softmax cross entropy：
 
-```python
-loss = -log_softmax(logits, dim=1)[:, 0].mean()
-```
+设每个监督样本包含 \(K+1\) 个候选，且第 1 个候选为真实目标。融合层输出 logits \(\mathbf{z}_i \in \mathbb{R}^{K+1}\)，训练目标为：
+
+\[
+p_{i,j}
+= \frac{\exp(z_{i,j})}
+{\sum_{\ell=1}^{K+1}\exp(z_{i,\ell})},
+\qquad
+\mathcal{L}
+= -\frac{1}{B}\sum_{i=1}^{B}\log p_{i,1}.
+\]
 
 默认验证选择指标是 AP，对齐官方 CRAFT baseline 的 early stopping 口径；融合 MLP 的 early stop patience 默认为 10。MRR 继续保留为比赛指标诊断：
 
-```text
-AP = average_precision_score(flat_labels, flat_scores)
-```
+AP 使用 sklearn 的 `average_precision_score`，将候选标签和候选分数展平后计算：
 
 MRR 计算方式：
 
-```text
-rank = 1 + count(score_negative > score_positive)
-MRR = mean(1 / rank)
-```
+\[
+\operatorname{AP}
+= \operatorname{average\_precision}(\operatorname{vec}(Y), \operatorname{vec}(S)).
+\]
+
+MRR 只比较每行正样本分数和负样本分数：
+
+\[
+\operatorname{rank}_i
+= 1 + \sum_{j=2}^{K+1}
+\mathbf{1}\left[s_{i,j} > s_{i,1}\right],
+\qquad
+\operatorname{MRR}
+= \frac{1}{B}\sum_{i=1}^{B}
+\frac{1}{\operatorname{rank}_i}.
+\]
 
 训练完成后，模型会用完整训练历史重新训练图塔、序列塔和统计索引，再对正式 `test.csv` 输出概率。
 
@@ -104,9 +125,10 @@ MRR = mean(1 / rank)
 
 每个窗口输出：
 
-```text
-dot(src_embedding, dst_embedding)
-```
+\[
+s_{\text{gnn}}(s, d)
+= \mathbf{e}_{s}^{\top}\mathbf{e}_{d}.
+\]
 
 ## 序列塔
 
@@ -118,9 +140,10 @@ src: dst_1, dst_2, dst_3, ...
 
 训练时用历史前缀预测下一个 `dst`，使用 BPR 损失。预测时对每个候选输出：
 
-```text
-sasrec_score = dot(sequence_embedding(src_history), candidate_embedding)
-```
+\[
+s_{\text{seq}}(s, d, t)
+= \mathbf{h}_{s,<t}^{\top}\mathbf{e}_{d}.
+\]
 
 序列塔用于补图塔的短板：LightGCN/XSimGCL 更偏静态协同过滤，SASRec 负责顺序兴趣变化。
 
@@ -130,33 +153,38 @@ sasrec_score = dot(sequence_embedding(src_history), candidate_embedding)
 
 | 特征             | 含义                                             |
 | ---------------- | ------------------------------------------------ |
-| `pair_strength`  | `log1p(pair_count)`，源目标历史强度              |
-| `repeat_rate`    | `pair_count / src_total`，源节点历史中该目标占比 |
-| `pair_recency`   | 源目标最近交互相对查询时间的衰减                 |
-| `dst_popularity` | 目标节点全局热度                                 |
-| `dst_recency`    | 目标节点最近被交互的时间衰减                     |
-| `recent_hit`     | 目标是否命中源节点最近交互序列                   |
-| `src_activity`   | 源节点历史活跃度                                 |
-| `src_recency`    | 源节点最近活跃度                                 |
+| `pair_strength`  | \(\log(1 + n_{s,d})\)，源目标历史强度            |
+| `repeat_rate`    | \(n_{s,d} / \max(n_s, 1)\)，源节点历史中该目标占比 |
+| `pair_recency`   | \(\exp(-\Delta t_{s,d} / T)\)，源目标最近交互衰减 |
+| `dst_popularity` | \(\log(1+n_d) / \log(1+N)\)，目标节点全局热度    |
+| `dst_recency`    | \(\exp(-\Delta t_d / T)\)，目标节点最近被交互的时间衰减 |
+| `recent_hit`     | 若目标在源节点最近窗口中，则为 \(1 / \operatorname{rank}_{\text{recent}}\) |
+| `src_activity`   | \(\log(1+n_s) / \log(1+N)\)，源节点历史活跃度    |
+| `src_recency`    | \(\exp(-\Delta t_s / T)\)，源节点最近活跃度      |
+
+其中 \(N\) 是统计索引中的总边数，\(T=\max(t_{\max}-t_{\min}, 1)\) 是训练历史时间跨度。
 
 ## 融合层
 
 最终候选特征为：
 
-```text
-8 个统计特征
-+ 3 个图塔分数
-+ 1 个序列塔分数
-= 12 维候选特征
+```mermaid
+flowchart LR
+    A["8 个统计特征"] --> D["12 维候选特征"]
+    B["3 个图塔分数"] --> D
+    C["1 个序列塔分数"] --> D
+    D --> E["feature_dim -> hidden_dim -> hidden_dim/2 -> 1"]
+    E --> F["每行 100 候选 Softmax"]
 ```
 
-融合层是 Jittor MLP：
+融合层是 Jittor MLP，输出 logits 后在每行 100 个候选内做 softmax，得到提交概率。
 
-```text
-feature_dim -> hidden_dim -> hidden_dim/2 -> 1
-```
-
-输出 logits 后在每行 100 个候选内做 softmax，得到提交概率。
+\[
+\mathbf{x}_{s,d,t}
+= [\mathbf{x}_{\text{stats}},\ \mathbf{x}_{\text{gnn}},\ s_{\text{seq}}],
+\qquad
+z_{s,d,t} = \operatorname{MLP}(\mathbf{x}_{s,d,t}).
+\]
 
 融合训练会同时比较以下候选特征组：
 

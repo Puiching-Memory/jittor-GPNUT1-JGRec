@@ -9,14 +9,14 @@
 
 ## 数据目录
 
-```text
-data/
-├── dataset1/
-│   ├── train.csv
-│   └── test.csv
-└── dataset2/
-    ├── train.csv
-    └── test.csv
+```mermaid
+flowchart TB
+    A["data/"] --> B["dataset1/"]
+    A --> C["dataset2/"]
+    B --> B1["train.csv"]
+    B --> B2["test.csv"]
+    C --> C1["train.csv"]
+    C --> C2["test.csv"]
 ```
 
 程序会扫描 `data/` 下所有同时包含 `train.csv` 和 `test.csv` 的子目录。子目录名就是输出文件名，例如 `dataset1` 对应 `result/<run_id>/csv/dataset1.csv`。
@@ -42,6 +42,16 @@ uv run jgrec-build
 默认会为每个数据集做一次时间切分训练，训练 XSimGCL 图塔、SASRec 序列塔和融合 MLP；验证协议对齐官方 baseline，使用 train.csv 尾部 15% 做验证，融合早停和特征组选择默认看 AP，同时打印 MRR 作为诊断指标。
 CLI 使用 Rich 输出运行面板、训练进度和结果表格；提交文件仍只写入 `result/`，终端样式不会影响 CSV/ZIP 内容。
 
+默认切分比例为：
+
+\[
+|\mathcal{E}_{\text{val}}|
+= \lfloor 0.15 |\mathcal{E}_{\text{train}}| \rfloor,
+\qquad
+|\mathcal{E}_{\text{fit}}|
+= |\mathcal{E}_{\text{train}}| - |\mathcal{E}_{\text{val}}|.
+\]
+
 模型后端通过 `--model` 选择：
 
 ```bash
@@ -52,12 +62,12 @@ uv run jgrec-build --model third_party
 
 默认输出：
 
-```text
-result/<run_id>/
-├── csv/
-│   ├── dataset1.csv
-│   └── dataset2.csv
-└── result.zip
+```mermaid
+flowchart TB
+    A["result/&lt;run_id&gt;/"] --> B["csv/"]
+    B --> C["dataset1.csv"]
+    B --> D["dataset2.csv"]
+    A --> E["result.zip"]
 ```
 
 `result.zip` 是固定文件名，始终位于本次运行目录内。`<run_id>` 使用人类可读短名，最后追加 8 位配置哈希避免不同隐藏参数写入同一目录。
@@ -146,7 +156,7 @@ uv run jgrec-build --cpu
 
 - 每个输出 CSV 行数等于对应 `test.csv` 数据行数。
 - 每行正好 100 列。
-- 每个概率在 `[0, 1]` 范围内。
+- 每个概率满足 \(p_{i,j}\in[0,1]\)。
 
 手工验证压缩包内容：
 

@@ -4,17 +4,31 @@
 
 ## 阅读路径
 
-| 目标 | 入口 |
-| --- | --- |
-| 先把提交文件跑出来 | [运行手册](operations/runbook.md) |
-| 确认输入输出格式 | [数据契约](task/data-contract.md) |
-| 理解赛题到底是什么 | [赛题说明](task/competition.md) 和 [研究问题综述](research/problem-overview.md) |
-| 判断数据适合什么模型 | [当前数据画像](task/data-profile.md) |
-| 理解代码如何串起来 | [系统架构](system/architecture.md) |
-| 理解当前模型为什么这样设计 | [模型设计](system/modeling.md) |
-| 判断一次实验能不能保留 | [实验与基准](experiments/benchmarks.md) |
-| 查找论文和外部实现线索 | [研究资料](research/gnn-survey.md) 与 [开源参考](research/open-source-references.md) |
-| 修改代码前看工程约束 | [开发规范](operations/development.md) |
+```mermaid
+flowchart LR
+    A["先跑通提交"] --> B["运行手册"]
+    A --> C["数据契约"]
+    D["理解任务与数据"] --> E["赛题说明"]
+    D --> F["研究问题综述"]
+    D --> G["当前数据画像"]
+    H["理解实现"] --> I["系统架构"]
+    H --> J["模型设计"]
+    K["继续实验"] --> L["实验与基准"]
+    K --> M["研究资料"]
+    K --> N["开发规范"]
+```
+
+| 目标                       | 入口                                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------ |
+| 先把提交文件跑出来         | [运行手册](operations/runbook.md)                                                    |
+| 确认输入输出格式           | [数据契约](task/data-contract.md)                                                    |
+| 理解赛题到底是什么         | [赛题说明](task/competition.md) 和 [研究问题综述](research/problem-overview.md)      |
+| 判断数据适合什么模型       | [当前数据画像](task/data-profile.md)                                                 |
+| 理解代码如何串起来         | [系统架构](system/architecture.md)                                                   |
+| 理解当前模型为什么这样设计 | [模型设计](system/modeling.md)                                                       |
+| 判断一次实验能不能保留     | [实验与基准](experiments/benchmarks.md)                                              |
+| 查找论文和外部实现线索     | [研究资料](research/gnn-survey.md) 与 [开源参考](research/open-source-references.md) |
+| 修改代码前看工程约束       | [开发规范](operations/development.md)                                                |
 
 ## 文档分组
 
@@ -51,12 +65,12 @@ uv run jgrec-build
 
 完成后检查：
 
-```text
-result/<run_id>/
-├── csv/
-│   ├── dataset1.csv
-│   └── dataset2.csv
-└── result.zip
+```mermaid
+flowchart TB
+    A["result/&lt;run_id&gt;/"] --> B["csv/"]
+    B --> C["dataset1.csv"]
+    B --> D["dataset2.csv"]
+    A --> E["result.zip"]
 ```
 
 每个 CSV 无表头，每行 100 个保留 8 位小数的概率。

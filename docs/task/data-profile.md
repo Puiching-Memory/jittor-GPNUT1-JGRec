@@ -15,6 +15,22 @@ result/benchmarks/current_data_deep_profile.json
 uv run python scripts/analyze_data_profile.py --output result/benchmarks/current_data_deep_profile.json
 ```
 
+## 场景总览
+
+```mermaid
+flowchart LR
+    A["本地 data/"] --> B["dataset1<br/>同构/强重叠节点空间"]
+    A --> C["dataset2<br/>严格二部图空间"]
+    B --> B1["重复事件占比 72.60%"]
+    B --> B2["holdout 历史 pair 命中 56.91%"]
+    B --> B3["主信号：pair 近因、repeat rate、recent hit"]
+    C --> C1["重复事件占比 2.21%"]
+    C --> C2["holdout 新 pair 约 97%"]
+    C --> C3["主信号：dst 热度/近因、source profile、共现泛化"]
+    B3 --> D["差异化候选重排序"]
+    C3 --> D
+```
+
 ## 统计协议
 
 - 数据源：本地 `data/dataset1` 和 `data/dataset2`。
@@ -27,6 +43,55 @@ uv run python scripts/analyze_data_profile.py --output result/benchmarks/current
 - 抽样规模：单特征/分段代理 3000 条正样本，图信号代理 1000 条正样本，融合消融 2000/3000 条训练/验证正样本。
 
 注意：所有代理验证仍不是线上指标。本文主要看 AUC、tie-MRR、strict Hit@1、非零率和分段差异。
+
+## 指标定义
+
+设历史事件集合为 \(\mathcal{E}_{\text{hist}}\)，未来或 holdout 事件集合为 \(\mathcal{E}_{\text{future}}\)。对事件 \(e_i=(s_i,d_i,t_i)\)，历史 pair 命中定义为：
+
+\[
+\operatorname{pair\_hit}(e_i)
+= \mathbf{1}\left[(s_i,d_i) \in
+\{(s,d):(s,d,t)\in\mathcal{E}_{\text{hist}},\ t<t_i\}\right].
+\]
+
+因此，历史 pair 命中率和 new pair 占比分别为：
+
+\[
+\operatorname{PairHitRate}
+= \frac{1}{|\mathcal{E}_{\text{future}}|}
+\sum_{e_i\in\mathcal{E}_{\text{future}}}
+\operatorname{pair\_hit}(e_i),
+\qquad
+\operatorname{NewPairRate}
+= 1-\operatorname{PairHitRate}.
+\]
+
+重复事件占比按训练事件统计，衡量当前事件是否重复了此前已出现过的 \((s,d)\)：
+
+\[
+\operatorname{RepeatEventRate}
+= \frac{1}{N}
+\sum_{i=1}^{N}
+\mathbf{1}\left[(s_i,d_i)\in
+\{(s_j,d_j):j<i\}\right].
+\]
+
+同源最近 \(k\) 命中率用于衡量未来目标是否出现在该源节点最近 \(k\) 个历史目标中：
+
+\[
+\operatorname{RecentHit@}k
+= \frac{1}{|\mathcal{E}_{\text{future}}|}
+\sum_{e_i\in\mathcal{E}_{\text{future}}}
+\mathbf{1}\left[d_i \in R_k(s_i,t_i)\right].
+\]
+
+代理验证中，strict Hit@1 要求正样本分数严格高于全部负样本；tie-MRR 允许并列名次按平均名次处理：
+
+\[
+\operatorname{Hit@1}_{\text{strict}}
+= \frac{1}{B}\sum_{i=1}^{B}
+\mathbf{1}\left[s_{i,+} > \max_j s_{i,j}^{-}\right].
+\]
 
 ## 基础规模
 

@@ -4,10 +4,10 @@
 
 程序以数据集目录为处理单位：
 
-```text
-data/<dataset_name>/
-├── train.csv
-└── test.csv
+```mermaid
+flowchart TB
+    A["data/&lt;dataset_name&gt;/"] --> B["train.csv"]
+    A --> C["test.csv"]
 ```
 
 `<dataset_name>` 会用于输出文件名：`result/<run_id>/csv/<dataset_name>.csv`。
@@ -52,12 +52,19 @@ src,time,c1,c2,...,c100
 
 当前代码严格要求候选列数量为 100。
 
+对第 \(i\) 行测试查询，可以记为：
+
+\[
+q_i = (s_i, t_i, c_{i,1}, c_{i,2}, \ldots, c_{i,100}).
+\]
+
 ## 输出 CSV
 
 每个数据集生成一个同名 CSV：
 
-```text
-result/<run_id>/csv/<dataset_name>.csv
+```mermaid
+flowchart LR
+    A["data/&lt;dataset_name&gt;/test.csv"] --> B["result/&lt;run_id&gt;/csv/&lt;dataset_name&gt;.csv"]
 ```
 
 输出约束：
@@ -65,8 +72,16 @@ result/<run_id>/csv/<dataset_name>.csv
 - 无表头。
 - 行数等于对应 `test.csv` 的数据行数。
 - 每行 100 个概率，对应测试集中 `c1` 到 `c100` 的顺序。
-- 每个概率在 `[0, 1]`。
+- 每个概率 \(p_{i,j} \in [0, 1]\)。
 - 每个概率保留 8 位小数。
+
+若测试集有 \(N_{\text{test}}\) 行，输出 CSV 对应一个概率矩阵：
+
+\[
+P \in [0, 1]^{N_{\text{test}} \times 100},
+\qquad
+P_{i,j} \leftrightarrow c_{i,j}.
+\]
 
 示例：
 
@@ -79,11 +94,11 @@ result/<run_id>/csv/<dataset_name>.csv
 
 最终提交文件：
 
-```text
-result/<run_id>/result.zip
-├── dataset1.csv
-├── dataset2.csv
-└── ...
+```mermaid
+flowchart TB
+    A["result/&lt;run_id&gt;/result.zip"] --> B["dataset1.csv"]
+    A --> C["dataset2.csv"]
+    A --> D["..."]
 ```
 
 压缩包文件名固定为 `result.zip`，根目录直接包含 CSV 文件，不包含 `result/` 或 `csv/` 目录层级。
@@ -93,7 +108,7 @@ result/<run_id>/result.zip
 `jgrec.submission.validate_submission_file()` 执行以下校验：
 
 - 列数必须为 100。
-- 概率范围必须在 `[0, 1]`。
+- 概率范围必须满足 \(P_{i,j} \in [0, 1]\)。
 - 全量运行时，输出行数必须匹配测试行数。
 
 `--limit-rows` 冒烟测试会跳过行数等于完整测试集的校验。
