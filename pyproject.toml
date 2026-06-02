@@ -17,10 +17,12 @@ dependencies = [
 	"sympy==1.13.3",
 	"rich>=15.0.0",
 	"tyro>=0.9.0",
+	"optuna>=4.9.0",
 ]
 
 [project.scripts]
 jgrec-build = "jgrec.cli:main"
+jgrec-tune-temporal-graph = "jgrec.tuning.temporal_graph:main"
 
 [tool.uv.sources]
 jittor = { path = "third_party/jittor", editable = true }
@@ -87,5 +89,6 @@ packages = [
 	"jgrec.rankers.common",
 	"jgrec.rankers.craft",
 	"jgrec.rankers.temporal_graph",
+	"jgrec.tuning",
 ]
 py-modules = ["sitecustomize"]

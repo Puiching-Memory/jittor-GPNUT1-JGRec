@@ -60,7 +60,7 @@ class TemporalGraphRanker:
         full_data = temporal_data_from_interactions(interactions, self.node_map)
         _, get_neighbor_sampler = temporal_loader_api()
         self.neighbor_sampler = safe_neighbor_sampler(get_neighbor_sampler(full_data, "recent", seed=training_config.seed))
-        dst_pool = self.node_map.dst_ids_array
+        dst_pool = np.asarray(sorted({self.node_map.dst_id(item.dst) for item in interactions}), dtype=np.int32)
 
         n_events = len(interactions)
         val_size = max(1, int(n_events * training_config.val_ratio))

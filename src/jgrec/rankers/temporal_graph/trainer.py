@@ -221,7 +221,18 @@ def build_training_batch(
     src_ids = np.asarray([node_map.src_id(item.src) for item in events], dtype=np.int32)
     times = np.asarray([item.time for item in events], dtype=np.int32)
     positives = np.asarray([node_map.dst_id(item.dst) for item in events], dtype=np.int32)
-    candidates = _sample_candidate_ids(positives, dst_pool, num_negatives, rng)
+    src_neighbor_ids, _, src_neighbor_times = neighbor_sampler.get_historical_neighbors_left(
+        node_ids=src_ids,
+        node_interact_times=times,
+        num_neighbors=history_len,
+    )
+    candidates = _sample_candidate_ids(
+        positives=positives,
+        dst_pool=dst_pool,
+        num_negatives=num_negatives,
+        rng=rng,
+        forbidden=src_neighbor_ids,
+    )
     return build_prediction_batch(
         src_ids=src_ids,
         times=times,
@@ -229,6 +240,8 @@ def build_training_batch(
         neighbor_sampler=neighbor_sampler,
         history_len=history_len,
         candidate_history_len=candidate_history_len,
+        src_neighbor_ids=np.asarray(src_neighbor_ids, dtype=np.int32),
+        src_neighbor_times=np.asarray(src_neighbor_times, dtype=np.int32),
     )
 
 
@@ -239,12 +252,15 @@ def build_prediction_batch(
     neighbor_sampler: Any,
     history_len: int,
     candidate_history_len: int,
+    src_neighbor_ids: np.ndarray | None = None,
+    src_neighbor_times: np.ndarray | None = None,
 ) -> TemporalTrainingBatch:
-    src_neighbor_ids, _, src_neighbor_times = neighbor_sampler.get_historical_neighbors_left(
-        node_ids=src_ids,
-        node_interact_times=times,
-        num_neighbors=history_len,
-    )
+    if src_neighbor_ids is None or src_neighbor_times is None:
+        src_neighbor_ids, _, src_neighbor_times = neighbor_sampler.get_historical_neighbors_left(
+            node_ids=src_ids,
+            node_interact_times=times,
+            num_neighbors=history_len,
+        )
     flat_candidates = candidates.reshape(-1)
     flat_times = np.broadcast_to(times[:, np.newaxis], candidates.shape).reshape(-1)
     candidate_neighbor_ids, _, candidate_neighbor_times = neighbor_sampler.get_historical_neighbors_left(
@@ -326,6 +342,7 @@ def _sample_candidate_ids(
     dst_pool: np.ndarray,
     num_negatives: int,
     rng: np.random.Generator,
+    forbidden: np.ndarray | None = None,
 ) -> np.ndarray:
     candidate_count = num_negatives + 1
     candidates = np.empty((positives.shape[0], candidate_count), dtype=np.int32)
@@ -333,6 +350,8 @@ def _sample_candidate_ids(
     replace = dst_pool.shape[0] < max(num_negatives * 2, 1)
     for row_idx, positive in enumerate(positives):
         used = {int(positive)}
+        if forbidden is not None:
+            used.update(int(value) for value in forbidden[row_idx] if int(value) != 0)
         negatives: list[int] = []
         attempts = 0
         while len(negatives) < num_negatives and attempts < 25:

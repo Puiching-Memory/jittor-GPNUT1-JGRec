@@ -73,6 +73,86 @@ result/temporal-graph_sample-2-rows_cpu_seed-42_hist-8_candhist-4_dim-32_<hash>/
 - 如果实验代码依赖旧融合/多塔接口，应迁移为 `temporal_graph` 消融或删除。
 - 结构性改动至少跑冒烟命令、单元测试和 Ruff。
 
+## Optuna 调参
+
+自动调参脚本：
+
+```bash
+uv run jgrec-tune-temporal-graph --n-trials 32 --n-jobs 1 --gpu-id 0 --quiet
+```
+
+等价脚本入口为 `uv run python scripts/tune_temporal_graph.py ...`。
+
+默认优化两个数据集的平均 MRR，不做测试集推理和 ZIP 写出；trial 结果写入同一个 study 目录：
+
+```text
+result/optuna/temporal_graph_mrr/
+├── study.db
+├── trials.jsonl
+└── best.json
+```
+
+推荐多 GPU 方式是多个 Python worker 共享同一个 SQLite study，每个进程绑定一张卡：
+
+```bash
+for gpu in 0 1 2 7; do
+  uv run jgrec-tune-temporal-graph \
+    --study-name temporal_graph_mrr_v1 \
+    --n-trials 8 \
+    --n-jobs 1 \
+    --gpu-id "$gpu" \
+    --max-train-events 20000 \
+    --max-val-events 5000 \
+    --epochs-max 6 \
+    --quiet &
+done
+wait
+```
+
+`--n-jobs` 只表示单个 Python 进程内的 Optuna 并发。Jittor 的 CUDA 状态是进程级全局设置，GPU 实验保持 `--n-jobs 1`，通过多进程扩展到多卡。
+`--gpu-id` 会同时作为默认 worker id，并让每个 worker 的 TPE sampler seed 自动错开；需要手工复现实验时可显式设置 `--worker-id` 和 `--sampler-seed`。
+
+最近一次链路冒烟：
+
+```bash
+uv run jgrec-tune-temporal-graph --datasets dataset1 --n-trials 1 --n-jobs 1 --cpu --max-fit-events 512 --max-train-events 32 --max-val-events 16 --epochs-max 2 --study-name temporal_graph_optuna_smoke --quiet
+```
+
+结果：通过。生成 `study.db`、`trials.jsonl`、`best.json`，trial0 在极小样本验证集上的 MRR 为 `0.05193`。该结果只验证调参链路，不作为模型性能结论。
+
+并发链路冒烟：
+
+```bash
+rm -rf result/optuna/temporal_graph_optuna_concurrency_smoke
+for worker in 0 1; do
+  uv run jgrec-tune-temporal-graph --datasets dataset1 --n-trials 1 --n-jobs 1 --cpu --worker-id "$worker" --max-fit-events 512 --max-train-events 32 --max-val-events 16 --epochs-max 2 --study-name temporal_graph_optuna_concurrency_smoke --quiet &
+done
+wait
+```
+
+结果：通过。全新 SQLite study 首次多进程初始化使用 `.study-init.lock` 避免表结构竞态；2 个 worker 共享同一 study，最终得到 2 个 COMPLETE trial，`trials.jsonl` 为 2 行。
+
+CUDA 入口冒烟：
+
+```bash
+uv run jgrec-tune-temporal-graph --datasets dataset1 --n-trials 1 --n-jobs 1 --gpu-id 1 --max-fit-events 256 --max-train-events 16 --max-val-events 8 --epochs-max 2 --study-name temporal_graph_gpu_entry_smoke --quiet
+```
+
+结果：通过。GPU 绑定、Jittor CUDA 编译、`best_config` 输出和 `study.db` 写入正常；极小样本 MRR 为 `0.04676`，不作为模型性能结论。
+
+当前搜索空间覆盖：
+
+- `num_negatives`: 15/31/63/99
+- `history_len`: 16/32/64/96
+- `candidate_history_len`: 8/16/32/48
+- `hidden_size`: 64/96/128/192
+- `layers`: 1..4
+- `heads_h{hidden_size}`: 与 hidden size 整除的 2/3/4/6/8；复跑时优先看 `best.json` 里的完整 `config.heads`
+- `dropout`: 0.05..0.45
+- `lr`: 2e-4..3e-3
+- `weight_decay`: 1e-7..3e-3
+- `selection_metric`: AP 或 MRR
+
 ## 复测命令
 
 基础正确性检查：

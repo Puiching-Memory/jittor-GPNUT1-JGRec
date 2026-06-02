@@ -46,6 +46,14 @@ uv run --group dev pytest
 uv run --group dev ruff check .
 ```
 
+Optuna 调参：
+
+```bash
+uv run jgrec-tune-temporal-graph --n-trials 32 --n-jobs 1 --gpu-id 0 --quiet
+```
+
+多 GPU 调参使用多个进程共享同一个 study，细节见 [实验与基准](docs/experiments/benchmarks.md)。
+
 CPU 环境：
 
 ```bash

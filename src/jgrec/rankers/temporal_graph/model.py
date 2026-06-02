@@ -37,7 +37,7 @@ class EndToEndTemporalGraphModel(jt.nn.Module):
         self.memory_gate = nn.Linear(config.hidden_size * 2, config.hidden_size)
         self.memory_candidate = nn.Linear(config.hidden_size * 2, config.hidden_size)
         self.query_projection = nn.Linear(config.hidden_size * 3, config.hidden_size)
-        self.stats_projection = nn.Linear(3, config.hidden_size)
+        self.stats_projection = nn.Linear(7, config.hidden_size)
         self.cross_attention = CrossAttention(
             n_layers=config.layers,
             n_heads=config.heads,
@@ -131,8 +131,11 @@ class EndToEndTemporalGraphModel(jt.nn.Module):
         )[-1].reshape((batch_size, candidate_count, self.hidden_size))
 
         stats = self._pair_stats(
+            cur_times=cur_times,
             src_neighbor_ids=src_neighbor_ids,
+            src_neighbor_times=src_neighbor_times,
             candidate_ids=candidate_ids,
+            candidate_neighbor_times=candidate_neighbor_times,
             src_mask=src_mask,
             candidate_mask=candidate_mask,
         )
@@ -213,8 +216,11 @@ class EndToEndTemporalGraphModel(jt.nn.Module):
 
     def _pair_stats(
         self,
+        cur_times: jt.Var,
         src_neighbor_ids: jt.Var,
+        src_neighbor_times: jt.Var,
         candidate_ids: jt.Var,
+        candidate_neighbor_times: jt.Var,
         src_mask: jt.Var,
         candidate_mask: jt.Var,
     ) -> jt.Var:
@@ -225,10 +231,46 @@ class EndToEndTemporalGraphModel(jt.nn.Module):
             * (candidate_ids.unsqueeze(-1) != 0)
         ).float()
         repeat_count = repeat_hits.sum(dim=-1, keepdims=True) / max(self.config.history_len, 1)
+        position_weights = (
+            (jt.arange(self.config.history_len).float() + 1.0).reshape((1, 1, self.config.history_len))
+            / max(self.config.history_len, 1)
+        )
+        repeat_recent_position = (repeat_hits * position_weights).max(dim=-1, keepdims=True)
         src_len = src_mask.float().sum(dim=1, keepdims=True) / max(self.config.history_len, 1)
         src_len = src_len.unsqueeze(1).expand(batch_size, candidate_count, 1)
         candidate_len = candidate_mask.float().sum(dim=2, keepdims=True) / max(self.config.candidate_history_len, 1)
-        return jt.concat([repeat_count, src_len, candidate_len], dim=-1)
+
+        src_last_time = (src_neighbor_times * src_mask).max(dim=1, keepdims=True)
+        src_delta = jt.maximum(cur_times.reshape((-1, 1)) - src_last_time, jt.zeros_like(src_last_time))
+        src_recency = _log_recency(src_delta.float(), self.time_norm)
+        src_recency = src_recency.unsqueeze(1).expand(batch_size, candidate_count, 1) * (src_len > 0).float()
+
+        candidate_last_time = (candidate_neighbor_times * candidate_mask).max(dim=2, keepdims=True)
+        candidate_delta = jt.maximum(
+            cur_times.reshape((batch_size, 1, 1)) - candidate_last_time,
+            jt.zeros_like(candidate_last_time),
+        )
+        candidate_recency = _log_recency(candidate_delta.float(), self.time_norm) * (candidate_len > 0).float()
+
+        pair_last_time = (src_neighbor_times.unsqueeze(1) * repeat_hits).max(dim=2, keepdims=True)
+        pair_delta = jt.maximum(
+            cur_times.reshape((batch_size, 1, 1)) - pair_last_time,
+            jt.zeros_like(pair_last_time),
+        )
+        pair_recency = _log_recency(pair_delta.float(), self.time_norm) * (repeat_count > 0).float()
+
+        return jt.concat(
+            [
+                repeat_count,
+                repeat_recent_position,
+                src_len,
+                candidate_len,
+                src_recency,
+                candidate_recency,
+                pair_recency,
+            ],
+            dim=-1,
+        )
 
 
 def _masked_mean(values: jt.Var, mask: jt.Var, dim: int) -> jt.Var:
@@ -236,3 +278,7 @@ def _masked_mean(values: jt.Var, mask: jt.Var, dim: int) -> jt.Var:
     numerator = (values * mask_f).sum(dim=dim)
     denominator = mask_f.sum(dim=dim) + 1e-6
     return numerator / denominator
+
+
+def _log_recency(delta: jt.Var, time_norm: float) -> jt.Var:
+    return jt.exp(-jt.log(delta + 1.0) / time_norm)
