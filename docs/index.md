@@ -41,7 +41,7 @@ flowchart LR
 ### 系统与模型
 
 - [系统架构](system/architecture.md)：包结构、统一接口、数据流和扩展边界。
-- [模型设计](system/modeling.md)：当前 hybrid/craft/third_party 后端、训练流程、特征和融合方式。
+- [模型设计](system/modeling.md)：当前 hybrid/craft 后端、训练流程、特征和融合方式。
 
 ### 运行与开发
 
@@ -54,7 +54,7 @@ flowchart LR
 - [研究问题综述](research/problem-overview.md)：将赛题抽象成动态图候选重排序研究问题。
 - [GNN 推荐论文调研](research/gnn-survey.md)：图协同过滤、图对比学习、谱图和动态图方向。
 - [推荐系统论文调研归档](research/recommender-survey.md)：非 GNN 推荐、序列、排序和生成式推荐背景。
-- [开源参考](research/open-source-references.md)：本地 third_party 示例和可参考实现。
+- [开源参考](research/open-source-references.md)：本地 JittorGeometric 示例和可参考实现。
 
 ## 最短路径
 

@@ -62,11 +62,5 @@ def ensure_builtin_rankers() -> None:
 
         return CRAFTBaselineRanker(config if isinstance(config, CRAFTBaselineConfig) else CRAFTBaselineConfig())
 
-    def third_party_factory(config: Any) -> Ranker:
-        from .third_party.ranker import ThirdPartyRanker, ThirdPartyRankerConfig
-
-        return ThirdPartyRanker(config if isinstance(config, ThirdPartyRankerConfig) else ThirdPartyRankerConfig())
-
     registry.register("hybrid", hybrid_factory)
     registry.register("craft", craft_factory)
-    registry.register("third_party", third_party_factory)

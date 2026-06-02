@@ -57,7 +57,6 @@ CLI 使用 Rich 输出运行面板、训练进度和结果表格；提交文件�
 ```bash
 uv run jgrec-build --model hybrid
 uv run jgrec-build --model craft
-uv run jgrec-build --model third_party
 ```
 
 默认输出：
@@ -83,7 +82,6 @@ flowchart TB
 ```text
 hybrid_full_cuda_seed-42_gnn-xsimgcl_sequence-on_1a2b3c4d
 hybrid_sample-2-rows_cpu_seed-42_gnn-off_sequence-off_1a2b3c4d
-third-party_full_cuda_seed-42_1a2b3c4d
 ```
 
 ## 冒烟测试
@@ -102,12 +100,6 @@ uv run jgrec-build --limit-rows 2 --max-fit-events 512 --max-train-events 32 --m
 uv run jgrec-build --limit-rows 100 --max-fit-events 2048 --max-train-events 256 --max-val-events 128 --epochs 1 --disable-gnn --disable-seq --quiet-ranker
 ```
 
-验证第三方统计/结构重排器：
-
-```bash
-uv run jgrec-build --model third_party --limit-rows 2 --max-train-events 32 --max-val-events 16 --num-negatives 3 --epochs 1 --train-batch-size 8 --fusion-hidden-dim 8 --batch-size 2 --quiet-ranker --cpu
-```
-
 并行调参时必须使用不同参数组合，使生成的 `<run_id>` 不同；相同参数组合会写入同一个运行目录。
 
 ## CPU 运行
@@ -122,7 +114,7 @@ uv run jgrec-build --cpu
 
 | 参数                    |    默认值 | 说明                                       |
 | ----------------------- | --------: | ------------------------------------------ |
-| `--model`               |  `hybrid` | 模型后端：`hybrid`、`craft`、`third_party` |
+| `--model`               |  `hybrid` | 模型后端：`hybrid`、`craft`                |
 | `--data-dir`            |    `data` | 数据根目录                                 |
 | `--recent-window`       |      `32` | 每个源节点保留的最近目标节点数量           |
 | `--batch-size`          |    `2048` | 每次送入 Jittor 的测试查询数               |

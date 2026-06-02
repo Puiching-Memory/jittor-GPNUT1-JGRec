@@ -16,10 +16,9 @@ from .logging import console
 from .rankers.craft.config import CRAFTBaselineConfig
 from .rankers.hybrid import TrainingConfig
 from .rankers.registry import create_ranker
-from .rankers.third_party import ThirdPartyRankerConfig
 from .submission import expected_test_rows, validate_submission_file, write_zip
 
-ModelName = Literal["hybrid", "craft", "third_party"]
+ModelName = Literal["hybrid", "craft"]
 SelectionMetric = Literal["ap", "mrr"]
 GNNModel = Literal["xsimgcl", "lightgcn"]
 
@@ -68,7 +67,6 @@ class CLIConfig:
     seq_dropout: float = 0.2
     craft_neighbors: int = 30
     craft_hidden_size: int = 64
-    third_cooccur_k: int = 16
     seed: int = 42
     quiet_ranker: bool = False
     cpu: bool = False
@@ -141,25 +139,6 @@ def _ranker_config(args: CLIConfig):
             early_stop_patience=args.early_stop,
             num_neighbors=args.craft_neighbors,
             hidden_size=args.craft_hidden_size,
-        )
-    if args.model == "third_party":
-        return ThirdPartyRankerConfig(
-            val_ratio=args.val_ratio,
-            context_ratio=args.context_ratio,
-            max_train_events=args.max_train_events,
-            max_val_events=args.max_val_events,
-            num_negatives=args.num_negatives,
-            epochs=args.epochs,
-            batch_size=args.train_batch_size,
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-            hidden_dim=args.fusion_hidden_dim,
-            selection_metric=args.selection_metric,
-            early_stop_patience=args.early_stop,
-            seed=args.seed,
-            verbose=not args.quiet_ranker,
-            recent_window=args.recent_window,
-            cooccur_recent_k=args.third_cooccur_k,
         )
     return TrainingConfig(
         val_ratio=args.val_ratio,

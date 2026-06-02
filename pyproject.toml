@@ -87,6 +87,5 @@ packages = [
 	"jgrec.rankers.common",
 	"jgrec.rankers.craft",
 	"jgrec.rankers.hybrid",
-	"jgrec.rankers.third_party",
 ]
 py-modules = ["sitecustomize"]
