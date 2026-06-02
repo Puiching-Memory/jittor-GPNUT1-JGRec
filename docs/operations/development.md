@@ -17,7 +17,7 @@ uv run python -m compileall -q src
 冒烟测试：
 
 ```bash
-uv run jgrec-build --limit-rows 2 --max-fit-events 512 --max-train-events 32 --max-val-events 16 --num-negatives 3 --epochs 1 --gnn-epochs 1 --gnn-embedding-dim 16 --gnn-layers 1 --gnn-max-graph-edges 256 --gnn-max-train-edges 128 --seq-epochs 1 --seq-max-samples 128 --seq-max-len 16 --seq-hidden-size 16 --fusion-hidden-dim 16 --quiet-ranker
+uv run jgrec-build --limit-rows 2 --max-fit-events 512 --max-train-events 32 --max-val-events 16 --num-negatives 3 --epochs 1 --history-len 8 --candidate-history-len 4 --hidden-size 32 --layers 1 --heads 2 --no-refit-full --quiet-ranker
 ```
 
 完整生成：
@@ -70,7 +70,7 @@ uv run zensical build
 
 ```bash
 uv run python -m compileall -q src
-uv run jgrec-build --limit-rows 2 --max-fit-events 512 --max-train-events 32 --max-val-events 16 --num-negatives 3 --epochs 1 --gnn-epochs 1 --gnn-embedding-dim 16 --gnn-layers 1 --gnn-max-graph-edges 256 --gnn-max-train-edges 128 --seq-epochs 1 --seq-max-samples 128 --seq-max-len 16 --seq-hidden-size 16 --fusion-hidden-dim 16 --quiet-ranker
+uv run jgrec-build --limit-rows 2 --max-fit-events 512 --max-train-events 32 --max-val-events 16 --num-negatives 3 --epochs 1 --history-len 8 --candidate-history-len 4 --hidden-size 32 --layers 1 --heads 2 --no-refit-full --quiet-ranker
 uv lock --check
 ```
 
@@ -87,7 +87,7 @@ uv run zensical build
 
 - `fit()` 会把单个数据集训练交互加载到内存中。
 - 负采样还是随机采样，没有 hard negatives。
-- 当前图塔是静态窗口图，不是严格事件级 TGN memory。
+- 当前 temporal memory 是历史聚合式可训练 update，不是持久化事件级 TGN memory replay。
 - 没有模型权重持久化，每次运行都会重新训练。
 
 这些限制不影响生成合规提交文件，但会影响榜单分数。后续优化应优先补本地验证闭环。

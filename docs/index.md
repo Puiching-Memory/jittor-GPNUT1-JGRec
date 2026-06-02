@@ -41,7 +41,7 @@ flowchart LR
 ### 系统与模型
 
 - [系统架构](system/architecture.md)：包结构、统一接口、数据流和扩展边界。
-- [模型设计](system/modeling.md)：当前 hybrid/craft 后端、训练流程、特征和融合方式。
+- [模型设计](system/modeling.md)：当前 temporal-graph/craft 后端、训练流程和端到端图建模方式。
 
 ### 运行与开发
 

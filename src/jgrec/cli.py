@@ -14,57 +14,40 @@ from .core.io import discover_datasets
 from .core.runner import build_dataset_submission
 from .logging import console
 from .rankers.craft.config import CRAFTBaselineConfig
-from .rankers.hybrid import TrainingConfig
 from .rankers.registry import create_ranker
+from .rankers.temporal_graph import TemporalGraphTrainingConfig
 from .submission import expected_test_rows, validate_submission_file, write_zip
 
-ModelName = Literal["hybrid", "craft"]
+ModelName = Literal["temporal-graph", "craft"]
 SelectionMetric = Literal["ap", "mrr"]
-GNNModel = Literal["xsimgcl", "lightgcn"]
 
 
 @dataclass(frozen=True)
 class CLIConfig:
     """Build JGRec dynamic recommendation submission files."""
 
-    model: ModelName = "hybrid"
+    model: ModelName = "temporal-graph"
     data_dir: Path = Path("data")
-    recent_window: int = 32
     batch_size: int = 2048
     limit_rows: int | None = None
     val_ratio: float = 0.15
-    context_ratio: float = 0.75
     max_train_events: int = 20_000
     max_val_events: int = 5_000
-    num_negatives: int = 31
+    num_negatives: int = 99
     max_fit_events: int = 0
-    epochs: int = 5
-    train_batch_size: int = 512
+    epochs: int = 8
+    train_batch_size: int = 256
     lr: float = 0.001
     weight_decay: float = 0.0
     selection_metric: SelectionMetric = "ap"
     early_stop: int = 10
-    fusion_hidden_dim: int = 64
-    disable_gnn: bool = False
-    gnn_model: GNNModel = "xsimgcl"
-    gnn_embedding_dim: int = 128
-    gnn_layers: int = 2
-    gnn_epochs: int = 3
-    gnn_batch_size: int = 2048
-    gnn_max_graph_edges: int = 0
-    gnn_max_train_edges: int = 40_000
-    gnn_lr: float = 0.001
-    gnn_reg_weight: float = 1e-5
-    gnn_cl_rate: float = 1e-4
-    disable_seq: bool = False
-    seq_epochs: int = 3
-    seq_batch_size: int = 512
-    seq_max_samples: int = 50_000
-    seq_max_len: int = 64
-    seq_hidden_size: int = 128
-    seq_layers: int = 2
-    seq_heads: int = 4
-    seq_dropout: float = 0.2
+    history_len: int = 64
+    candidate_history_len: int = 32
+    hidden_size: int = 128
+    layers: int = 3
+    heads: int = 4
+    dropout: float = 0.15
+    no_refit_full: bool = False
     craft_neighbors: int = 30
     craft_hidden_size: int = 64
     seed: int = 42
@@ -140,9 +123,8 @@ def _ranker_config(args: CLIConfig):
             num_neighbors=args.craft_neighbors,
             hidden_size=args.craft_hidden_size,
         )
-    return TrainingConfig(
+    return TemporalGraphTrainingConfig(
         val_ratio=args.val_ratio,
-        context_ratio=args.context_ratio,
         max_train_events=args.max_train_events,
         max_val_events=args.max_val_events,
         num_negatives=args.num_negatives,
@@ -155,38 +137,25 @@ def _ranker_config(args: CLIConfig):
         early_stop_patience=args.early_stop,
         seed=args.seed,
         verbose=not args.quiet_ranker,
-        gnn_enabled=not args.disable_gnn,
-        gnn_model=args.gnn_model,
-        gnn_embedding_dim=args.gnn_embedding_dim,
-        gnn_layers=args.gnn_layers,
-        gnn_epochs=args.gnn_epochs,
-        gnn_batch_size=args.gnn_batch_size,
-        gnn_max_graph_edges=args.gnn_max_graph_edges,
-        gnn_max_train_edges=args.gnn_max_train_edges,
-        gnn_lr=args.gnn_lr,
-        gnn_reg_weight=args.gnn_reg_weight,
-        gnn_cl_rate=args.gnn_cl_rate,
-        seq_enabled=not args.disable_seq,
-        seq_epochs=args.seq_epochs,
-        seq_batch_size=args.seq_batch_size,
-        seq_max_samples=args.seq_max_samples,
-        seq_max_len=args.seq_max_len,
-        seq_hidden_size=args.seq_hidden_size,
-        seq_layers=args.seq_layers,
-        seq_heads=args.seq_heads,
-        seq_dropout=args.seq_dropout,
-        fusion_hidden_dim=args.fusion_hidden_dim,
+        history_len=args.history_len,
+        candidate_history_len=args.candidate_history_len,
+        hidden_size=args.hidden_size,
+        layers=args.layers,
+        heads=args.heads,
+        dropout=args.dropout,
+        refit_full=not args.no_refit_full,
     )
 
 
 def _build_run_name(args: CLIConfig, config) -> str:
     rows = f"sample-{args.limit_rows}-rows" if args.limit_rows is not None else "full"
     parts = [_slug(args.model), rows, "cpu" if args.cpu else "cuda", f"seed-{args.seed}"]
-    if args.model == "hybrid":
+    if args.model == "temporal-graph":
         parts.extend(
             [
-                f"gnn-{_slug(config.gnn_model) if config.gnn_enabled else 'off'}",
-                f"sequence-{'on' if config.seq_enabled else 'off'}",
+                f"hist-{config.history_len}",
+                f"candhist-{config.candidate_history_len}",
+                f"dim-{config.hidden_size}",
             ]
         )
     parts.append(_config_digest(args, config))
@@ -229,9 +198,13 @@ def _run_panel(run_dir: Path, zip_path: Path, args: CLIConfig, config) -> Panel:
     table.add_row("selection_metric", getattr(config, "selection_metric", "ap"))
     table.add_row("early_stop", str(getattr(config, "early_stop_patience", args.early_stop)))
     table.add_row("limit_rows", str(args.limit_rows) if args.limit_rows is not None else "full")
-    if args.model == "hybrid":
-        table.add_row("gnn", config.gnn_model if config.gnn_enabled else "off")
-        table.add_row("sequence", "on" if config.seq_enabled else "off")
+    if args.model == "temporal-graph":
+        table.add_row("history_len", str(config.history_len))
+        table.add_row("candidate_history_len", str(config.candidate_history_len))
+        table.add_row("hidden_size", str(config.hidden_size))
+        table.add_row("layers", str(config.layers))
+        table.add_row("heads", str(config.heads))
+        table.add_row("refit_full", "on" if config.refit_full else "off")
         table.add_row("max_fit_events", str(config.max_fit_events) if config.max_fit_events else "full")
     return Panel(table, title="JGRec build", border_style="blue")
 

@@ -86,6 +86,6 @@ packages = [
 	"jgrec.rankers",
 	"jgrec.rankers.common",
 	"jgrec.rankers.craft",
-	"jgrec.rankers.hybrid",
+	"jgrec.rankers.temporal_graph",
 ]
 py-modules = ["sitecustomize"]

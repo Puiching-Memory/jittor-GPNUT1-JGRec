@@ -12,8 +12,8 @@ uv run jgrec-build
 选择模型后端：
 
 ```bash
-uv run jgrec-build --model hybrid       # 当前默认模型
-uv run jgrec-build --model craft        # 官方 CRAFT baseline 适配器
+uv run jgrec-build --model temporal-graph   # 当前默认模型
+uv run jgrec-build --model craft            # 官方 CRAFT baseline 适配器
 ```
 
 输出文件：
@@ -26,7 +26,7 @@ result/<run_id>/
 └── result.zip
 ```
 
-`<run_id>` 使用可读短名，例如 `hybrid_full_cuda_seed-42_gnn-xsimgcl_sequence-on_<hash>`。
+`<run_id>` 使用可读短名，例如 `temporal-graph_full_cuda_seed-42_hist-64_candhist-32_dim-128_<hash>`。
 
 冒烟测试：
 
@@ -76,7 +76,7 @@ uv run zensical serve
 
 ## Current Model
 
-当前默认模型位于 `src/jgrec/rankers/hybrid/`。它使用因果时间切分训练 JittorGeometric XSimGCL/LightGCN 图塔、SASRec 序列塔和时序统计特征，并用 Jittor MLP 在候选集内做 softmax 重排序。
+当前默认模型位于 `src/jgrec/rankers/temporal_graph/`。它是端到端训练的动态图候选重排序模型：使用 JittorGeometric `TemporalData` 与 temporal neighbor sampler 构造因果历史邻域，复用 CRAFT cross-attention 模块做候选-历史交互建模，并用同一个候选集 softmax loss 更新节点 embedding、temporal memory update、attention 和 scorer。
 
 统一入口还支持 `src/jgrec/rankers/craft/` 中的 CRAFT baseline 适配器。
 

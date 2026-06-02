@@ -51,10 +51,12 @@ def ensure_builtin_rankers() -> None:
     if registry.names():
         return
 
-    def hybrid_factory(config: Any) -> Ranker:
-        from .hybrid.ranker import HybridRankerAdapter, TrainingConfig
+    def temporal_graph_factory(config: Any) -> Ranker:
+        from .temporal_graph.ranker import TemporalGraphRankerAdapter, TemporalGraphTrainingConfig
 
-        return HybridRankerAdapter(config if isinstance(config, TrainingConfig) else TrainingConfig())
+        return TemporalGraphRankerAdapter(
+            config if isinstance(config, TemporalGraphTrainingConfig) else TemporalGraphTrainingConfig()
+        )
 
     def craft_factory(config: Any) -> Ranker:
         from .craft.config import CRAFTBaselineConfig
@@ -62,5 +64,5 @@ def ensure_builtin_rankers() -> None:
 
         return CRAFTBaselineRanker(config if isinstance(config, CRAFTBaselineConfig) else CRAFTBaselineConfig())
 
-    registry.register("hybrid", hybrid_factory)
+    registry.register("temporal-graph", temporal_graph_factory)
     registry.register("craft", craft_factory)

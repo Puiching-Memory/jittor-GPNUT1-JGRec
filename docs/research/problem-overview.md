@@ -265,22 +265,20 @@ flowchart LR
 
 ## 6. 工程化基线实例
 
-现有默认模型 `TemporalHybridRanker` 可视为上述方法谱系的一个工程化实例。其基本结构由因果时间切分、统计特征、三窗口图塔、SASRec 序列塔和 Jittor MLP 融合层组成。
+现有默认模型 `TemporalGraphRanker` 可视为上述方法谱系的一个工程化实例。其基本结构由因果时间切分、JittorGeometric temporal neighbor sampler、候选级历史 token、CRAFT-style cross-attention 和候选集 softmax 组成。
 
 ```mermaid
 flowchart LR
-    A["因果时间切分"] --> B["时序统计特征"]
-    A --> C["XSimGCL / LightGCN<br/>三窗口图塔"]
-    A --> D["SASRec<br/>序列塔"]
-    B --> E["候选特征拼接"]
-    C --> E
-    D --> E
-    E --> F["Jittor MLP<br/>融合打分"]
+    A["因果时间切分"] --> B["TemporalData"]
+    B --> C["temporal neighbor sampler"]
+    C --> D["src / candidate 历史 token"]
+    D --> E["CRAFT-style cross-attention"]
+    E --> F["candidate scorer"]
     F --> G["查询内 Softmax"]
     G --> H["100 维概率输出"]
 ```
 
-特征层包括 pair 记忆、近期行为、目标节点热度、图协同分数和序列偏好分数。融合层比较 `stats`、`stats_gnn` 和 `stats_gnn_seq` 三类特征组，并根据验证指标选择最终特征集合。这种设计的主要作用是将强统计基线与神经表示学习分离，使图塔或序列塔在某一数据集上不稳定时不会必然破坏统计信号。
+模型直接从时间因果历史图中抽取源节点历史、候选节点历史、重复/共现信号和时间间隔编码，使用一个 listwise ranking loss 更新 embedding、历史聚合式 temporal memory、attention 和 scorer。该设计的主要作用是将候选重排序目标前移到整个神经图模型，而不是把动态图建模降级为离线特征生产。
 
 ## 7. 开放研究问题
 
@@ -291,8 +289,8 @@ flowchart LR
 | RQ1  | 任务边界           | 如何区分候选重排序、开放召回和传统二分类链接预测。                  |
 | RQ2  | 场景异质性         | 哪些数据集由重复边主导，哪些数据集由新链接主导。                    |
 | RQ3  | 统计信号贡献       | pair 记忆、目标热度、近因和源节点活跃度各自解释多少排序增益。       |
-| RQ4  | 图学习增益         | LightGCN/XSimGCL 等图协同分数是否改善已知节点之间的新链接排序。     |
-| RQ5  | 序列建模价值       | SASRec 或时间间隔特征是否能刻画源节点兴趣漂移。                     |
+| RQ4  | 图学习增益         | temporal neighbor attention 是否改善已知节点之间的新链接排序。      |
+| RQ5  | 序列建模价值       | 源历史 token、候选历史 token 和时间间隔编码是否能刻画兴趣漂移。     |
 | RQ6  | 负采样与候选分布   | random、popular、recent、history negatives 与线上候选分布是否一致。 |
 | RQ7  | 离线验证可信度     | 本地 AP/MRR 与线上 MRR 是否保持一致排序。                           |
 | RQ8  | 可扩展实现         | 在百万级节点和千万级交互下如何控制训练、推理和输出成本。            |
@@ -305,9 +303,9 @@ flowchart LR
 
 1. 数据画像：训练边数、唯一节点数、重复 pair 比例、holdout 新链接比例和测试候选覆盖率。
 2. 因果切分：按时间构造历史上下文、监督训练事件和验证尾部。
-3. 基线对照：比较 `stats`、`stats + LightGCN`、`stats + XSimGCL`、`stats + XSimGCL + SASRec`。
-4. 指标记录：分数据集记录 AP、MRR、选择的特征组、训练时间、推理时间和输出校验结果。
-5. 消融实验：分别移除 pair、热度、近期、图塔和序列塔，观察信号贡献。
+3. 基线对照：比较 CRAFT、EdgeBank/统计规则和 `temporal-graph`。
+4. 指标记录：分数据集记录 AP、MRR、训练时间、推理时间和输出校验结果。
+5. 消融实验：分别移除 src history、candidate history、repeat/common-history 统计、time encoding 和 refit-full，观察信号贡献。
 6. 随机性检查：对随机初始化和负采样敏感的模型使用多 seed 复测。
 7. 线上锚点：结构性改动需与已知线上基线比较。
 8. 提交校验：确认 CSV 行列数、概率范围、8 位小数和 `result.zip` 结构。

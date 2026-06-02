@@ -11,10 +11,9 @@ flowchart TB
     C --> C3["types.py<br/>Interaction / TestQuery / FitContext / TrainingReport"]
     A --> D["rankers"]
     D --> D1["base.py<br/>Ranker 协议"]
-    D --> D2["registry.py<br/>hybrid / craft 懒加载"]
-    D --> D3["hybrid<br/>XSimGCL / LightGCN + SASRec + stats + MLP"]
+    D --> D2["registry.py<br/>temporal-graph / craft 懒加载"]
+    D --> D3["temporal_graph<br/>端到端动态图 Transformer 重排序"]
     D --> D4["craft<br/>官方 CRAFT baseline 适配器"]
-    D --> D6["common<br/>共享 MLP 融合头"]
     A --> E["submission.py<br/>CSV / ZIP 写出和格式校验"]
 ```
 
@@ -27,13 +26,13 @@ ranker.fit(interactions, context) -> TrainingReport
 ranker.predict_batch(queries) -> np.ndarray  # shape=(batch, 100)
 ```
 
-`jgrec.core.runner.build_dataset_submission()` 只依赖这个接口，不关心底层模型是当前 hybrid 还是 CRAFT。
+`jgrec.core.runner.build_dataset_submission()` 只依赖这个接口，不关心底层模型是当前 temporal-graph 还是 CRAFT。
 
 ## 模型后端
 
 | 后端           | CLI                   | 说明                                                                                                                          |
 | -------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| 当前模型       | `--model hybrid`      | 默认后端，XSimGCL/LightGCN 图塔、SASRec 序列塔、统计特征和 MLP 融合。                                                         |
+| 当前模型       | `--model temporal-graph` | 默认后端，JittorGeometric temporal sampler + CRAFT-style cross-attention + 候选集 softmax 端到端训练。 |
 | CRAFT baseline | `--model craft`       | 官方 CRAFT baseline 逻辑已迁入 `rankers/craft`，接入统一提交管线。                                                            |
 
 ## 数据流
@@ -43,7 +42,7 @@ flowchart TB
     Train["data/dataset*/train.csv"] --> ReadTrain["core.io.read_interactions()"]
     ReadTrain --> Create["rankers.registry.create_ranker(--model)"]
     Create --> Fit["ranker.fit(interactions, FitContext)"]
-    Fit --> H["hybrid<br/>NodeIdMap + stats + graph towers + SASRec + fusion MLP"]
+    Fit --> H["temporal_graph<br/>TemporalData + temporal neighbors + cross-attention + listwise loss"]
     Fit --> C["craft<br/>TemporalData + neighbor sampler + CRAFT"]
 
     Test["data/dataset*/test.csv"] --> ReadTest["core.io.read_test_queries()"]

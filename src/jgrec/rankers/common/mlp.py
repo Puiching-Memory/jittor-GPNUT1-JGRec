@@ -1,6 +1,7 @@
-from __future__ import annotations
+"""Legacy compatibility module.
 
-from jgrec.rankers.hybrid.fusion import FusionConfig, FusionMLP, FusionResult, fit_fusion_mlp, predict_logits
+The default ranker now trains an end-to-end temporal graph model and no longer
+uses the old fusion MLP stack.
+"""
 
-__all__ = ["FusionConfig", "FusionMLP", "FusionResult", "fit_fusion_mlp", "predict_logits"]
-
+__all__: list[str] = []
