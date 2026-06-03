@@ -42,7 +42,7 @@ def main() -> int:
         metrics: dict[str, float] = {}
         for dataset_idx, dataset in enumerate(datasets, start=1):
             ranker = TemporalGraphRanker()
-            interactions = list(read_interactions(dataset.train_path))
+            interactions = read_interactions(dataset.train_path)
             report = ranker.fit(
                 interactions,
                 training_config=config,
@@ -115,6 +115,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-fit-events", type=int, default=0)
     parser.add_argument("--max-train-events", type=int, default=20_000)
     parser.add_argument("--max-val-events", type=int, default=5_000)
+    parser.add_argument("--num-negatives", type=int, default=99)
+    parser.add_argument("--validation-candidates", choices=["random", "test_like"], default="test_like")
     parser.add_argument("--epochs-max", type=int, default=6)
     parser.add_argument("--sqlite-timeout", type=float, default=120.0)
     parser.add_argument("--quiet", action="store_true")
@@ -189,7 +191,7 @@ def _suggest_config(trial: optuna.Trial, args: argparse.Namespace):
         val_ratio=0.15,
         max_train_events=args.max_train_events,
         max_val_events=args.max_val_events,
-        num_negatives=trial.suggest_categorical("num_negatives", [15, 31, 63, 99]),
+        num_negatives=args.num_negatives,
         max_fit_events=args.max_fit_events,
         epochs=trial.suggest_int("epochs", 2, args.epochs_max),
         train_batch_size=trial.suggest_categorical("train_batch_size", [128, 256, 384, 512]),
@@ -205,6 +207,7 @@ def _suggest_config(trial: optuna.Trial, args: argparse.Namespace):
         layers=trial.suggest_int("layers", 1, 4),
         heads=heads,
         dropout=trial.suggest_float("dropout", 0.05, 0.45),
+        validation_candidates=args.validation_candidates,
         refit_full=False,
     )
 

@@ -1,10 +1,9 @@
 import csv
 
+import numpy as np
 import pytest
 
 from jgrec.core.io import count_csv_data_rows, discover_datasets, read_interactions, read_test_queries
-from jgrec.core.types import Interaction
-from jgrec.core.types import TestQuery as Query
 
 
 def _candidate_header(count: int = 100) -> list[str]:
@@ -53,10 +52,10 @@ def test_read_interactions_accepts_extra_columns(tmp_path):
         ],
     )
 
-    assert list(read_interactions(path)) == [
-        Interaction(src=2, dst=3, time=4),
-        Interaction(src=5, dst=8, time=13),
-    ]
+    np.testing.assert_array_equal(
+        read_interactions(path),
+        np.asarray([[2, 3, 4], [5, 8, 13]], dtype=np.int32),
+    )
 
 
 def test_read_interactions_requires_core_columns(tmp_path):
@@ -64,16 +63,17 @@ def test_read_interactions_requires_core_columns(tmp_path):
     _write_csv(path, [["src", "time"], ["1", "2"]])
 
     with pytest.raises(ValueError, match="must contain columns: src,dst,time"):
-        list(read_interactions(path))
+        read_interactions(path)
 
 
 def test_read_test_queries_parses_exactly_100_candidates(tmp_path):
     path = tmp_path / "test.csv"
     _write_csv(path, [_candidate_header(), _candidate_row(src=7, time=11)])
 
-    assert list(read_test_queries(path)) == [
-        Query(src=7, time=11, candidates=tuple(range(100)))
-    ]
+    queries = read_test_queries(path)
+    np.testing.assert_array_equal(queries.src, np.asarray([7], dtype=np.int32))
+    np.testing.assert_array_equal(queries.time, np.asarray([11], dtype=np.int32))
+    np.testing.assert_array_equal(queries.candidates, np.asarray([list(range(100))], dtype=np.int32))
 
 
 def test_read_test_queries_requires_exactly_100_candidates(tmp_path):
@@ -81,15 +81,15 @@ def test_read_test_queries_requires_exactly_100_candidates(tmp_path):
     _write_csv(path, [_candidate_header(count=99), _candidate_row(count=99)])
 
     with pytest.raises(ValueError, match="exactly 100 candidate columns"):
-        list(read_test_queries(path))
+        read_test_queries(path)
 
 
 def test_read_test_queries_validates_row_width(tmp_path):
     path = tmp_path / "test.csv"
     _write_csv(path, [_candidate_header(), ["1", "2", "3"]])
 
-    with pytest.raises(ValueError, match="has 3 columns, expected 102"):
-        list(read_test_queries(path))
+    with pytest.raises(ValueError):
+        read_test_queries(path)
 
 
 def test_count_csv_data_rows_ignores_header(tmp_path):

@@ -52,7 +52,7 @@ Optuna 调参：
 uv run jgrec-tune-temporal-graph --n-trials 32 --n-jobs 1 --gpu-id 0 --quiet
 ```
 
-多 GPU 调参使用多个进程共享同一个 study，细节见 [实验与基准](docs/experiments/benchmarks.md)。
+多 GPU 调参使用多个进程共享同一个 study，细节见 [模型优化](docs/experiments/model-optimization.md)。
 
 CPU 环境：
 
@@ -67,7 +67,7 @@ uv run jgrec-build --cpu
 - 任务与数据：[赛题说明](docs/task/competition.md)、[数据契约](docs/task/data-contract.md)、[当前数据画像](docs/task/data-profile.md)
 - 系统与模型：[系统架构](docs/system/architecture.md)、[模型设计](docs/system/modeling.md)
 - 运行与开发：[运行手册](docs/operations/runbook.md)、[开发规范](docs/operations/development.md)
-- 实验与研究：[实验与基准](docs/experiments/benchmarks.md)、[研究问题综述](docs/research/problem-overview.md)、[GNN 推荐论文调研](docs/research/gnn-survey.md)
+- 实验与研究：[架构优化](docs/experiments/architecture-optimization.md)、[模型优化](docs/experiments/model-optimization.md)、[研究问题综述](docs/research/problem-overview.md)、[GNN 推荐论文调研](docs/research/gnn-survey.md)
 
 构建本地文档站点：
 

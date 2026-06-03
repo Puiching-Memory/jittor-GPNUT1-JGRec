@@ -1,14 +1,18 @@
-from jgrec.core.types import Interaction
+import numpy as np
+
 from jgrec.idmap import NodeIdMap
 
 
 def test_node_id_map_assigns_sorted_dense_ids():
     id_map = NodeIdMap.from_interactions(
-        [
-            Interaction(src=20, dst=300, time=1),
-            Interaction(src=10, dst=100, time=2),
-            Interaction(src=20, dst=200, time=3),
-        ]
+        np.asarray(
+            [
+                [20, 300, 1],
+                [10, 100, 2],
+                [20, 200, 3],
+            ],
+            dtype=np.int32,
+        )
     )
 
     assert id_map.src_values == (10, 20)

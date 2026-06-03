@@ -343,7 +343,8 @@ flowchart LR
 - [赛道一：基于图学习的动态推荐任务](../task/competition.md)
 - [当前数据画像](../task/data-profile.md)
 - [模型设计](../system/modeling.md)
-- [实验与基准](../experiments/benchmarks.md)
+- [模型优化](../experiments/model-optimization.md)
+- [架构优化](../experiments/architecture-optimization.md)
 - [推荐系统论文调研归档](recommender-survey.md)
 - [GNN 推荐论文调研](gnn-survey.md)
 

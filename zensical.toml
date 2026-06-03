@@ -28,7 +28,8 @@ nav = [
     { "开发规范" = "operations/development.md" },
   ] },
   { "实验与研究" = [
-    { "实验与基准" = "experiments/benchmarks.md" },
+    { "架构优化" = "experiments/architecture-optimization.md" },
+    { "模型优化" = "experiments/model-optimization.md" },
     { "研究问题综述" = "research/problem-overview.md" },
     { "GNN 推荐论文调研" = "research/gnn-survey.md" },
     { "推荐系统论文调研归档" = "research/recommender-survey.md" },

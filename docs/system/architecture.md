@@ -8,7 +8,7 @@ flowchart TB
     A --> C["core"]
     C --> C1["io.py<br/>数据集发现、CSV 读取、行数统计"]
     C --> C2["runner.py<br/>统一 fit / predict / write / zip 管线"]
-    C --> C3["types.py<br/>Interaction / TestQuery / FitContext / TrainingReport"]
+    C --> C3["types.py<br/>InteractionArray / TestQueryArray / FitContext / TrainingReport"]
     A --> D["rankers"]
     D --> D1["base.py<br/>Ranker 协议"]
     D --> D2["registry.py<br/>temporal-graph / craft 懒加载"]
@@ -27,6 +27,7 @@ ranker.predict_batch(queries) -> np.ndarray  # shape=(batch, 100)
 ```
 
 `jgrec.core.runner.build_dataset_submission()` 只依赖这个接口，不关心底层模型是当前 temporal-graph 还是 CRAFT。
+其中 `interactions` 是固定列顺序的 `np.ndarray[int32]`，shape 为 `(n, 3)`，列为 `src, dst, time`；`queries` 是 `TestQueryArray`，包含 `src[n]`、`time[n]` 和 `candidates[n,100]` 三块 `int32` 数组。
 
 ## 模型后端
 

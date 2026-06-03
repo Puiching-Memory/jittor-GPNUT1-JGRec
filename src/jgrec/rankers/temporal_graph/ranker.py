@@ -4,12 +4,26 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from jgrec.core.types import FitContext, Interaction, TestQuery, TrainingReport
+from jgrec.core.io import read_test_queries
+from jgrec.core.types import (
+    INTERACTION_DST,
+    INTERACTION_TIME,
+    FitContext,
+    InteractionArray,
+    TestQueryArray,
+    TrainingReport,
+)
 from jgrec.logging import log
 
 from .index import TemporalNodeMap, safe_neighbor_sampler, temporal_data_from_interactions, temporal_loader_api
 from .model import EndToEndTemporalGraphModel, TemporalGraphModelConfig
-from .trainer import fit_full_epochs, predict_logits, queries_to_prediction_batch, train_listwise
+from .trainer import (
+    TestCandidateIndex,
+    fit_full_epochs,
+    predict_logits,
+    queries_to_prediction_batch,
+    train_listwise,
+)
 
 
 @dataclass(frozen=True)
@@ -33,6 +47,7 @@ class TemporalGraphTrainingConfig:
     layers: int = 3
     heads: int = 4
     dropout: float = 0.15
+    validation_candidates: str = "random"
     refit_full: bool = True
 
 
@@ -46,10 +61,15 @@ class TemporalGraphRanker:
         self.config: TemporalGraphTrainingConfig | None = None
         self.training_report: TrainingReport | None = None
 
-    def fit(self, interactions: list[Interaction], training_config: TemporalGraphTrainingConfig, context: FitContext) -> TrainingReport:
-        if not interactions:
+    def fit(
+        self,
+        interactions: InteractionArray,
+        training_config: TemporalGraphTrainingConfig,
+        context: FitContext,
+    ) -> TrainingReport:
+        if len(interactions) == 0:
             raise ValueError("training interactions are empty")
-        interactions = sorted(interactions, key=lambda item: item.time)
+        interactions = interactions[np.argsort(interactions[:, INTERACTION_TIME], kind="stable")]
         if training_config.max_fit_events > 0 and len(interactions) > training_config.max_fit_events:
             interactions = interactions[-training_config.max_fit_events :]
         if len(interactions) < 4:
@@ -60,7 +80,8 @@ class TemporalGraphRanker:
         full_data = temporal_data_from_interactions(interactions, self.node_map)
         _, get_neighbor_sampler = temporal_loader_api()
         self.neighbor_sampler = safe_neighbor_sampler(get_neighbor_sampler(full_data, "recent", seed=training_config.seed))
-        dst_pool = np.asarray(sorted({self.node_map.dst_id(item.dst) for item in interactions}), dtype=np.int32)
+        dst_pool = np.unique(self.node_map.dst_ids(interactions[:, INTERACTION_DST])).astype(np.int32, copy=False)
+        dst_pool = dst_pool[dst_pool > 0]
 
         n_events = len(interactions)
         val_size = max(1, int(n_events * training_config.val_ratio))
@@ -69,10 +90,11 @@ class TemporalGraphRanker:
             train_end = n_events - 1
         train_events = interactions[:train_end]
         val_events = interactions[train_end:]
-        time_span = max(interactions[-1].time - interactions[0].time, 1)
+        time_span = max(int(interactions[-1, INTERACTION_TIME]) - int(interactions[0, INTERACTION_TIME]), 1)
 
         rng = np.random.default_rng(training_config.seed)
         self.model = self._build_model(time_span)
+        validation_candidate_index = self._validation_candidate_index(context, training_config)
         result = train_listwise(
             model=self.model,
             train_events=train_events,
@@ -89,6 +111,7 @@ class TemporalGraphRanker:
             max_train_events=training_config.max_train_events,
             max_val_events=training_config.max_val_events,
             selection_metric=training_config.selection_metric,
+            validation_candidate_index=validation_candidate_index,
             rng=rng,
             verbose=training_config.verbose,
         )
@@ -127,17 +150,15 @@ class TemporalGraphRanker:
                 "best_epoch": float(result.best_epoch),
                 "num_nodes": float(self.node_map.num_nodes),
                 "num_dst": float(self.node_map.num_dst),
+                "validation_test_like": 1.0 if training_config.validation_candidates == "test_like" else 0.0,
             },
         )
         self.training_report = report
         return report
 
-    def predict(self, query: TestQuery) -> np.ndarray:
-        return self.predict_batch([query])[0]
-
-    def predict_batch(self, queries: list[TestQuery]) -> np.ndarray:
-        if not queries:
-            return np.empty((0, 100), dtype=np.float64)
+    def predict_batch(self, queries: TestQueryArray) -> np.ndarray:
+        if len(queries) == 0:
+            return np.empty((0, queries.candidate_count), dtype=np.float64)
         if self.model is None or self.node_map is None or self.neighbor_sampler is None or self.config is None:
             raise RuntimeError("ranker is not fitted")
         batch = queries_to_prediction_batch(
@@ -169,6 +190,19 @@ class TemporalGraphRanker:
             )
         )
 
+    def _validation_candidate_index(
+        self,
+        context: FitContext,
+        training_config: TemporalGraphTrainingConfig,
+    ) -> TestCandidateIndex | None:
+        if self.node_map is None:
+            raise RuntimeError("ranker is not initialized")
+        if training_config.validation_candidates == "random":
+            return None
+        if training_config.validation_candidates != "test_like":
+            raise ValueError(f"unsupported validation candidate protocol: {training_config.validation_candidates}")
+        return TestCandidateIndex.from_queries(read_test_queries(context.dataset.test_path), self.node_map)
+
 
 class TemporalGraphRankerAdapter:
     name = "temporal-graph"
@@ -177,7 +211,7 @@ class TemporalGraphRankerAdapter:
         self.config = config or TemporalGraphTrainingConfig()
         self.impl = TemporalGraphRanker()
 
-    def fit(self, interactions: list[Interaction], context: FitContext) -> TrainingReport:
+    def fit(self, interactions: InteractionArray, context: FitContext) -> TrainingReport:
         config = replace(
             self.config,
             seed=context.seed,
@@ -185,5 +219,5 @@ class TemporalGraphRankerAdapter:
         )
         return self.impl.fit(interactions, training_config=config, context=context)
 
-    def predict_batch(self, queries: list[TestQuery]) -> np.ndarray:
+    def predict_batch(self, queries: TestQueryArray) -> np.ndarray:
         return self.impl.predict_batch(queries)

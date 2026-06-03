@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .core.types import Interaction
+from .core.types import INTERACTION_DST, INTERACTION_SRC, InteractionArray
 
 
 @dataclass(frozen=True)
@@ -15,9 +15,9 @@ class NodeIdMap:
     dst_values: tuple[int, ...]
 
     @classmethod
-    def from_interactions(cls, interactions: list[Interaction]) -> NodeIdMap:
-        src_values = tuple(sorted({item.src for item in interactions}))
-        dst_values = tuple(sorted({item.dst for item in interactions}))
+    def from_interactions(cls, interactions: InteractionArray) -> NodeIdMap:
+        src_values = tuple(sorted(np.unique(interactions[:, INTERACTION_SRC]).astype(int).tolist()))
+        dst_values = tuple(sorted(np.unique(interactions[:, INTERACTION_DST]).astype(int).tolist()))
         return cls(
             src_to_id={value: idx for idx, value in enumerate(src_values)},
             dst_to_id={value: idx for idx, value in enumerate(dst_values)},

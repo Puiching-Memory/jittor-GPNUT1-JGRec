@@ -12,7 +12,15 @@ from jittor_geometric.nn.models.craft import CRAFT
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 from jgrec.core.io import read_test_queries
-from jgrec.core.types import FitContext, Interaction, TestQuery, TrainingReport
+from jgrec.core.types import (
+    INTERACTION_DST,
+    INTERACTION_SRC,
+    INTERACTION_TIME,
+    FitContext,
+    InteractionArray,
+    TestQueryArray,
+    TrainingReport,
+)
 from jgrec.logging import log, track
 
 from .config import CRAFTBaselineConfig
@@ -38,13 +46,13 @@ class CRAFTBaselineRanker:
         self.neighbor_sampler = None
         self.num_neighbors = self.config.num_neighbors
 
-    def fit(self, interactions: list[Interaction], context: FitContext) -> TrainingReport:
-        if not interactions:
+    def fit(self, interactions: InteractionArray, context: FitContext) -> TrainingReport:
+        if len(interactions) == 0:
             raise ValueError("training interactions are empty")
-        interactions = sorted(interactions, key=lambda item: item.time)
-        src_np = np.asarray([item.src for item in interactions], dtype=np.int32)
-        dst_np = np.asarray([item.dst for item in interactions], dtype=np.int32)
-        time_np = np.asarray([item.time for item in interactions], dtype=np.int32)
+        interactions = interactions[np.argsort(interactions[:, INTERACTION_TIME], kind="stable")]
+        src_np = interactions[:, INTERACTION_SRC].astype(np.int32, copy=False)
+        dst_np = interactions[:, INTERACTION_DST].astype(np.int32, copy=False)
+        time_np = interactions[:, INTERACTION_TIME].astype(np.int32, copy=False)
         edge_ids_np = np.arange(len(interactions), dtype=np.int32) + 1
         test_candidates, test_src = _scan_test_nodes(context.dataset.test_path)
 
@@ -174,15 +182,15 @@ class CRAFTBaselineRanker:
             metrics={"auc": best_auc},
         )
 
-    def predict_batch(self, queries: list[TestQuery]) -> np.ndarray:
-        if not queries:
-            return np.empty((0, 100), dtype=np.float64)
+    def predict_batch(self, queries: TestQueryArray) -> np.ndarray:
+        if len(queries) == 0:
+            return np.empty((0, queries.candidate_count), dtype=np.float64)
         if self.model is None or self.neighbor_sampler is None:
             raise RuntimeError("ranker is not fitted")
 
-        batch_src = np.asarray([query.src for query in queries], dtype=np.int32)
-        batch_time = np.asarray([query.time for query in queries], dtype=np.int32)
-        batch_candidates = np.asarray([query.candidates for query in queries], dtype=np.int32)
+        batch_src = queries.src.astype(np.int32, copy=False)
+        batch_time = queries.time.astype(np.int32, copy=False)
+        batch_candidates = queries.candidates.astype(np.int32, copy=False)
 
         src_neighb_seq, _, src_neighb_times = self.neighbor_sampler.get_historical_neighbors_left(
             node_ids=batch_src,
@@ -260,14 +268,10 @@ class CRAFTBaselineRanker:
 
 
 def _scan_test_nodes(test_path) -> tuple[np.ndarray, np.ndarray]:
-    candidates: list[tuple[int, ...]] = []
-    sources: list[int] = []
-    for query in read_test_queries(test_path):
-        candidates.append(query.candidates)
-        sources.append(query.src)
-    if not candidates:
+    queries = read_test_queries(test_path)
+    if len(queries) == 0:
         raise ValueError(f"no test queries loaded from {test_path}")
-    return np.asarray(candidates, dtype=np.int32), np.asarray(sources, dtype=np.int32)
+    return queries.candidates.astype(np.int32, copy=False), queries.src.astype(np.int32, copy=False)
 
 
 def _snapshot_state(model: CRAFT) -> dict[str, np.ndarray]:

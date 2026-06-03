@@ -7,7 +7,7 @@ import jittor as jt
 import numpy as np
 from sklearn.metrics import average_precision_score
 
-from jgrec.core.types import Interaction, TestQuery
+from jgrec.core.types import INTERACTION_DST, INTERACTION_SRC, INTERACTION_TIME, InteractionArray, TestQueryArray
 from jgrec.logging import log, track
 
 from .index import TemporalNodeMap
@@ -33,10 +33,35 @@ class TemporalTrainingResult:
     state: dict[str, np.ndarray]
 
 
+@dataclass(frozen=True)
+class TestCandidateIndex:
+    by_src: dict[int, tuple[np.ndarray, ...]]
+    global_candidates: np.ndarray
+
+    @classmethod
+    def from_queries(cls, queries: TestQueryArray, node_map: TemporalNodeMap) -> TestCandidateIndex:
+        by_src_lists: dict[int, list[np.ndarray]] = {}
+        global_chunks: list[np.ndarray] = []
+        chunk_size = 4096
+        for start in range(0, len(queries), chunk_size):
+            stop = min(start + chunk_size, len(queries))
+            candidate_rows = node_map.dst_ids(queries.candidates[start:stop])
+            for src, candidate_ids in zip(queries.src[start:stop], candidate_rows):
+                candidate_ids = candidate_ids[candidate_ids > 0]
+                if candidate_ids.size == 0:
+                    continue
+                compact = candidate_ids.astype(np.int32, copy=False)
+                by_src_lists.setdefault(int(src), []).append(compact)
+                global_chunks.append(compact)
+        by_src = {src: tuple(rows) for src, rows in by_src_lists.items()}
+        global_candidates = np.concatenate(global_chunks) if global_chunks else np.empty(0, dtype=np.int32)
+        return cls(by_src=by_src, global_candidates=global_candidates.astype(np.int32, copy=False))
+
+
 def train_listwise(
     model: EndToEndTemporalGraphModel,
-    train_events: list[Interaction],
-    val_events: list[Interaction],
+    train_events: InteractionArray,
+    val_events: InteractionArray,
     node_map: TemporalNodeMap,
     neighbor_sampler: Any,
     dst_pool: np.ndarray,
@@ -50,10 +75,11 @@ def train_listwise(
     max_train_events: int,
     max_val_events: int,
     selection_metric: str,
+    validation_candidate_index: TestCandidateIndex | None,
     rng: np.random.Generator,
     verbose: bool,
 ) -> TemporalTrainingResult:
-    if not train_events:
+    if len(train_events) == 0:
         raise ValueError("temporal graph ranker requires non-empty train events")
     train_events = _sample_events(train_events, max_train_events, rng)
     val_events = _sample_events(val_events, max_val_events, rng)
@@ -66,6 +92,7 @@ def train_listwise(
         dst_pool=dst_pool,
         batch_size=batch_size,
         num_negatives=num_negatives,
+        candidate_index=validation_candidate_index,
         rng=np.random.default_rng(int(rng.integers(0, 2**31 - 1))),
     )
     best_score = _select_metric(best_ap, best_mrr, selection_metric)
@@ -101,6 +128,7 @@ def train_listwise(
             dst_pool=dst_pool,
             batch_size=batch_size,
             num_negatives=num_negatives,
+            candidate_index=validation_candidate_index,
             rng=np.random.default_rng(int(rng.integers(0, 2**31 - 1))),
         )
         val_score = _select_metric(val_ap, val_mrr, selection_metric)
@@ -134,7 +162,7 @@ def train_listwise(
 
 def fit_full_epochs(
     model: EndToEndTemporalGraphModel,
-    events: list[Interaction],
+    events: InteractionArray,
     node_map: TemporalNodeMap,
     neighbor_sampler: Any,
     dst_pool: np.ndarray,
@@ -177,26 +205,28 @@ def fit_full_epochs(
 
 def evaluate_listwise(
     model: EndToEndTemporalGraphModel,
-    events: list[Interaction],
+    events: InteractionArray,
     node_map: TemporalNodeMap,
     neighbor_sampler: Any,
     dst_pool: np.ndarray,
     *,
     batch_size: int,
     num_negatives: int,
+    candidate_index: TestCandidateIndex | None = None,
     rng: np.random.Generator,
 ) -> tuple[float, float]:
-    if not events:
+    if len(events) == 0:
         return 0.0, 0.0
     model.eval()
     score_batches: list[np.ndarray] = []
     for batch_events in _event_batches(events, batch_size):
-        batch = build_training_batch(
+        batch = build_evaluation_batch(
             events=batch_events,
             node_map=node_map,
             neighbor_sampler=neighbor_sampler,
             dst_pool=dst_pool,
             num_negatives=num_negatives,
+            candidate_index=candidate_index,
             rng=rng,
             history_len=model.config.history_len,
             candidate_history_len=model.config.candidate_history_len,
@@ -208,8 +238,59 @@ def evaluate_listwise(
     return _ap_from_scores(scores), _mrr_from_scores(scores)
 
 
+def build_evaluation_batch(
+    events: InteractionArray,
+    node_map: TemporalNodeMap,
+    neighbor_sampler: Any,
+    dst_pool: np.ndarray,
+    num_negatives: int,
+    candidate_index: TestCandidateIndex | None,
+    rng: np.random.Generator,
+    history_len: int,
+    candidate_history_len: int,
+) -> TemporalTrainingBatch:
+    if candidate_index is None:
+        return build_training_batch(
+            events=events,
+            node_map=node_map,
+            neighbor_sampler=neighbor_sampler,
+            dst_pool=dst_pool,
+            num_negatives=num_negatives,
+            rng=rng,
+            history_len=history_len,
+            candidate_history_len=candidate_history_len,
+        )
+
+    src_ids = node_map.src_ids(events[:, INTERACTION_SRC])
+    times = events[:, INTERACTION_TIME].astype(np.int32, copy=False)
+    positives = node_map.dst_ids(events[:, INTERACTION_DST])
+    src_neighbor_ids, _, src_neighbor_times = neighbor_sampler.get_historical_neighbors_left(
+        node_ids=src_ids,
+        node_interact_times=times,
+        num_neighbors=history_len,
+    )
+    candidates = _sample_test_like_candidate_ids(
+        events=events,
+        positives=positives,
+        candidate_index=candidate_index,
+        dst_pool=dst_pool,
+        num_negatives=num_negatives,
+        rng=rng,
+    )
+    return build_prediction_batch(
+        src_ids=src_ids,
+        times=times,
+        candidates=candidates,
+        neighbor_sampler=neighbor_sampler,
+        history_len=history_len,
+        candidate_history_len=candidate_history_len,
+        src_neighbor_ids=np.asarray(src_neighbor_ids, dtype=np.int32),
+        src_neighbor_times=np.asarray(src_neighbor_times, dtype=np.int32),
+    )
+
+
 def build_training_batch(
-    events: list[Interaction],
+    events: InteractionArray,
     node_map: TemporalNodeMap,
     neighbor_sampler: Any,
     dst_pool: np.ndarray,
@@ -218,9 +299,9 @@ def build_training_batch(
     history_len: int,
     candidate_history_len: int,
 ) -> TemporalTrainingBatch:
-    src_ids = np.asarray([node_map.src_id(item.src) for item in events], dtype=np.int32)
-    times = np.asarray([item.time for item in events], dtype=np.int32)
-    positives = np.asarray([node_map.dst_id(item.dst) for item in events], dtype=np.int32)
+    src_ids = node_map.src_ids(events[:, INTERACTION_SRC])
+    times = events[:, INTERACTION_TIME].astype(np.int32, copy=False)
+    positives = node_map.dst_ids(events[:, INTERACTION_DST])
     src_neighbor_ids, _, src_neighbor_times = neighbor_sampler.get_historical_neighbors_left(
         node_ids=src_ids,
         node_interact_times=times,
@@ -288,15 +369,15 @@ def build_prediction_batch(
 
 
 def queries_to_prediction_batch(
-    queries: list[TestQuery],
+    queries: TestQueryArray,
     node_map: TemporalNodeMap,
     neighbor_sampler: Any,
     history_len: int,
     candidate_history_len: int,
 ) -> TemporalTrainingBatch:
-    src_ids = np.asarray([node_map.src_id(query.src) for query in queries], dtype=np.int32)
-    times = np.asarray([query.time for query in queries], dtype=np.int32)
-    candidates = np.asarray([node_map.dst_ids(query.candidates) for query in queries], dtype=np.int32)
+    src_ids = node_map.src_ids(queries.src)
+    times = queries.time.astype(np.int32, copy=False)
+    candidates = node_map.dst_ids(queries.candidates)
     return build_prediction_batch(
         src_ids=src_ids,
         times=times,
@@ -381,22 +462,82 @@ def _sample_candidate_ids(
     return candidates
 
 
+def _sample_test_like_candidate_ids(
+    events: InteractionArray,
+    positives: np.ndarray,
+    candidate_index: TestCandidateIndex,
+    dst_pool: np.ndarray,
+    num_negatives: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    candidate_count = num_negatives + 1
+    candidates = np.empty((positives.shape[0], candidate_count), dtype=np.int32)
+    candidates[:, 0] = positives
+    global_pool = candidate_index.global_candidates if candidate_index.global_candidates.size else dst_pool
+    fallback_pool = dst_pool if dst_pool.size else global_pool
+
+    for row_idx, positive in enumerate(positives):
+        used = {int(positive), 0}
+        negatives: list[int] = []
+        raw_src = int(events[row_idx, INTERACTION_SRC])
+        source_rows = candidate_index.by_src.get(raw_src)
+        if source_rows:
+            row = source_rows[int(rng.integers(0, len(source_rows)))]
+            for value in row:
+                item = int(value)
+                if item in used:
+                    continue
+                used.add(item)
+                negatives.append(item)
+                if len(negatives) >= num_negatives:
+                    break
+
+        attempts = 0
+        while len(negatives) < num_negatives and attempts < 100 and global_pool.size:
+            attempts += 1
+            need = num_negatives - len(negatives)
+            draw_size = max(need * 3, 128)
+            sampled = rng.choice(global_pool, size=draw_size, replace=global_pool.size < draw_size)
+            for value in sampled:
+                item = int(value)
+                if item in used:
+                    continue
+                used.add(item)
+                negatives.append(item)
+                if len(negatives) >= num_negatives:
+                    break
+
+        if len(negatives) < num_negatives:
+            for value in fallback_pool:
+                item = int(value)
+                if item in used:
+                    continue
+                used.add(item)
+                negatives.append(item)
+                if len(negatives) >= num_negatives:
+                    break
+        if len(negatives) < num_negatives:
+            negatives.extend([int(positive)] * (num_negatives - len(negatives)))
+        candidates[row_idx, 1:] = np.asarray(negatives[:num_negatives], dtype=np.int32)
+    return candidates
+
+
 def _candidate_softmax_loss(logits: jt.Var) -> jt.Var:
     shifted = logits - logits.max(dim=1, keepdims=True)
     log_probs = shifted - jt.log(jt.exp(shifted).sum(dim=1, keepdims=True))
     return -log_probs[:, 0].mean()
 
 
-def _event_batches(events: list[Interaction], batch_size: int):
+def _event_batches(events: InteractionArray, batch_size: int):
     for start in range(0, len(events), batch_size):
         yield events[start : start + batch_size]
 
 
-def _sample_events(events: list[Interaction], max_events: int, rng: np.random.Generator) -> list[Interaction]:
+def _sample_events(events: InteractionArray, max_events: int, rng: np.random.Generator) -> InteractionArray:
     if max_events <= 0 or len(events) <= max_events:
-        return list(events)
+        return events
     indices = np.sort(rng.choice(len(events), size=max_events, replace=False))
-    return [events[int(index)] for index in indices]
+    return events[indices]
 
 
 def _ap_from_scores(scores: np.ndarray) -> float:

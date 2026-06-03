@@ -13,7 +13,8 @@ flowchart LR
     D --> G["当前数据画像"]
     H["理解实现"] --> I["系统架构"]
     H --> J["模型设计"]
-    K["继续实验"] --> L["实验与基准"]
+    K["继续实验"] --> L["模型优化"]
+    K --> O["架构优化"]
     K --> M["研究资料"]
     K --> N["开发规范"]
 ```
@@ -26,7 +27,8 @@ flowchart LR
 | 判断数据适合什么模型       | [当前数据画像](task/data-profile.md)                                                 |
 | 理解代码如何串起来         | [系统架构](system/architecture.md)                                                   |
 | 理解当前模型为什么这样设计 | [模型设计](system/modeling.md)                                                       |
-| 判断一次实验能不能保留     | [实验与基准](experiments/benchmarks.md)                                              |
+| 判断一次模型实验能不能保留 | [模型优化](experiments/model-optimization.md)                                        |
+| 记录架构与性能优化         | [架构优化](experiments/architecture-optimization.md)                                 |
 | 查找论文和外部实现线索     | [研究资料](research/gnn-survey.md) 与 [开源参考](research/open-source-references.md) |
 | 修改代码前看工程约束       | [开发规范](operations/development.md)                                                |
 
@@ -50,7 +52,8 @@ flowchart LR
 
 ### 实验与研究
 
-- [实验与基准](experiments/benchmarks.md)：冠军基线、实验门禁、性能优化和复测命令。
+- [架构优化](experiments/architecture-optimization.md)：数据读取、批构造、邻居采样和推理吞吐优化记录。
+- [模型优化](experiments/model-optimization.md)：冠军基线、实验门禁、调参、线上提交和模型消融记录。
 - [研究问题综述](research/problem-overview.md)：将赛题抽象成动态图候选重排序研究问题。
 - [GNN 推荐论文调研](research/gnn-survey.md)：图协同过滤、图对比学习、谱图和动态图方向。
 - [推荐系统论文调研归档](research/recommender-survey.md)：非 GNN 推荐、序列、排序和生成式推荐背景。

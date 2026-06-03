@@ -20,6 +20,7 @@ from .submission import expected_test_rows, validate_submission_file, write_zip
 
 ModelName = Literal["temporal-graph", "craft"]
 SelectionMetric = Literal["ap", "mrr"]
+ValidationCandidates = Literal["random", "test_like"]
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ class CLIConfig:
     layers: int = 3
     heads: int = 4
     dropout: float = 0.15
+    validation_candidates: ValidationCandidates = "random"
     no_refit_full: bool = False
     craft_neighbors: int = 30
     craft_hidden_size: int = 64
@@ -143,6 +145,7 @@ def _ranker_config(args: CLIConfig):
         layers=args.layers,
         heads=args.heads,
         dropout=args.dropout,
+        validation_candidates=args.validation_candidates,
         refit_full=not args.no_refit_full,
     )
 
@@ -204,6 +207,7 @@ def _run_panel(run_dir: Path, zip_path: Path, args: CLIConfig, config) -> Panel:
         table.add_row("hidden_size", str(config.hidden_size))
         table.add_row("layers", str(config.layers))
         table.add_row("heads", str(config.heads))
+        table.add_row("validation_candidates", config.validation_candidates)
         table.add_row("refit_full", "on" if config.refit_full else "off")
         table.add_row("max_fit_events", str(config.max_fit_events) if config.max_fit_events else "full")
     return Panel(table, title="JGRec build", border_style="blue")
