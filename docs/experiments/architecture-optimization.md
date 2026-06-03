@@ -44,7 +44,7 @@
 | batch slicing       |         0.0001s |       0.000021s |  5.38x |         0.0002s |       0.000032s |  5.05x |
 | batch id extract    |         0.0104s |         0.0093s |  1.12x |         0.0124s |         0.0096s |  1.28x |
 
-结论补充：数组化的收益不只来自 IO。训练启动阶段的排序、unique、切片和采样都从 Python 对象访问转为数组操作，因此有稳定收益；当前 batch 内 `raw id -> compact id` 仍使用 Python dict/list comprehension，收益有限，是后续若继续优化 batch 构造时更值得盯的点。
+结论补充：数组化的收益不只来自 IO。训练启动阶段的排序、unique、切片和采样都从 Python 对象访问转为数组操作，因此有稳定收益。本次实验结束时，batch 内 `raw id -> compact id` 仍使用 Python dict/list comprehension，因此 `batch id extract` 收益有限；该问题已在下一节 `TemporalNodeMap` 批量 `searchsorted` 映射中解决，当前主链路不再把这一步作为 batch 构造热点。
 
 ### TestQueryArray 与批量映射改造
 
@@ -144,32 +144,139 @@
 
 结论：保留。该改造直接命中上一节识别出的主瓶颈，且完整 batch 构造有接近 4x 的真实收益。实现中特意保留原始 timestamp dtype 做二分；不能把时间戳先转成 `float32`，否则在 `1e8` 量级会丢精度并改变“严格早于当前时间”的边界语义。
 
-### 数组化扩展候选清单
+### 剩余 batch 构造与工具路径收敛
+
+实验日期：2026-06-03。
+
+实验内容：继续推进剩余优化候选，并补做前后对照 benchmark，避免只凭代码形态判断收益。对照项包括：`TestCandidateIndex` ragged/offset 原型、`_sample_test_like_candidate_ids()` 批量 src 命中原型、`_sample_test_like_candidate_ids()` 真实 test 候选行快路径、`_batch_to_jittor()` 的 `jt.Var(array.astype(np.int32, copy=False))` 转换，以及 `submission.validate_submission_file()` 的 `np.loadtxt` 整体验证。
+
+基准协议：
+
+- 数据：全量 `data/dataset1/test.csv`、`data/dataset2/test.csv`，以及对应 train.csv 建出的 `TemporalNodeMap`。
+- `TestCandidateIndex.from_queries()`：旧实现为 `dict[int, tuple[np.ndarray, ...]]`；原型为 `src_raw_ids + row_offsets + candidate_offsets + candidate_values` 扁平 ragged 结构；重复 3 次取均值。
+- `_sample_test_like_candidate_ids()`：取 train tail `batch_size=256`，`num_negatives=99`；使用同一 seed 重建 RNG；重复 7 次取均值。
+- test-like 候选行快路径：当选中的真实 test 候选行过滤掉 positive 和 padding 后，前 `num_negatives` 个候选已足量且唯一时，直接按原顺序填充；否则回到原 Python 去重和 fallback 逻辑。用 5000 条 validation events、20 个 batch，对照旧逻辑候选矩阵是否完全一致。
+- `_batch_to_jittor()`：合成 `batch_size=256`、`candidate_count=100`、`history_len=64`、`candidate_history_len=32` 的 batch；CPU；warmup 后重复 50 次取均值。补充测试 `int32/int64/float32/float64/bool` dtype，确认转换语义。
+- `validate_submission_file()`：合成 `20000 x 100` 概率 CSV；旧实现逐行 `float` 转换，新实现首行 CSV 检查 + `np.loadtxt` 整体验证；重复 3 次取均值。
+
+结果：
+
+| 阶段                                   | `dataset1` 旧版 | `dataset1` 原型/新版 | 加速比 | `dataset2` 旧版 | `dataset2` 原型/新版 | 加速比 | 决策          |
+| -------------------------------------- | --------------: | -------------------: | -----: | --------------: | -------------------: | -----: | ------------- |
+| `TestCandidateIndex.from_queries()`    |          0.897s |               0.919s |  0.98x |          2.630s |               2.724s |  0.97x | ragged 不保留 |
+| `_sample_test_like_candidate_ids(256)` |         0.0065s |              0.0058s |  1.12x |         0.0057s |              0.0054s |  1.07x | ragged 不保留 |
+
+test-like 快路径补充结果：
+
+| 阶段                                                 | `dataset1` 旧版 | `dataset1` 新版 | 加速比 | `dataset2` 旧版 | `dataset2` 新版 | 加速比 | 输出校验 |
+| ---------------------------------------------------- | --------------: | --------------: | -----: | --------------: | --------------: | -----: | -------- |
+| `_sample_test_like_candidate_ids()`，5000 val events |          0.117s |          0.073s |  1.60x |          0.112s |          0.064s |  1.74x | 20/20 batch 候选矩阵一致 |
+
+快路径覆盖：`dataset1` 5000 条 validation events 中有 4196 行具备结构性快路径条件，`dataset2` 为 4626 行。进一步拆完整 `build_evaluation_batch(test_like)` + `_batch_to_jittor()` 后，`dataset1` 从约 `0.566s` 降到 `0.527s`（1.08x），`dataset2` 从约 `0.415s` 降到 `0.363s`（1.14x）。快路径保留，但它已经不是新的主瓶颈；快路径后 candidate neighbor gather 仍占 batch 构造加转换总耗时的约 68-76%。
+
+补充结果：
+
+| 阶段                                   | 旧版均值 | 新版均值 | 加速比 | 决策 |
+| -------------------------------------- | -------: | -------: | -----: | ---- |
+| `_batch_to_jittor()` 合成 batch 转换   | 0.00119s | 0.00063s |  1.90x | 保留 |
+| `validate_submission_file(20000 rows)` | 0.36184s | 0.14141s |  2.56x | 保留 |
+
+dtype 补充：不能把所有输入直接替换为 `jt.Var(array)`，因为 `float32` 会保持 `float32`、`float64` 会变 `float32`、`bool` 会保持 `bool`，不满足模型输入统一 `int32` 的旧语义。最终实现使用 `jt.Var(array.astype(np.int32, copy=False))`：`int32` 输入零拷贝快路径，非 `int32` 输入显式 cast 后再建 Var。非 `int32` 场景与旧 `jt.array(..., dtype=jt.int32)` 基本持平，`int32` 场景保持约 2x 局部转换收益。
+
+内存补充：ragged `TestCandidateIndex` 的纯数组字节数没有下降，`dataset1` 为 `46.6MiB -> 47.2MiB`，`dataset2` 为 `117.1MiB -> 118.3MiB`，且未计入旧实现 Python dict/tuple 对象头。考虑默认 `max_val_events=5000`、`train_batch_size=256` 时 test-like 验证约 20 个 batch，采样局部节省仅毫秒级，无法抵消索引构建回退和复杂度。
+
+结论：保留有明确局部收益且风险较低的 `_batch_to_jittor()`、test-like 候选行快路径和提交校验改造；ragged/offset 候选索引原型不进入源码。后续若要继续优化 batch 构造，需要重新做端到端 profiling，重点确认 candidate neighbor gather 是否仍是主耗时。
+
+### 提前 Jittor 原生化数据容器评估
+
+实验日期：2026-06-03。
+
+实验动机：评估是否应在项目更早阶段把 `np.ndarray` 数据容器替换成 `jt.Var`，并在 Jittor 上做排序、切片、列提取、unique、ID 映射前处理等下游变换。该方向的潜在收益是减少模型边界的 numpy -> Jittor 转换；风险是当前 CSV IO、`TemporalNodeMap`、CSR neighbor sampler 和 JittorGeometric sampler 仍大量依赖 numpy，提前转 Var 可能引入额外 `.numpy()` 桥接和同步。
+
+基准协议：
+
+- 数据：全量 `dataset1/dataset2` train/test。
+- 设备：CPU 路径；Jittor op 后显式 `jt.sync_all()`。
+- 对比项：全量 `np.ndarray -> jt.Var` 与 `jt.Var -> np.ndarray`、Var 切片/列提取、Var unique/argsort、当前 numpy ID 映射 vs Var 切片后转回 numpy 再映射、当前 `build_training_batch()` vs “tail 事件先转 Var，每 batch `.numpy()` 后构造”。
+- 稳定性：Jittor row gather `v[jt_order]` 单独隔离进程测试，避免 native crash 影响其他 benchmark。
+
+基础转换和桥接结果：
+
+| 阶段                                | `dataset1` | `dataset2` | 结论                                          |
+| ----------------------------------- | ---------: | ---------: | --------------------------------------------- |
+| 全量 train `np -> jt.Var`           |    0.0029s |    0.0061s | 转换本身不贵                                  |
+| 全量 train `jt.Var -> np`           |    0.0024s |    0.0056s | 转回也不贵，但频繁桥接会累积                  |
+| 全量 test candidates `np -> jt.Var` |    0.0084s |    0.0194s | 大矩阵转换仍可接受                            |
+| 全量 test candidates `jt.Var -> np` |    0.0051s |    0.0156s | 仍是额外成本                                  |
+| Var tail slice 20k                  |    0.0025s |    0.0028s | 明显慢于 numpy 视图切片                       |
+| Var column extraction               |    0.0028s |    0.0044s | 明显慢于 numpy 列视图                         |
+| Var column extraction 后 `.numpy()` |    0.0004s |    0.0014s | 若下游要 numpy，还要再付桥接成本              |
+| query batch Var slice 2048          |    0.0026s |    0.0032s | 当前 `TestQueryArray.rows()` 是微秒级视图切片 |
+| query batch Var slice 后 `.numpy()` |   0.00012s |   0.00013s | 对当前预测 batch 构造是纯额外成本             |
+
+排序、unique 和 batch 构造结果：
+
+| 阶段                                                 | `dataset1` numpy | `dataset1` Jittor/桥接 | `dataset2` numpy | `dataset2` Jittor/桥接 | 结论                                       |
+| ---------------------------------------------------- | ---------------: | ---------------------: | ---------------: | ---------------------: | ------------------------------------------ |
+| `argsort(time)` order                                |          0.0026s |                0.0178s |          0.0090s |                0.0393s | Jittor 慢 4-7x，且排序稳定性语义需额外确认 |
+| `unique(src/dst)`                                    |          0.0248s |                0.1996s |          0.1079s |                0.5962s | Jittor 慢 5-8x                             |
+| batch raw id 映射                                    |         0.00018s |               0.00247s |         0.00020s |               0.00283s | Var 切片后转回 numpy 再映射慢约 13-14x     |
+| `build_training_batch(256)` 当前 numpy               |          0.0355s |                      - |          0.0393s |                      - | 当前 CSR sampler 后的完整构造              |
+| `build_training_batch(256)` tail Var -> numpy bridge |                - |                0.0350s |                - |                0.0392s | 无可兑现收益，只是把桥接藏进 batch 前      |
+
+稳定性补充：`v[jt_order]` 形式的二维 Var row gather 在本地 Jittor 1.3.11.0 / CUDA 初始化环境下触发 native `getitem` segfault（buffer overflow）。即使不考虑速度，这也使“在 Jittor 上完成全量排序后 row gather”不适合作为默认数据准备路径。
+
+结论：不保留“项目尽早替换为 Jittor 原生类型”的方向。当前架构应继续以 numpy 作为 IO、ID 映射、候选构造和 neighbor sampler 前处理的数据容器，只在模型执行边界用 `_batch_to_jittor()` 转为 `jt.Var`。后续若要进一步 Jittor 原生化，必须先满足两个条件：一是 JittorGeometric neighbor sampler 和本项目 CSR sampler 的输入输出也能稳定停留在 Var 上；二是排序、unique、gather 等基础变换在真实数据上有明确性能和稳定性优势。
+
+### 数据画像脚本局部优化
+
+实验日期：2026-06-03。
+
+实验动机：`scripts/analyze_data_profile.py` 是低频研究脚本，但全量数据画像仍需几十秒。评估是否可以在不改变统计口径的前提下，收敛部分明显的 Python 循环开销。
+
+实现内容：
+
+- `read_train()` / `read_test()` 改为 `np.loadtxt(..., dtype=np.int64, ndmin=2)` 批量读取，再构造现有 `Event` / `Query` 对象；`read_train()` 保持 stable time sort。
+- `time_drift()` 和 `sequence_behavior()` 使用 `recent_hit_rank()` / `SourceState.recent_ranks`，避免每条事件反复 `list -> set`。
+- `test_candidate_distribution()` 去掉内层 `Counter` 字符串 key 累加，改用局部整数计数器和缓存局部引用。
+- `unseen_dst_analysis()` 使用 `extend` 和缓存 `dst_set`，减少候选循环中的重复属性访问。
+
+基准协议：
+
+- 数据：全量 `data/dataset1` / `data/dataset2`。
+- 对照：用 `git show HEAD:scripts/analyze_data_profile.py` 加载旧版函数，与当前新版同进程逐阶段计时。
+- 校验：对 `read_train` / `read_test` 做输入 digest；对 `basic_stats`、`time_drift`、`test_candidate_distribution`、`unseen_dst_analysis`、`sequence_behavior` 做 JSON digest，确保输出一致。
+- 补充测试：新增小样本 CSV 和手工状态单元测试，覆盖 header 列顺序、单行 test、行宽错误、recent hit 口径、候选统计和 unseen 分析。
+
+结果：
+
+| 阶段                            | `dataset1` 旧版 | `dataset1` 新版 | 加速比 | `dataset2` 旧版 | `dataset2` 新版 | 加速比 |
+| ------------------------------- | --------------: | --------------: | -----: | --------------: | --------------: | -----: |
+| `read_train()`                  |          1.484s |          1.210s |  1.23x |          6.305s |          4.769s |  1.32x |
+| `read_test()`                   |          1.138s |          1.093s |  1.04x |          2.804s |          2.295s |  1.22x |
+| `time_drift()`                  |          3.475s |          2.178s |  1.60x |         11.640s |          7.470s |  1.56x |
+| `test_candidate_distribution()` |          6.307s |          3.977s |  1.59x |         11.824s |          8.036s |  1.47x |
+| `unseen_dst_analysis()`         |          0.782s |          0.607s |  1.29x |          3.113s |          3.013s |  1.03x |
+| `sequence_behavior()`           |          1.085s |          0.741s |  1.46x |          2.946s |          1.878s |  1.57x |
+
+输出校验：两个数据集的 `events`、`queries`、`basic_stats`、`time_drift`、`test_candidate_distribution`、`unseen_dst_analysis`、`sequence_behavior` digest 均一致。
+
+结论：保留本轮局部优化。它们有真实数据前后对照和输出一致性校验，且不改变脚本的数据结构边界。更激进的“把整个画像脚本改成数组状态机”暂不推进；该脚本仍以统计可读性为优先，除非未来画像脚本再次成为日常迭代瓶颈。
+
+### 剩余优化候选清单
 
 标记日期：2026-06-02。
+更新日期：2026-06-03。
 
-原则：只标记，不直接扩大改动面。每一项进入实现前都要先做局部 benchmark，确认收益超过复杂度和回归风险。
+原则：本清单只保留尚未完成、仍可能继续评估的优化项；已落地项和已评估不保留项只保留在上方实验记录中。每一项进入实现前仍需先做局部 benchmark，确认收益超过复杂度和回归风险。
 
-| 优先级 | 位置                                                                     | 当前形态                                                                  | 数组化方向                                                                                                           | 预期收益                                                                 | 风险                                                                                      |
-| ------ | ------------------------------------------------------------------------ | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
-| P0     | `core.io.read_test_queries()` / `core.runner.build_dataset_submission()` | 测试集逐行生成 `TestQuery`，runner 维护 `list[TestQuery]` batch           | 新增 `TestQueryArray`，一次读成 `src: int32[n]`、`time: int32[n]`、`candidates: int32[n,100]`，runner 按数组切片推理 | 推理阶段减少 CSV 解析、对象构造、batch append 和候选 tuple 访问          | 需要同步改 `Ranker.predict_batch` 协议；提交写出和 `limit_rows` 语义要保持一致            |
-| P0     | `TemporalNodeMap.src_id()` / `dst_id()` / `dst_ids()` 与 batch 构造      | 每个 batch 用 Python dict/list comprehension 做 raw id 到 compact id 映射 | 构建 sorted raw id 数组和 compact id 数组，用 `np.searchsorted` 或 dense lookup table 批量映射                       | 直接针对当前 benchmark 中收益最小的 `batch id extract`，训练和推理都受益 | 原始 ID 稀疏程度未知；dense lookup 可能浪费内存，`searchsorted` 要处理 missing id/padding |
-| P0     | `temporal_data_from_interactions()`                                      | 全量 train 事件用 list comprehension 映射 src/dst                         | 复用批量映射函数，一次性映射整列 `src/dst`                                                                           | 训练启动阶段再降 Python 循环开销                                         | 需要保证 test-only 节点仍能映射，missing id 仍为 padding                                  |
-| P0     | `queries_to_prediction_batch()`                                          | 推理 batch 从 `list[TestQuery]` 抽 `src/time/candidates`                  | 接收 `TestQueryArray` 切片后直接批量映射候选矩阵                                                                     | 完整推理吞吐收益，尤其全量 test.csv                                      | 需要修改 `craft` 和所有 ranker 的预测协议                                                 |
-| P1     | `_sample_candidate_ids()`                                                | 每行维护 Python `set`，循环抽负样本                                       | 先批量 `rng.choice(dst_pool, size=(batch, k))`，再用 numpy mask 去除 positive/forbidden，不足再局部补齐              | 训练 batch 构造可能受益，候选数 99 时更明显                              | 去重和 forbidden 逻辑复杂；可能改变负采样分布，需要固定 seed 对照                         |
-| P1     | `_sample_test_like_candidate_ids()`                                      | test-like 验证负样本按行查 dict、逐候选去重                               | 将 `by_src` 存成候选矩阵或 ragged offsets；常见 src 用矩阵抽行，fallback 用批量全局池                                | 验证阶段更快，Optuna 多 trial 受益                                       | ragged 数据结构复杂；候选去重仍需保底路径                                                 |
-| P1     | `TestCandidateIndex.from_queries()`                                      | 已用 numpy chunk，但输入仍是 `TestQuery` 迭代器                           | 从 `TestQueryArray` 直接构建 `global_candidates` 和 src 分组 offsets                                                 | 进一步降低 test-like 构建时间和内存                                      | 依赖 P0 测试集数组协议                                                                    |
-| P1     | `TemporalTrainingBatch` / `_batch_to_jittor()`                           | 每个 batch 用 dataclass 包多个 numpy 数组，再逐项 `jt.array`              | 可评估返回 tuple 或预分配/复用 numpy buffer，减少临时对象                                                            | 小幅降低 batch 构造开销                                                  | 可读性下降；Jittor `jt.array` 转换可能才是主成本，要先测                                  |
-| P1     | `CRAFTBaselineRanker.predict_batch()`                                    | 仍从 `list[TestQuery]` 抽数组                                             | 接入 `TestQueryArray`，候选矩阵直接传入                                                                              | craft 推理路径与默认路径一致受益                                         | CRAFT 依赖原始 ID 和 `dst_min_idx`，要单独 smoke                                          |
-| P2     | `rankers/temporal_graph/index.scan_test_nodes_csv()`                     | CSV 逐行扫 test 节点集合                                                  | 若仍需要该函数，改用 `TestQueryArray` 或 `np.loadtxt`                                                                | 低频工具函数收益                                                         | 当前默认路径几乎不用，优先级低                                                            |
-| P2     | `scripts/analyze_data_profile.py`                                        | 独立 `Event` / `Query` dataclass 和大量 Python Counter/set                | 把基础统计、候选矩阵、时间切分改为 numpy 数组，保留必要 Counter                                                      | 数据画像脚本运行更快，便于反复分析                                       | 脚本逻辑多、研究输出多，容易改坏统计口径                                                  |
-| P2     | `submission.validate_submission_file()`                                  | CSV 逐行校验概率                                                          | 可用 `np.loadtxt` 读取并整体校验 shape/range                                                                         | 提交校验更快                                                             | 输出文件可能很大，整体读取增加瞬时内存                                                    |
+当前没有保留中的未完成优化项。上一版清单中的 P0/P1/P2 项已分别落地、拒绝或归档到上方实验记录中。
 
-建议顺序：
+当前建议顺序：
 
-1. 先实现并 benchmark `TestQueryArray`，因为它同时影响推理、test-like 验证和候选索引构建。
-2. 再实现 `TemporalNodeMap` 批量映射，重点复测 `batch id extract`、`temporal_data_from_interactions()` 和端到端 smoke。
-3. 最后再碰负采样向量化，因为收益可能大，但分布和边界更容易被改坏。
+1. 若继续优化训练 batch 构造，先基于当前 CSR recent sampler 重新拆解完整 `build_training_batch()`，不要沿用 CSR 改造前的热点排序。
+2. 优先确认剩余 candidate 邻居 gather、Jittor 转换、以及负采样在当前实现中的实际占比。负采样向量化曾评估不保留，除非新 profiling 显示占比显著上升，否则不重新列入候选清单。
+3. `analyze_data_profile.py` 已完成低风险局部优化；除非运行时间再次影响日常迭代，否则不继续做大规模结构重写。
 
 ### 训练 loop 同步改动
 

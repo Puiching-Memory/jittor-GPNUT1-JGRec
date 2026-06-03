@@ -4,6 +4,8 @@ import csv
 import zipfile
 from pathlib import Path
 
+import numpy as np
+
 from .core.io import count_csv_data_rows
 from .core.types import DatasetPaths, DatasetResult
 
@@ -18,16 +20,28 @@ def write_zip(results: list[DatasetResult], zip_path: Path) -> None:
 def validate_submission_file(csv_path: Path, expected_rows: int | None = None) -> None:
     with csv_path.open("r", newline="") as f:
         reader = csv.reader(f)
-        rows = 0
-        for line_number, row in enumerate(reader, start=1):
-            rows += 1
-            if len(row) != 100:
-                raise ValueError(f"{csv_path}:{line_number} has {len(row)} columns, expected 100")
-            values = [float(item) for item in row]
-            if any(value < 0.0 or value > 1.0 for value in values):
-                raise ValueError(f"{csv_path}:{line_number} contains probability outside [0, 1]")
-        if expected_rows is not None and rows != expected_rows:
-            raise ValueError(f"{csv_path} has {rows} rows, expected {expected_rows}")
+        first_row = next(reader, None)
+    rows = 0 if first_row is None else count_csv_data_rows(csv_path) + 1
+    if expected_rows is not None and rows != expected_rows:
+        raise ValueError(f"{csv_path} has {rows} rows, expected {expected_rows}")
+    if rows == 0:
+        return
+    if len(first_row) != 100:
+        raise ValueError(f"{csv_path}:1 has {len(first_row)} columns, expected 100")
+
+    try:
+        data = np.loadtxt(csv_path, delimiter=",", dtype=np.float64, ndmin=2)
+    except ValueError as exc:
+        message = str(exc)
+        if "the number of columns changed" in message:
+            raise ValueError(f"{csv_path} has inconsistent column count") from exc
+        raise
+    if data.shape != (rows, 100):
+        if data.shape[1] != 100:
+            raise ValueError(f"{csv_path} has {data.shape[1]} columns, expected 100")
+        raise ValueError(f"{csv_path} has {data.shape[0]} rows, expected {rows}")
+    if np.any((data < 0.0) | (data > 1.0)):
+        raise ValueError(f"{csv_path} contains probability outside [0, 1]")
 
 
 def expected_test_rows(dataset: DatasetPaths) -> int:

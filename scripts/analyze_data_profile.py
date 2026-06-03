@@ -5,6 +5,7 @@ import csv
 import json
 import math
 import time
+import warnings
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -157,27 +158,54 @@ def analyze_dataset(dataset_dir: Path, args: argparse.Namespace) -> dict:
 
 
 def read_train(path: Path) -> list[Event]:
-    events: list[Event] = []
     with path.open(newline="") as file:
-        reader = csv.DictReader(file)
-        for row in reader:
-            events.append(Event(src=int(row["src"]), dst=int(row["dst"]), time=int(row["time"])))
-    events.sort(key=lambda item: item.time)
-    return events
+        reader = csv.reader(file)
+        header = next(reader, None)
+    required = {"src", "dst", "time"}
+    if header is None or not required.issubset(header):
+        raise ValueError(f"{path} must contain columns: src,dst,time")
+
+    usecols = (header.index("src"), header.index("dst"), header.index("time"))
+    data = _load_int_csv(path, usecols=usecols)
+    if data.size == 0:
+        return []
+    data = data[np.argsort(data[:, 2], kind="stable")]
+    return [Event(src=int(src), dst=int(dst), time=int(timestamp)) for src, dst, timestamp in data]
 
 
 def read_test(path: Path) -> list[Query]:
-    queries: list[Query] = []
     with path.open(newline="") as file:
         reader = csv.reader(file)
-        header = next(reader)
-        expected = len(header) - 2
-        for row in reader:
-            candidates = tuple(int(value) for value in row[2:])
-            if len(candidates) != expected:
-                raise ValueError(f"{path} has inconsistent candidate count")
-            queries.append(Query(src=int(row[0]), time=int(row[1]), candidates=candidates))
-    return queries
+        header = next(reader, None)
+    if header is None or len(header) < 3:
+        raise ValueError(f"{path} must contain columns: src,time,c1,...")
+    data = _load_int_csv(path)
+    if data.size == 0:
+        return []
+    if data.shape[1] != len(header):
+        raise ValueError(f"{path} has inconsistent candidate count")
+    return [
+        Query(src=int(row[0]), time=int(row[1]), candidates=tuple(int(value) for value in row[2:]))
+        for row in data
+    ]
+
+
+def _load_int_csv(path: Path, usecols: tuple[int, ...] | None = None) -> np.ndarray:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        data = np.loadtxt(
+            path,
+            delimiter=",",
+            skiprows=1,
+            usecols=usecols,
+            dtype=np.int64,
+            ndmin=2,
+        )
+    data = np.asarray(data, dtype=np.int64)
+    if data.size == 0:
+        column_count = len(usecols) if usecols is not None else 0
+        return np.empty((0, column_count), dtype=np.int64)
+    return data
 
 
 def build_state(events: list[Event]) -> DataState:
@@ -288,9 +316,9 @@ def time_drift(events: list[Event]) -> dict:
                 counts["dst_seen_before"] += 1
             if (event.src, event.dst) in seen_pair:
                 counts["pair_seen_before"] += 1
-            history = list(recent[event.src])
+            recent_rank = recent_hit_rank(recent[event.src], event.dst)
             for k in RECENT_KS:
-                if event.dst in set(history[-k:]):
+                if recent_rank is not None and recent_rank <= k:
                     counts[f"recent_{k}_hit"] += 1
             seen_src.add(event.src)
             seen_dst.add(event.dst)
@@ -341,58 +369,82 @@ def test_candidate_distribution(queries: list[Query], state: DataState) -> dict:
         "same_id_as_train_src": [],
     }
     dst_rank = {dst: rank for rank, (dst, _) in enumerate(state.dst_counts.most_common(), start=1)}
-    counts = Counter()
+    dst_rank_get = dst_rank.get
+    dst_counts = state.dst_counts
+    pair_counts = state.pair_counts
+    src_set = state.src_set
     seen_candidate_ranks: list[int] = []
     seen_candidate_counts: list[int] = []
+    candidates_total = 0
+    known_dst = 0
+    unseen_dst = 0
+    pair_hit = 0
+    recent32_hit = 0
+    top100_dst = 0
+    top1000_dst = 0
+    same_id_as_train_src = 0
+    queries_with_pair_hit = 0
+    queries_with_recent32_hit = 0
     for query in queries:
         source = state.sources.get(query.src)
         recent32 = source.recent_ranks if source is not None else {}
-        query_counts = Counter()
+        query_known_dst = 0
+        query_unseen_dst = 0
+        query_pair_hit = 0
+        query_recent32_hit = 0
+        query_top100_dst = 0
+        query_top1000_dst = 0
+        query_same_id_as_train_src = 0
         for dst in query.candidates:
-            counts["candidates"] += 1
-            rank = dst_rank.get(dst)
+            candidates_total += 1
+            rank = dst_rank_get(dst)
             if rank is None:
-                query_counts["unseen_dst"] += 1
-                counts["unseen_dst"] += 1
+                query_unseen_dst += 1
+                unseen_dst += 1
             else:
-                query_counts["known_dst"] += 1
-                counts["known_dst"] += 1
+                query_known_dst += 1
+                known_dst += 1
                 seen_candidate_ranks.append(rank)
-                seen_candidate_counts.append(state.dst_counts[dst])
+                seen_candidate_counts.append(dst_counts[dst])
                 if rank <= 100:
-                    query_counts["top100_dst"] += 1
-                    counts["top100_dst"] += 1
+                    query_top100_dst += 1
+                    top100_dst += 1
                 if rank <= 1000:
-                    query_counts["top1000_dst"] += 1
-                    counts["top1000_dst"] += 1
-            if (query.src, dst) in state.pair_counts:
-                query_counts["pair_hit"] += 1
-                counts["pair_hit"] += 1
+                    query_top1000_dst += 1
+                    top1000_dst += 1
+            if (query.src, dst) in pair_counts:
+                query_pair_hit += 1
+                pair_hit += 1
             if dst in recent32:
-                query_counts["recent32_hit"] += 1
-                counts["recent32_hit"] += 1
-            if dst in state.src_set:
-                query_counts["same_id_as_train_src"] += 1
-                counts["same_id_as_train_src"] += 1
-        for key in per_query:
-            per_query[key].append(query_counts[key])
-        if query_counts["pair_hit"]:
-            counts["queries_with_pair_hit"] += 1
-        if query_counts["recent32_hit"]:
-            counts["queries_with_recent32_hit"] += 1
-    total_candidates = counts["candidates"]
+                query_recent32_hit += 1
+                recent32_hit += 1
+            if dst in src_set:
+                query_same_id_as_train_src += 1
+                same_id_as_train_src += 1
+        per_query["known_dst"].append(query_known_dst)
+        per_query["unseen_dst"].append(query_unseen_dst)
+        per_query["pair_hit"].append(query_pair_hit)
+        per_query["recent32_hit"].append(query_recent32_hit)
+        per_query["top100_dst"].append(query_top100_dst)
+        per_query["top1000_dst"].append(query_top1000_dst)
+        per_query["same_id_as_train_src"].append(query_same_id_as_train_src)
+        if query_pair_hit:
+            queries_with_pair_hit += 1
+        if query_recent32_hit:
+            queries_with_recent32_hit += 1
+    total_candidates = candidates_total
     total_queries = len(queries)
     return {
         "rates": {
-            "known_dst_candidate_rate": rate(counts["known_dst"], total_candidates),
-            "unseen_dst_candidate_rate": rate(counts["unseen_dst"], total_candidates),
-            "pair_hit_candidate_rate": rate(counts["pair_hit"], total_candidates),
-            "recent32_candidate_rate": rate(counts["recent32_hit"], total_candidates),
-            "top100_dst_candidate_rate": rate(counts["top100_dst"], total_candidates),
-            "top1000_dst_candidate_rate": rate(counts["top1000_dst"], total_candidates),
-            "same_id_as_train_src_candidate_rate": rate(counts["same_id_as_train_src"], total_candidates),
-            "query_with_pair_hit_rate": rate(counts["queries_with_pair_hit"], total_queries),
-            "query_with_recent32_hit_rate": rate(counts["queries_with_recent32_hit"], total_queries),
+            "known_dst_candidate_rate": rate(known_dst, total_candidates),
+            "unseen_dst_candidate_rate": rate(unseen_dst, total_candidates),
+            "pair_hit_candidate_rate": rate(pair_hit, total_candidates),
+            "recent32_candidate_rate": rate(recent32_hit, total_candidates),
+            "top100_dst_candidate_rate": rate(top100_dst, total_candidates),
+            "top1000_dst_candidate_rate": rate(top1000_dst, total_candidates),
+            "same_id_as_train_src_candidate_rate": rate(same_id_as_train_src, total_candidates),
+            "query_with_pair_hit_rate": rate(queries_with_pair_hit, total_queries),
+            "query_with_recent32_hit_rate": rate(queries_with_recent32_hit, total_queries),
         },
         "per_query": {key: qstats(value) for key, value in per_query.items()},
         "seen_candidate_dst_train_count": qstats(seen_candidate_counts),
@@ -403,11 +455,11 @@ def test_candidate_distribution(queries: list[Query], state: DataState) -> dict:
 def unseen_dst_analysis(queries: list[Query], state: DataState) -> dict:
     unseen_values: list[int] = []
     all_candidate_values: list[int] = []
+    dst_set = state.dst_set
     for query in queries:
-        for dst in query.candidates:
-            all_candidate_values.append(dst)
-            if dst not in state.dst_set:
-                unseen_values.append(dst)
+        candidates = query.candidates
+        all_candidate_values.extend(candidates)
+        unseen_values.extend(dst for dst in candidates if dst not in dst_set)
     unseen_set = set(unseen_values)
     all_set = set(all_candidate_values)
     if unseen_values:
@@ -512,8 +564,9 @@ def sequence_behavior(events: list[Event], prefix_state: DataState, val_events: 
             holdout_history_lengths.append(0)
             continue
         holdout_history_lengths.append(source.total)
+        rank = source.recent_ranks.get(event.dst)
         for k in RECENT_KS:
-            if event.dst in set(list(source.recent_dsts)[-k:]):
+            if rank is not None and rank <= k:
                 holdout_repeat_hits[f"recent_{k}_hit"] += 1
     return {
         "src_history_length": qstats(len(history) for history in by_src.values()),
@@ -859,6 +912,15 @@ def sample_events(events: list[Event], sample_size: int, rng: np.random.Generato
         return list(events)
     indices = np.sort(rng.choice(len(events), size=sample_size, replace=False))
     return [events[int(index)] for index in indices]
+
+
+def recent_hit_rank(history: deque[int], dst: int, limit: int = max(RECENT_KS)) -> int | None:
+    for rank, value in enumerate(reversed(history), start=1):
+        if rank > limit:
+            break
+        if value == dst:
+            return rank
+    return None
 
 
 def decay(gap: int, span: int) -> float:

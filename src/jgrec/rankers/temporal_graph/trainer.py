@@ -408,14 +408,18 @@ def load_state(model: EndToEndTemporalGraphModel, state: dict[str, np.ndarray]) 
 
 def _batch_to_jittor(batch: TemporalTrainingBatch) -> tuple[jt.Var, ...]:
     return (
-        jt.array(batch.src_ids, dtype=jt.int32),
-        jt.array(batch.candidates, dtype=jt.int32),
-        jt.array(batch.times, dtype=jt.int32),
-        jt.array(batch.src_neighbor_ids, dtype=jt.int32),
-        jt.array(batch.src_neighbor_times, dtype=jt.int32),
-        jt.array(batch.candidate_neighbor_ids, dtype=jt.int32),
-        jt.array(batch.candidate_neighbor_times, dtype=jt.int32),
+        _int32_var(batch.src_ids),
+        _int32_var(batch.candidates),
+        _int32_var(batch.times),
+        _int32_var(batch.src_neighbor_ids),
+        _int32_var(batch.src_neighbor_times),
+        _int32_var(batch.candidate_neighbor_ids),
+        _int32_var(batch.candidate_neighbor_times),
     )
+
+
+def _int32_var(array: np.ndarray) -> jt.Var:
+    return jt.Var(array.astype(np.int32, copy=False))
 
 
 def _sample_candidate_ids(
@@ -483,6 +487,12 @@ def _sample_test_like_candidate_ids(
         source_rows = candidate_index.by_src.get(raw_src)
         if source_rows:
             row = source_rows[int(rng.integers(0, len(source_rows)))]
+            filtered = row[(row != int(positive)) & (row != 0)]
+            if filtered.size >= num_negatives:
+                first_values = filtered[:num_negatives]
+                if np.unique(first_values).size == num_negatives:
+                    candidates[row_idx, 1:] = first_values.astype(np.int32, copy=False)
+                    continue
             for value in row:
                 item = int(value)
                 if item in used:
