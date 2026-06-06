@@ -9,6 +9,8 @@ uv sync
 uv run jgrec-build
 ```
 
+项目默认使用 `.python-version` 固定的 Python 3.12；如本机尚未安装，`uv sync` 会自动获取兼容解释器。
+
 选择模型后端：
 
 ```bash

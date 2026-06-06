@@ -2,7 +2,7 @@
 
 ## 前置条件
 
-- Python 版本由 `.python-version` 固定为 `3.11`。
+- Python 版本由 `.python-version` 固定为 `3.12`。
 - 依赖由 `uv.lock` 锁定。
 - Jittor 与 JittorGeometric 通过 `third_party/` 本地路径安装。
 - 正式赛数据放在 `data/` 下。`data/` 已在 `.gitignore` 中，不应提交到仓库。
@@ -176,7 +176,7 @@ PY
 
 ## 常见问题
 
-### Jittor 找不到 `python3.11-config`
+### Jittor 找不到 `python3.12-config`
 
 仓库根目录的 `sitecustomize.py` 会设置 Jittor 所需的 Python/CUDA 环境变量。正常通过 `uv run jgrec-build` 运行即可加载。
 

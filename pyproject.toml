@@ -2,22 +2,22 @@
 name = "jittor-gpnut1-jgrec"
 version = "0.1.0"
 description = "MVP code for Jittor GPNUT1 dynamic recommendation"
-requires-python = ">=3.10,<3.12"
+requires-python = "==3.12.*"
 dependencies = [
-	"einops>=0.8.0",
-	"jittor",
-	"jittor-geometric",
-	"networkx>=3.2",
+	"einops==0.8.2",
+	"jittor==1.3.11.0",
+	"jittor-geometric==2.0.0",
+	"networkx==3.6.1",
 	"nvidia-cudnn-cu12==8.9.7.29",
-	"numpy==1.24.0",
-	"pyparsing==3.2.1",
-	"pymetis==2023.1.1",
-	"scikit-learn==1.6.1",
-	"scipy==1.15.1",
-	"sympy==1.13.3",
-	"rich>=15.0.0",
-	"tyro>=0.9.0",
-	"optuna>=4.9.0",
+	"numpy==1.26.4",
+	"pyparsing==3.3.2",
+	"pymetis==2025.2.2",
+	"scikit-learn==1.9.0",
+	"scipy==1.17.1",
+	"sympy==1.14.0",
+	"rich==15.0.0",
+	"tyro==1.0.13",
+	"optuna==4.9.0",
 ]
 
 [project.scripts]
@@ -29,20 +29,20 @@ jittor = { path = "third_party/jittor", editable = true }
 jittor-geometric = { path = "third_party/JittorGeometric", editable = true }
 
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools==82.0.1", "wheel==0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 dev = [
-	"pytest>=8.3",
-	"pytest-cov>=6.0",
-	"ruff>=0.8.0",
-	"zensical>=0.0.43",
+	"pytest==9.0.3",
+	"pytest-cov==7.1.0",
+	"ruff==0.15.16",
+	"zensical==0.0.44",
 ]
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py312"
 src = ["src", "tests", "scripts"]
 extend-exclude = [
 	".cache",
