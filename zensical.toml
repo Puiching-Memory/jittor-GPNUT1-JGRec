@@ -24,6 +24,7 @@ nav = [
     { "模型设计" = "system/modeling.md" },
   ] },
   { "运行与开发" = [
+    { "提交说明" = "operations/submission.md" },
     { "运行手册" = "operations/runbook.md" },
     { "开发规范" = "operations/development.md" },
   ] },

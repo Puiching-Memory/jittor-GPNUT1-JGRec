@@ -2,6 +2,7 @@ import csv
 
 import numpy as np
 
+from jgrec.core import runner
 from jgrec.core.runner import build_dataset_submission
 from jgrec.core.types import DatasetPaths, FitContext, InteractionArray, TestQueryArray, TrainingReport
 from jgrec.submission import validate_submission_file
@@ -81,3 +82,31 @@ def test_build_dataset_submission_limits_rows_and_clips_predictions(tmp_path):
         rows = list(csv.reader(f))
     assert rows[0][0] == "0.00000000"
     assert rows[0][-1] == "1.00000000"
+
+
+def test_build_dataset_submission_logs_predict_progress_without_changing_output(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(runner, "PREDICT_PROGRESS_INTERVAL", 2)
+    dataset_root = tmp_path / "dataset1"
+    dataset_root.mkdir()
+    train_path = dataset_root / "train.csv"
+    test_path = dataset_root / "test.csv"
+    _write_train_csv(train_path)
+    _write_test_csv(test_path, row_count=5)
+    dataset = DatasetPaths("dataset1", dataset_root, train_path, test_path)
+    ranker = DummyRanker()
+
+    result = build_dataset_submission(
+        dataset=dataset,
+        ranker=ranker,
+        output_dir=tmp_path / "out",
+        batch_size=2,
+        seed=7,
+        verbose=True,
+    )
+
+    captured = capsys.readouterr()
+    assert result.rows == 5
+    assert ranker.batch_sizes == [2, 2, 1]
+    assert "[predict] dataset=dataset1 rows=2 batch=2" in captured.out
+    assert "[predict] dataset=dataset1 rows=4 batch=2" in captured.out
+    validate_submission_file(result.output_path, expected_rows=5)

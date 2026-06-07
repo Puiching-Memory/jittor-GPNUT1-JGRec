@@ -8,12 +8,14 @@ flowchart TB
     A --> C["core"]
     C --> C1["io.py<br/>数据集发现、CSV 读取、行数统计"]
     C --> C2["runner.py<br/>统一 fit / predict / write / zip 管线"]
-    C --> C3["types.py<br/>InteractionArray / TestQueryArray / FitContext / TrainingReport"]
+    C --> C3["types.py<br/>Interaction / TestQuery / FitContext / TrainingReport"]
+    C --> C4["memory.py<br/>阶段级内存和进度日志"]
     A --> D["rankers"]
     D --> D1["base.py<br/>Ranker 协议"]
-    D --> D2["registry.py<br/>temporal-graph / craft 懒加载"]
-    D --> D3["temporal_graph<br/>端到端动态图 Transformer 重排序"]
+    D --> D2["registry.py<br/>hybrid / craft 懒加载"]
+    D --> D3["hybrid<br/>stats + prior + structure + two-tower + graph + sequence + MLP"]
     D --> D4["craft<br/>官方 CRAFT baseline 适配器"]
+    D --> D6["common<br/>共享 MLP 融合头"]
     A --> E["submission.py<br/>CSV / ZIP 写出和格式校验"]
 ```
 
@@ -26,14 +28,13 @@ ranker.fit(interactions, context) -> TrainingReport
 ranker.predict_batch(queries) -> np.ndarray  # shape=(batch, 100)
 ```
 
-`jgrec.core.runner.build_dataset_submission()` 只依赖这个接口，不关心底层模型是当前 temporal-graph 还是 CRAFT。
-其中 `interactions` 是固定列顺序的 `np.ndarray[int32]`，shape 为 `(n, 3)`，列为 `src, dst, time`；`queries` 是 `TestQueryArray`，包含 `src[n]`、`time[n]` 和 `candidates[n,100]` 三块 `int32` 数组。
+`jgrec.core.runner.build_dataset_submission()` 只依赖这个接口，不关心底层模型是当前 hybrid 还是 CRAFT。
 
 ## 模型后端
 
 | 后端           | CLI                   | 说明                                                                                                                          |
 | -------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| 当前模型       | `--model temporal-graph` | 默认后端，JittorGeometric temporal sampler + CRAFT-style cross-attention + 候选集 softmax 端到端训练。 |
+| 当前模型       | `--model hybrid`      | 默认后端，统计特征、候选先验、结构特征、Two-Tower、XSimGCL/LightGCN 图塔、序列塔和 MLP 融合。                                 |
 | CRAFT baseline | `--model craft`       | 官方 CRAFT baseline 逻辑已迁入 `rankers/craft`，接入统一提交管线。                                                            |
 
 ## 数据流
@@ -43,7 +44,7 @@ flowchart TB
     Train["data/dataset*/train.csv"] --> ReadTrain["core.io.read_interactions()"]
     ReadTrain --> Create["rankers.registry.create_ranker(--model)"]
     Create --> Fit["ranker.fit(interactions, FitContext)"]
-    Fit --> H["temporal_graph<br/>TemporalData + temporal neighbors + cross-attention + listwise loss"]
+    Fit --> H["hybrid<br/>NodeIdMap + auto strategy + feature towers + fusion MLP"]
     Fit --> C["craft<br/>TemporalData + neighbor sampler + CRAFT"]
 
     Test["data/dataset*/test.csv"] --> ReadTest["core.io.read_test_queries()"]
@@ -51,12 +52,16 @@ flowchart TB
     H --> Predict
     C --> Predict
     Predict --> CSV["result/&lt;run_id&gt;/csv/&lt;dataset&gt;.csv"]
+    Predict --> Log["result/&lt;run_id&gt;/memory.log"]
     CSV --> ZIP["result/&lt;run_id&gt;/result.zip"]
 ```
 
 ## 运行边界
 
 每个数据集都会创建新的 ranker 实例，避免跨数据集状态污染。`submission.py` 只负责输出格式和 ZIP，不再 import 任何具体模型。
+
+`hybrid` 内部按数据画像自动选择策略，不读取或匹配数据集名称。画像逻辑只使用 `train.csv` 和无标签
+`test.csv` 候选集合，用于判断 `repeat_memory`、`balanced` 或 `new_link_cold`。
 
 CRAFT 的正式统一入口是：
 

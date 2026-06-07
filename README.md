@@ -1,93 +1,141 @@
 # jittor-GPNUT1-JGRec
 
-第六届计图人工智能挑战赛赛道一动态推荐项目。当前代码提供一个可复现、可提交的 MVP 管线：读取 `data/dataset*/train.csv` 和 `test.csv`，对每个测试查询的 100 个候选目标节点生成概率分布，并打包为运行目录内固定命名的 `result.zip`。
+第六届计图人工智能挑战赛赛道一动态推荐项目。项目目标是在给定历史时序交互
+`(src, dst, time)` 和测试候选集合 `(src, time, c1...c100)` 的条件下，为每个候选目标输出
+可提交的交互概率分布。
 
-## Quick Start
+当前主线模型是 `hybrid`：以时间因果切分训练融合器，将强统计记忆、候选先验、结构共现、
+Two-Tower 表示、图协同过滤和序列偏好组合为候选级特征，再用 Jittor MLP 在每行 100 个候选内
+做 softmax 重排序。
+
+## 当前提交候选
+
+当前工作区已验证的 A 榜提交包：
+
+```text
+result/hybrid_submit_v14_d1_quality_v9_d2_quality_stream_v6_seed60/result.zip
+```
+
+线上反馈分数：
+
+```text
+1.0715546895407047
+```
+
+该包由两个数据集的最佳已生成 CSV 拼接而成：
+
+```text
+dataset1 -> result/hybrid_submit_v13_d1_quality_v9_d2_stream_memmap_v2_seed60/csv/dataset1.csv
+dataset2 -> result/hybrid_d2_quality_stream_v6_seed60/csv/dataset2.csv
+```
+
+提交时只上传 `result.zip`。不要上传 `data/`、`result/` 目录或中间日志。
+
+## 数据目录
+
+程序按数据集目录发现输入文件：
+
+```text
+data/
+  dataset1/
+    train.csv
+    test.csv
+  dataset2/
+    train.csv
+    test.csv
+```
+
+`train.csv` 需要包含 `src,dst,time`。`test.csv` 需要包含 `src,time,c1,...,c100`。
+
+## 快速运行
+
+安装依赖：
 
 ```bash
 uv sync
+```
+
+生成完整提交：
+
+```bash
 uv run jgrec-build
 ```
 
-项目默认使用 `.python-version` 固定的 Python 3.12；如本机尚未安装，`uv sync` 会自动获取兼容解释器。
-
-选择模型后端：
+快速冒烟：
 
 ```bash
-uv run jgrec-build --model temporal-graph   # 当前默认模型
-uv run jgrec-build --model craft            # 官方 CRAFT baseline 适配器
+uv run jgrec-build --limit-rows 2 --max-fit-events 512 --max-train-events 32 --max-val-events 16 --num-negatives 3 --epochs 1 --disable-gnn --disable-seq
 ```
 
-输出文件：
+输出结构：
 
 ```text
 result/<run_id>/
-├── csv/
-│   ├── dataset1.csv
-│   └── dataset2.csv
-└── result.zip
+  csv/
+    dataset1.csv
+    dataset2.csv
+  result.zip
+  memory.log
 ```
 
-`<run_id>` 使用可读短名，例如 `temporal-graph_full_cuda_seed-42_hist-64_candhist-32_dim-128_<hash>`。
+`result.zip` 根目录直接包含 `dataset1.csv`、`dataset2.csv`，不包含额外目录层级。
 
-冒烟测试：
+## 冲分运行建议
 
-```bash
-uv run jgrec-build --limit-rows 100
+当前本地 8G 显存、24G 内存环境下，建议优先单独重跑 `dataset2`，确认改动收益后再与稳定的
+`dataset1.csv` 拼包。完整命令和提交检查表见
+[提交说明](docs/operations/submission.md)。
+
+核心思路：
+
+- `--max-fit-events 0` 保持最终 encoder 使用完整训练历史。
+- 提高 `--max-train-events`、`--max-val-events` 可以让融合器看到更多监督事件，但会增加训练时间。
+- `--selection-metric mrr` 可用于与默认 `ap` 对比，因为线上评分是 MRR。
+- `--test-candidate-negative-ratio` 用于校准冷启动/新链接数据的负采样分布。
+- 不建议为了提速直接关闭 `structure`、`two_tower`、`candidate_prior`，这些是当前 dataset2 提升的关键特征。
+
+## 模型摘要
+
+`hybrid` 特征顺序为：
+
+```text
+stats + candidate_prior + structure + two_tower + graph + sequence
 ```
 
-运行单元测试：
+主要模块：
+
+- `stats.py`：历史重复、近期命中、目标热度、源节点活跃度等因果统计特征。
+- `candidate_prior.py`：只使用 `test.csv` 候选出现频次和行内 rank，不使用标签，用于补足未见目标节点信号。
+- `structure.py`：共同邻居、Jaccard、共现、转移等结构特征。
+- `two_tower.py`：Jittor 双塔候选表示，输出 dot/cosine 特征。
+- `gnn.py`：XSimGCL/LightGCN 图协同过滤塔。
+- `sequence.py`：SASRec/GRU 序列偏好塔。
+- `fusion.py`：Jittor MLP 融合器，按验证集在多个特征 mask 中选择最终特征组。
+
+自动策略不会读取数据集名称，而是根据训练 holdout 和测试候选分布将数据画像为
+`repeat_memory`、`balanced` 或 `new_link_cold`，再自动调整 test-candidate 负采样比例。
+
+## 开发检查
 
 ```bash
+uv run python -m compileall -q src scripts tests
 uv run --group dev pytest
-```
-
-运行 Ruff 检查：
-
-```bash
 uv run --group dev ruff check .
-```
-
-Optuna 调参：
-
-```bash
-uv run jgrec-tune-temporal-graph --n-trials 32 --n-jobs 1 --gpu-id 0 --quiet
-```
-
-多 GPU 调参使用多个进程共享同一个 study，细节见 [模型优化](docs/experiments/model-optimization.md)。
-
-CPU 环境：
-
-```bash
-uv run jgrec-build --cpu
-```
-
-## Documentation
-
-工程文档从 [docs/index.md](docs/index.md) 开始：
-
-- 任务与数据：[赛题说明](docs/task/competition.md)、[数据契约](docs/task/data-contract.md)、[当前数据画像](docs/task/data-profile.md)
-- 系统与模型：[系统架构](docs/system/architecture.md)、[模型设计](docs/system/modeling.md)
-- 运行与开发：[运行手册](docs/operations/runbook.md)、[开发规范](docs/operations/development.md)
-- 实验与研究：[架构优化](docs/experiments/architecture-optimization.md)、[模型优化](docs/experiments/model-optimization.md)、[研究问题综述](docs/research/problem-overview.md)、[GNN 推荐论文调研](docs/research/gnn-survey.md)
-
-构建本地文档站点：
-
-```bash
-uv sync --group dev
 uv run zensical build
 ```
 
-预览：
+WSL/Jittor 本地环境可以直接用项目源码运行：
 
 ```bash
-uv run zensical serve
+export PYTHONPATH=src
+/mnt/d/work/jittor-local/env/bin/python -m jgrec.cli --help
 ```
 
-## Current Model
+## 文档入口
 
-当前默认模型位于 `src/jgrec/rankers/temporal_graph/`。它是端到端训练的动态图候选重排序模型：使用 JittorGeometric `TemporalData` 与 temporal neighbor sampler 构造因果历史邻域，复用 CRAFT cross-attention 模块做候选-历史交互建模，并用同一个候选集 softmax loss 更新节点 embedding、temporal memory update、attention 和 scorer。
-
-统一入口还支持 `src/jgrec/rankers/craft/` 中的 CRAFT baseline 适配器。
-
-CLI 使用 Rich 展示运行配置、训练进度和结果表格；`--quiet-ranker` 可隐藏训练细节。
+- [提交说明](docs/operations/submission.md)
+- [运行手册](docs/operations/runbook.md)
+- [模型设计](docs/system/modeling.md)
+- [系统架构](docs/system/architecture.md)
+- [数据契约](docs/task/data-contract.md)
+- [实验与基准](docs/experiments/benchmarks.md)

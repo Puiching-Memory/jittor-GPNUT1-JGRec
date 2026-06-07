@@ -1,8 +1,24 @@
 # 运行手册
 
+## 提交优先入口
+
+提交前先看 [提交说明](submission.md)。当前工作区已验证的提交包是：
+
+```text
+result/hybrid_submit_v14_d1_quality_v9_d2_quality_stream_v6_seed60/result.zip
+```
+
+线上反馈：
+
+```text
+1.0715546895407047
+```
+
+该路径是生成产物，不应提交进代码仓库；比赛平台只需要上传 `result.zip`。
+
 ## 前置条件
 
-- Python 版本由 `.python-version` 固定为 `3.12`。
+- Python 版本由 `.python-version` 固定为 `3.11`。
 - 依赖由 `uv.lock` 锁定。
 - Jittor 与 JittorGeometric 通过 `third_party/` 本地路径安装。
 - 正式赛数据放在 `data/` 下。`data/` 已在 `.gitignore` 中，不应提交到仓库。
@@ -39,7 +55,9 @@ uv sync --group dev
 uv run jgrec-build
 ```
 
-默认会为每个数据集做一次时间切分训练。`temporal-graph` 后端使用 JittorGeometric temporal neighbor sampler 构造因果历史邻域，再用 CRAFT-style cross-attention 和候选集 softmax 做端到端重排序训练；验证使用 train.csv 尾部 15%，早停默认看 AP，同时打印 MRR 作为诊断指标。
+默认会为每个数据集做一次时间切分训练。当前 `hybrid` 会构造统计特征、候选先验、结构特征、Two-Tower、
+XSimGCL/LightGCN 图塔、序列塔，并用 Fusion MLP 做候选级重排序。验证协议使用 `train.csv` 尾部做本地验证，
+融合早停和特征组选择默认看 AP，同时打印 MRR 作为诊断指标。
 CLI 使用 Rich 输出运行面板、训练进度和结果表格；提交文件仍只写入 `result/`，终端样式不会影响 CSV/ZIP 内容。
 
 默认切分比例为：
@@ -55,7 +73,7 @@ CLI 使用 Rich 输出运行面板、训练进度和结果表格；提交文件�
 模型后端通过 `--model` 选择：
 
 ```bash
-uv run jgrec-build --model temporal-graph
+uv run jgrec-build --model hybrid
 uv run jgrec-build --model craft
 ```
 
@@ -77,27 +95,27 @@ flowchart TB
 {model}_{full|sample-N-rows}_{cpu|cuda}_seed-{seed}_{hash}
 ```
 
-`temporal-graph` 后端会额外追加历史长度和 hidden size：
+`hybrid` 后端会额外追加图塔和序列塔状态：
 
 ```text
-temporal-graph_full_cuda_seed-42_hist-64_candhist-32_dim-128_1a2b3c4d
-temporal-graph_sample-2-rows_cpu_seed-42_hist-8_candhist-4_dim-32_1a2b3c4d
+hybrid_full_cuda_seed-42_gnn-xsimgcl_sequence-on_1a2b3c4d
+hybrid_sample-2-rows_cpu_seed-42_gnn-off_sequence-off_1a2b3c4d
 ```
 
 ## 冒烟测试
 
-快速验证完整端到端模型路径：
+快速验证完整混合模型路径：
 
 ```bash
-uv run jgrec-build --limit-rows 2 --max-fit-events 512 --max-train-events 32 --max-val-events 16 --num-negatives 3 --epochs 1 --history-len 8 --candidate-history-len 4 --hidden-size 32 --layers 1 --heads 2 --no-refit-full --quiet-ranker
+uv run jgrec-build --limit-rows 2 --max-fit-events 512 --max-train-events 32 --max-val-events 16 --num-negatives 3 --epochs 1 --gnn-epochs 1 --gnn-embedding-dim 16 --gnn-layers 1 --gnn-max-graph-edges 256 --gnn-max-train-edges 128 --seq-epochs 1 --seq-max-samples 128 --seq-max-len 16 --seq-hidden-size 16 --fusion-hidden-dim 16 --quiet-ranker
 ```
 
 该命令适合验证环境、Jittor/JittorGeometric 初始化、CSV 读写和压缩包生成。
 
-只验证提交链路、进一步缩小训练量：
+只验证提交链路、不训练图塔和序列塔：
 
 ```bash
-uv run jgrec-build --limit-rows 100 --max-fit-events 2048 --max-train-events 256 --max-val-events 128 --num-negatives 7 --epochs 1 --history-len 16 --candidate-history-len 8 --hidden-size 64 --layers 1 --heads 2 --no-refit-full --quiet-ranker
+uv run jgrec-build --limit-rows 100 --max-fit-events 2048 --max-train-events 256 --max-val-events 128 --epochs 1 --disable-gnn --disable-seq --quiet-ranker
 ```
 
 并行调参时必须使用不同参数组合，使生成的 `<run_id>` 不同；相同参数组合会写入同一个运行目录。
@@ -114,30 +132,51 @@ uv run jgrec-build --cpu
 
 | 参数                    |    默认值 | 说明                                       |
 | ----------------------- | --------: | ------------------------------------------ |
-| `--model`               |  `temporal-graph` | 模型后端：`temporal-graph`、`craft` |
+| `--model`               |  `hybrid` | 模型后端：`hybrid`、`craft`                |
 | `--data-dir`            |    `data` | 数据根目录                                 |
+| `--recent-window`       |      `32` | 每个源节点保留的最近目标节点数量           |
 | `--batch-size`          |    `2048` | 每次送入 Jittor 的测试查询数               |
 | `--limit-rows`          |        无 | 每个数据集最多输出的测试行数               |
 | `--val-ratio`           |    `0.15` | `train.csv` 尾部验证比例                   |
-| `--max-train-events`    |   `20000` | 每个数据集最多训练监督事件                 |
-| `--max-val-events`      |    `5000` | 每个数据集最多验证事件                     |
-| `--num-negatives`       |      `99` | 每个正样本采样负候选数                     |
+| `--context-ratio`       |    `0.75` | 用于训练监督样本的因果上下文比例           |
+| `--max-train-events`    |   `20000` | 融合器监督训练使用的正样本事件上限，不限制 final encoder 全量历史 |
+| `--max-val-events`      |    `5000` | 融合器特征组选择、早停和本地 AP/MRR 验证的事件上限 |
+| `--num-negatives`       |      `31` | 每个正样本采样负候选数                     |
 | `--max-fit-events`      |       `0` | 模型训练历史尾部截断，0 表示全量           |
-| `--epochs`              |       `8` | temporal graph 训练轮数                    |
-| `--train-batch-size`    |     `256` | 训练 batch size                            |
-| `--lr`                  |   `0.001` | 端到端模型学习率                           |
-| `--selection-metric`    |      `ap` | 早停选择指标                               |
-| `--early-stop`          |      `10` | 早停 patience，0 表示关闭                  |
-| `--history-len`         |      `64` | 源节点历史邻居长度                         |
-| `--candidate-history-len` |    `32` | 候选节点历史邻居长度                       |
-| `--hidden-size`         |     `128` | embedding 和 attention hidden size         |
-| `--layers`              |       `3` | cross-attention 层数                       |
-| `--heads`               |       `4` | attention heads                            |
-| `--no-refit-full`       |      关闭 | 跳过验证后全量重训                         |
+| `--epochs`              |       `5` | 融合 MLP 训练轮数                          |
+| `--train-batch-size`    |     `512` | 融合 MLP 训练 batch size                   |
+| `--lr`                  |   `0.001` | SASRec 和融合 MLP 学习率                   |
+| `--selection-metric`    |      `ap` | 融合早停和特征组选择指标                   |
+| `--early-stop`          |      `10` | 融合早停 patience，0 表示关闭              |
+| `--gnn-model`           | `xsimgcl` | 图塔模型，可选 `lightgcn`                  |
+| `--gnn-epochs`          |       `3` | 每个图窗口训练轮数                         |
+| `--gnn-max-train-edges` |   `40000` | 每轮图训练采样边数                         |
+| `--seq-epochs`          |       `3` | SASRec 训练轮数                            |
+| `--seq-max-samples`     |   `50000` | SASRec 最多训练样本                        |
+| `--two-tower-max-samples` | `50000` | Two-Tower 最多训练样本                     |
+| `--auto-strategy`       |      开启 | 根据数据画像自动设置负采样策略             |
+| `--disable-candidate-prior` | 关闭 | 禁用候选先验特征                           |
+| `--test-candidate-negative-ratio` | `0.0` | 手动覆盖 test-candidate 负采样比例，0 表示使用自动策略 |
+| `--supervised-feature-memmap` | 关闭 | 监督特征落盘分块，降低常驻内存             |
+| `--disable-gnn`         |      关闭 | 禁用图塔                                   |
+| `--disable-seq`         |      关闭 | 禁用序列塔                                 |
 | `--seed`                |      `42` | 采样随机种子                               |
 | `--quiet-ranker`        |      关闭 | 隐藏训练 epoch 进度和细节日志              |
 | `--cpu`                 |      关闭 | 禁用 CUDA                                  |
 | `--skip-validate`       |      关闭 | 跳过输出格式校验                           |
+
+`--max-fit-events 0` 表示不截断进入模型的训练历史。正式预测前，final encoder 会使用完整历史重新拟合；因此
+`--max-train-events` 和 `--max-val-events` 主要影响 Fusion MLP 的监督训练和本地验证稳定性。
+
+## 冲分参数说明
+
+质量优先时，建议先只重跑 `dataset2`，再与稳定的 `dataset1.csv` 拼包。优先尝试：
+
+- 增大 `--max-train-events` 和 `--max-val-events`，让融合器看到更多监督事件。
+- 用 `--selection-metric mrr` 与线上 MRR 口径做对比。
+- 调整 `--test-candidate-negative-ratio`，让负样本更接近测试候选分布。
+
+不要把 `--limit-rows` 的输出用于提交。
 
 ## 输出校验
 
@@ -176,7 +215,7 @@ PY
 
 ## 常见问题
 
-### Jittor 找不到 `python3.12-config`
+### Jittor 找不到 `python3.11-config`
 
 仓库根目录的 `sitecustomize.py` 会设置 Jittor 所需的 Python/CUDA 环境变量。正常通过 `uv run jgrec-build` 运行即可加载。
 

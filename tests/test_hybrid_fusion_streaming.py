@@ -1,0 +1,88 @@
+import numpy as np
+
+from jgrec.rankers.hybrid.fusion import (
+    FusionConfig,
+    _feature_normalizer,
+    _feature_normalizer_streaming,
+    _metrics_from_model,
+    _metrics_from_model_streaming,
+    fit_fusion_mlp,
+    fit_fusion_mlp_streaming,
+)
+
+
+def _features() -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(3)
+    train = rng.normal(size=(12, 5, 6)).astype(np.float32)
+    val = rng.normal(size=(7, 5, 6)).astype(np.float32)
+    train[:, 0, 0] += 2.0
+    val[:, 0, 0] += 2.0
+    return train, val
+
+
+def test_streaming_normalizer_matches_in_memory_normalizer():
+    train, _ = _features()
+    feature_indices = (0, 1, 2, 3)
+
+    expected_mean, expected_std = _feature_normalizer(train, feature_indices)
+    actual_mean, actual_std = _feature_normalizer_streaming(train, feature_indices, batch_size=3)
+
+    np.testing.assert_allclose(actual_mean, expected_mean, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(actual_std, expected_std, rtol=1e-6, atol=1e-6)
+
+
+def test_streaming_metrics_match_in_memory_metrics():
+    train, val = _features()
+    feature_indices = (0, 1, 2)
+    config = FusionConfig(epochs=1, batch_size=3, hidden_dim=8)
+    model, result = fit_fusion_mlp(
+        train_features=train,
+        val_features=val,
+        config=config,
+        rng=np.random.default_rng(8),
+        verbose=False,
+        feature_indices=feature_indices,
+        candidate_name="test",
+    )
+
+    expected = _metrics_from_model(model, val, result.mean, result.std, batch_size=3, feature_indices=feature_indices)
+    actual = _metrics_from_model_streaming(
+        model,
+        val,
+        result.mean,
+        result.std,
+        batch_size=3,
+        feature_indices=feature_indices,
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_streaming_fusion_keeps_contract_for_memmap_inputs(tmp_path):
+    train, val = _features()
+    train_path = tmp_path / "train.dat"
+    val_path = tmp_path / "val.dat"
+    train_store = np.memmap(train_path, mode="w+", dtype=np.float32, shape=train.shape)
+    val_store = np.memmap(val_path, mode="w+", dtype=np.float32, shape=val.shape)
+    train_store[:] = train
+    val_store[:] = val
+    train_store.flush()
+    val_store.flush()
+
+    model, result = fit_fusion_mlp_streaming(
+        train_features=train_store,
+        val_features=val_store,
+        config=FusionConfig(epochs=1, batch_size=4, hidden_dim=8),
+        rng=np.random.default_rng(4),
+        verbose=False,
+        feature_indices=(0, 1, 2, 3),
+        candidate_name="stream",
+    )
+
+    assert result.candidate_name == "stream"
+    assert result.feature_indices == (0, 1, 2, 3)
+    assert result.mean.shape == (4,)
+    assert result.std.shape == (4,)
+    assert np.isfinite(result.best_val_ap)
+    assert np.isfinite(result.best_val_mrr)
+    assert model is not None

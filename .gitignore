@@ -6,6 +6,8 @@ __pycache__/
 result.json
 site/
 result/
+logs/
+result_perm_backup_*/
 *.zip
 .cache/
 .coverage*

@@ -1,63 +1,69 @@
 # jittor-GPNUT1-JGRec 文档
 
-本文档按问题域组织，而不是按文件产生顺序平铺。每个主题只回答一类问题，避免运行、数据、模型、实验和研究资料互相混杂。
+本项目面向第六届计图人工智能挑战赛赛道一动态推荐任务。核心交付物是
+`result/<run_id>/result.zip`：压缩包根目录直接包含每个数据集对应的预测 CSV。
 
-## 阅读路径
+## 提交入口
+
+当前优先阅读：
+
+| 目标 | 文档 |
+| ---- | ---- |
+| 确认当前提交包和提交前检查 | [提交说明](/operations/submission/) |
+| 了解运行命令和常用参数 | [运行手册](/operations/runbook/) |
+| 确认输入输出格式 | [数据契约](/task/data-contract/) |
+| 理解当前 hybrid 模型 | [模型设计](/system/modeling/) |
+| 理解代码模块和数据流 | [系统架构](/system/architecture/) |
+| 查看实验记录和性能优化 | [实验与基准](/experiments/benchmarks/) |
+
+## 当前模型
+
+默认后端是 `hybrid`。它不是单一 GNN，而是一个候选级混合重排序系统：
 
 ```mermaid
 flowchart LR
-    A["先跑通提交"] --> B["运行手册"]
-    A --> C["数据契约"]
-    D["理解任务与数据"] --> E["赛题说明"]
-    D --> F["研究问题综述"]
-    D --> G["当前数据画像"]
-    H["理解实现"] --> I["系统架构"]
-    H --> J["模型设计"]
-    K["继续实验"] --> L["模型优化"]
-    K --> O["架构优化"]
-    K --> M["研究资料"]
-    K --> N["开发规范"]
+    A["train.csv"] --> B["时间因果切分"]
+    B --> C["stats"]
+    B --> D["candidate prior"]
+    B --> E["structure"]
+    B --> F["two-tower"]
+    B --> G["graph tower"]
+    B --> H["sequence tower"]
+    C --> I["Fusion MLP"]
+    D --> I
+    E --> I
+    F --> I
+    G --> I
+    H --> I
+    J["test.csv candidates"] --> K["100候选重排序"]
+    I --> K
+    K --> L["result.zip"]
 ```
 
-| 目标                       | 入口                                                                                 |
-| -------------------------- | ------------------------------------------------------------------------------------ |
-| 先把提交文件跑出来         | [运行手册](operations/runbook.md)                                                    |
-| 确认输入输出格式           | [数据契约](task/data-contract.md)                                                    |
-| 理解赛题到底是什么         | [赛题说明](task/competition.md) 和 [研究问题综述](research/problem-overview.md)      |
-| 判断数据适合什么模型       | [当前数据画像](task/data-profile.md)                                                 |
-| 理解代码如何串起来         | [系统架构](system/architecture.md)                                                   |
-| 理解当前模型为什么这样设计 | [模型设计](system/modeling.md)                                                       |
-| 判断一次模型实验能不能保留 | [模型优化](experiments/model-optimization.md)                                        |
-| 记录架构与性能优化         | [架构优化](experiments/architecture-optimization.md)                                 |
-| 查找论文和外部实现线索     | [研究资料](research/gnn-survey.md) 与 [开源参考](research/open-source-references.md) |
-| 修改代码前看工程约束       | [开发规范](operations/development.md)                                                |
+特征顺序：
 
-## 文档分组
+```text
+stats + candidate_prior + structure + two_tower + graph + sequence
+```
 
-### 任务与数据
+训练时会在 `stats`、`stats_prior`、`stats_prior_structure`、
+`stats_prior_structure_tower`、`stats_prior_structure_tower_gnn`、
+`stats_prior_structure_tower_gnn_seq` 等特征组之间做验证选择。
 
-- [赛题说明](task/competition.md)：比赛原文整理、评测指标、提交格式。
-- [数据契约](task/data-contract.md)：本工程接受的 `train.csv`、`test.csv` 和输出 CSV/ZIP 约束。
-- [当前数据画像](task/data-profile.md)：本地数据统计、候选分布、特征区分度和建模含义。
+## 当前提交候选
 
-### 系统与模型
+```text
+result/hybrid_submit_v14_d1_quality_v9_d2_quality_stream_v6_seed60/result.zip
+```
 
-- [系统架构](system/architecture.md)：包结构、统一接口、数据流和扩展边界。
-- [模型设计](system/modeling.md)：当前 temporal-graph/craft 后端、训练流程和端到端图建模方式。
+线上反馈：
 
-### 运行与开发
+```text
+1.0715546895407047
+```
 
-- [运行手册](operations/runbook.md)：环境、命令、常用参数、输出校验和常见问题。
-- [开发规范](operations/development.md)：本地检查、依赖策略、代码边界和提交前检查。
-
-### 实验与研究
-
-- [架构优化](experiments/architecture-optimization.md)：数据读取、批构造、邻居采样和推理吞吐优化记录。
-- [模型优化](experiments/model-optimization.md)：冠军基线、实验门禁、调参、线上提交和模型消融记录。
-- [研究问题综述](research/problem-overview.md)：将赛题抽象成动态图候选重排序研究问题。
-- [GNN 推荐论文调研](research/gnn-survey.md)：图协同过滤、图对比学习、谱图和动态图方向。
-- [推荐系统论文调研归档](research/recommender-survey.md)：非 GNN 推荐、序列、排序和生成式推荐背景。
-- [开源参考](research/open-source-references.md)：本地 JittorGeometric 示例和可参考实现。
+该包由当前稳定的 `dataset1.csv` 和已完成的 `dataset2.csv` 拼接生成。新的冲分实验建议先单跑
+`dataset2`，确认线上反馈后再替换拼包。
 
 ## 最短路径
 
@@ -66,14 +72,37 @@ uv sync
 uv run jgrec-build
 ```
 
-完成后检查：
+冒烟：
 
-```mermaid
-flowchart TB
-    A["result/&lt;run_id&gt;/"] --> B["csv/"]
-    B --> C["dataset1.csv"]
-    B --> D["dataset2.csv"]
-    A --> E["result.zip"]
+```bash
+uv run jgrec-build --limit-rows 2 --max-fit-events 512 --max-train-events 32 --max-val-events 16 --num-negatives 3 --epochs 1 --disable-gnn --disable-seq
 ```
 
-每个 CSV 无表头，每行 100 个保留 8 位小数的概率。
+提交前不要使用 `--limit-rows` 产物。
+
+## 文档分组
+
+### 任务与数据
+
+- [赛题说明](/task/competition/)
+- [数据契约](/task/data-contract/)
+- [当前数据画像](/task/data-profile/)
+
+### 系统与模型
+
+- [系统架构](/system/architecture/)
+- [模型设计](/system/modeling/)
+
+### 运行与开发
+
+- [提交说明](/operations/submission/)
+- [运行手册](/operations/runbook/)
+- [开发规范](/operations/development/)
+
+### 实验与研究
+
+- [实验与基准](/experiments/benchmarks/)
+- [研究问题综述](/research/problem-overview/)
+- [GNN 推荐论文调研](/research/gnn-survey/)
+- [推荐系统论文调研归档](/research/recommender-survey/)
+- [开源参考](/research/open-source-references/)
