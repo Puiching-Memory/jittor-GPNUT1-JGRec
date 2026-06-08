@@ -94,11 +94,23 @@ class CLIConfig:
     encoder_state_cache: bool = True
     auto_strategy: bool = True
     disable_candidate_prior: bool = False
+    disable_target_window: bool = False
+    target_window_fractions: str = "0.01,0.05,0.20,1.00"
     test_candidate_negative_ratio: float = 0.0
     disable_structure: bool = False
     disable_structure_cooccur: bool = False
     disable_structure_transition: bool = False
     structure_cooccur_history_limit: int = 128
+    disable_source_profile: bool = False
+    disable_source_profile_deterministic: bool = False
+    disable_source_profile_item2vec: bool = False
+    source_profile_embedding_dim: int = 64
+    source_profile_epochs: int = 3
+    source_profile_batch_size: int = 2048
+    source_profile_score_batch_size: int = 8192
+    source_profile_max_samples: int = 100_000
+    source_profile_window_size: int = 16
+    source_profile_recent_k: int = 32
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -199,11 +211,23 @@ def _ranker_config(args: CLIConfig):
         encoder_state_cache_enabled=args.encoder_state_cache,
         auto_strategy_enabled=args.auto_strategy,
         candidate_prior_enabled=not args.disable_candidate_prior,
+        target_window_enabled=not args.disable_target_window,
+        target_window_fractions=_parse_target_window_fractions(args.target_window_fractions),
         test_candidate_negative_ratio=args.test_candidate_negative_ratio,
         structure_enabled=not args.disable_structure,
         structure_cooccur_enabled=not args.disable_structure_cooccur,
         structure_transition_enabled=not args.disable_structure_transition,
         structure_cooccur_history_limit=args.structure_cooccur_history_limit,
+        source_profile_enabled=not args.disable_source_profile,
+        source_profile_deterministic_enabled=not args.disable_source_profile_deterministic,
+        source_profile_item2vec_enabled=not args.disable_source_profile_item2vec,
+        source_profile_embedding_dim=args.source_profile_embedding_dim,
+        source_profile_epochs=args.source_profile_epochs,
+        source_profile_batch_size=args.source_profile_batch_size,
+        source_profile_score_batch_size=args.source_profile_score_batch_size,
+        source_profile_max_samples=args.source_profile_max_samples,
+        source_profile_window_size=args.source_profile_window_size,
+        source_profile_recent_k=args.source_profile_recent_k,
         gnn_enabled=not args.disable_gnn,
         gnn_model=args.gnn_model,
         gnn_edge_weighting=args.gnn_edge_weighting,
@@ -251,6 +275,8 @@ def _build_run_name(args: CLIConfig, config) -> str:
                 f"edges-{_slug(config.gnn_edge_weighting)}" if config.gnn_enabled else "edges-off",
                 f"auto-{'on' if config.auto_strategy_enabled else 'off'}",
                 f"prior-{'on' if config.candidate_prior_enabled else 'off'}",
+                f"target-{'on' if config.target_window_enabled else 'off'}",
+                f"profile-{'on' if config.source_profile_enabled else 'off'}",
                 f"tower-{'on' if config.two_tower_enabled else 'off'}",
                 f"sequence-{'on' if config.seq_enabled else 'off'}",
             ]
@@ -308,10 +334,18 @@ def _run_panel(run_dir: Path, zip_path: Path, args: CLIConfig, config) -> Panel:
         table.add_row("auto_strategy", "on" if config.auto_strategy_enabled else "off")
         table.add_row("encoder_cache", "on" if config.encoder_state_cache_enabled else "off")
         table.add_row("candidate_prior", "on" if config.candidate_prior_enabled else "off")
+        table.add_row("target_window", "on" if config.target_window_enabled else "off")
+        table.add_row("target_window_fractions", ",".join(f"{value:.2f}" for value in config.target_window_fractions))
         table.add_row("auto_mode", config.auto_mode if config.auto_mode != "manual" else "pending")
         table.add_row("candidate_unseen_dst_rate", f"{config.profile_candidate_unseen_dst_rate:.5f}")
         table.add_row("holdout_pair_hit_rate", f"{config.profile_holdout_pair_hit_rate:.5f}")
         table.add_row("test_candidate_negative_ratio", f"{config.test_candidate_negative_ratio:.2f}")
+        table.add_row("source_profile", "on" if config.source_profile_enabled else "off")
+        table.add_row(
+            "source_profile_item2vec",
+            "on" if config.source_profile_enabled and config.source_profile_item2vec_enabled else "off",
+        )
+        table.add_row("source_profile_epochs/max_samples", f"{config.source_profile_epochs}/{config.source_profile_max_samples}")
         table.add_row("two_tower", "on" if config.two_tower_enabled else "off")
         table.add_row("sequence", "on" if config.seq_enabled else "off")
         table.add_row("structure", "on" if config.structure_enabled else "off")
@@ -333,6 +367,16 @@ def _select_datasets(datasets: list[DatasetPaths], dataset_name: str) -> set[str
     if selected not in names:
         raise ValueError(f"unknown dataset '{selected}', available: {', '.join(sorted(names))}")
     return {selected}
+
+
+def _parse_target_window_fractions(value: str) -> tuple[float, ...]:
+    parts = [part.strip() for part in str(value).split(",") if part.strip()]
+    fractions = tuple(float(part) for part in parts)
+    if len(fractions) != 4:
+        raise ValueError("--target-window-fractions must contain exactly four comma-separated numbers")
+    if any(fraction <= 0.0 for fraction in fractions):
+        raise ValueError("--target-window-fractions values must be positive")
+    return fractions
 
 
 def _reuse_existing_result(dataset: DatasetPaths, output_path: Path, args: CLIConfig) -> DatasetResult:

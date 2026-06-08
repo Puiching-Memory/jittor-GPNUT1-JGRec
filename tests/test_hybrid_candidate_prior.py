@@ -50,6 +50,7 @@ def test_disabled_candidate_prior_uses_zero_features_in_encoder():
         gnn_enabled=False,
         seq_enabled=False,
         two_tower_enabled=False,
+        source_profile_enabled=False,
     )
     encoder = HybridFeatureEncoder(
         id_map=NodeIdMap.from_interactions(InteractionTable.from_events(interactions)),

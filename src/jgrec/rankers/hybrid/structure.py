@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
+from jgrec.core.types import Interaction, InteractionTable, TestQuery, TestQueryArray
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
 
 from .config import StructureTowerConfig
@@ -48,9 +48,16 @@ class StructureFeatureTower:
     def feature_names(self) -> tuple[str, ...]:
         return STRUCTURE_FEATURE_NAMES
 
-    def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool = True) -> None:
+    def fit(
+        self,
+        interactions: InteractionTable | list[Interaction],
+        rng: np.random.Generator,
+        verbose: bool = True,
+    ) -> None:
         if len(interactions) == 0:
             raise ValueError("training interactions are empty")
+        if not isinstance(interactions, InteractionTable):
+            interactions = InteractionTable.from_events(interactions)
         interactions = interactions.sort_by_time()
         self.index.fit(
             interactions,

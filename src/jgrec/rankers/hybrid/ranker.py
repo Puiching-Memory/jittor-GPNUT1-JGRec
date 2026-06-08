@@ -31,11 +31,15 @@ from .candidate_prior import CANDIDATE_PRIOR_FEATURE_NAMES, CandidatePriorTower
 from .config import (
     GRAPH_WINDOW_NAMES,
     SEQUENCE_FEATURE_NAMES,
+    SOURCE_PROFILE_FEATURE_NAMES,
+    TARGET_WINDOW_FEATURE_NAMES,
     TWO_TOWER_FEATURE_NAMES,
     CandidatePriorConfig,
     GraphTowerConfig,
     SequenceTowerConfig,
+    SourceProfileConfig,
     StructureTowerConfig,
+    TargetWindowConfig,
     TrainingConfig,
     TwoTowerConfig,
 )
@@ -91,6 +95,22 @@ class _DisabledTwoTower:
         return _zero_scores_for_array(queries, len(TWO_TOWER_FEATURE_NAMES))
 
 
+class _DisabledSourceProfileTower:
+    index: Any = None
+
+    def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool = True, **kwargs) -> None:
+        return
+
+    def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
+        return _zero_scores(queries, len(SOURCE_PROFILE_FEATURE_NAMES))
+
+    def scores_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
+        return _zero_scores_for_array(queries, len(SOURCE_PROFILE_FEATURE_NAMES))
+
+    def hydrate(self, snapshot: dict) -> None:
+        return
+
+
 class _DisabledCandidatePriorTower:
     def fit(
         self,
@@ -104,6 +124,23 @@ class _DisabledCandidatePriorTower:
 
     def features_for_query_array(self, queries: TestQueryArray, stat_features: np.ndarray) -> np.ndarray:
         return _zero_scores_for_array(queries, len(CANDIDATE_PRIOR_FEATURE_NAMES))
+
+
+class _DisabledTargetWindowTower:
+    def fit(self, interactions: InteractionTable) -> None:
+        return
+
+    def features_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
+        return _zero_scores(queries, len(TARGET_WINDOW_FEATURE_NAMES))
+
+    def features_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
+        return _zero_scores_for_array(queries, len(TARGET_WINDOW_FEATURE_NAMES))
+
+    def hydrate(self, snapshot: dict) -> None:
+        return
+
+    def compact_for_future_queries(self) -> None:
+        return
 
 
 class _DisabledStructureTower:
@@ -130,15 +167,22 @@ class HybridFeatureEncoder:
         graph_config: GraphTowerConfig,
         sequence_config: SequenceTowerConfig,
         candidate_prior_config: CandidatePriorConfig | None = None,
+        target_window_config: TargetWindowConfig | None = None,
         dataset_profile: DatasetProfile | None = None,
         two_tower_config: TwoTowerConfig | None = None,
+        source_profile_config: SourceProfileConfig | None = None,
         structure_config: StructureTowerConfig | None = None,
     ) -> None:
         self.id_map = id_map
         self.dataset_profile = dataset_profile
         self.stats = TemporalStats(recent_window=recent_window)
         self.candidate_prior = _build_candidate_prior(candidate_prior_config or CandidatePriorConfig(enabled=False))
+        self.target_window = _build_target_window(target_window_config or TargetWindowConfig(enabled=False))
         self.structure = _build_structure_tower(structure_config or StructureTowerConfig(enabled=False))
+        self.source_profile = _build_source_profile_tower(
+            id_map,
+            source_profile_config or SourceProfileConfig(enabled=False),
+        )
         self.two_tower = _build_two_tower(id_map, two_tower_config or TwoTowerConfig(enabled=False))
         self.graph = _build_graph_tower(id_map, graph_config)
         self.sequence = _build_sequence_tower(id_map, sequence_config)
@@ -148,7 +192,9 @@ class HybridFeatureEncoder:
         self._profile_elapsed = {
             "stats": 0.0,
             "prior": 0.0,
+            "target": 0.0,
             "structure": 0.0,
+            "profile": 0.0,
             "tower": 0.0,
             "graph": 0.0,
             "sequence": 0.0,
@@ -157,7 +203,9 @@ class HybridFeatureEncoder:
         self.feature_names = (
             STAT_FEATURE_NAMES
             + CANDIDATE_PRIOR_FEATURE_NAMES
+            + TARGET_WINDOW_FEATURE_NAMES
             + STRUCTURE_FEATURE_NAMES
+            + SOURCE_PROFILE_FEATURE_NAMES
             + TWO_TOWER_FEATURE_NAMES
             + GRAPH_WINDOW_NAMES
             + SEQUENCE_FEATURE_NAMES
@@ -183,7 +231,9 @@ class HybridFeatureEncoder:
                 snapshot=deterministic_snapshot,
                 stats=self.stats,
                 candidate_prior=self.candidate_prior,
+                target_window=self.target_window,
                 structure=self.structure,
+                source_profile=self.source_profile,
             )
             elapsed["deterministic"] = perf_counter() - start
             cache_status = "hit"
@@ -196,9 +246,23 @@ class HybridFeatureEncoder:
             self.candidate_prior.fit(interactions, test_counts)
             elapsed["prior"] = perf_counter() - start
             start = perf_counter()
+            self.target_window.fit(interactions)
+            elapsed["target"] = perf_counter() - start
+            start = perf_counter()
             self.structure.fit(interactions, rng=rng, verbose=verbose)
             elapsed["structure"] = perf_counter() - start
             cache_status = "build"
+        source_profile_fit = getattr(self.source_profile, "fit", None)
+        start = perf_counter()
+        if callable(source_profile_fit):
+            source_profile_fit(
+                interactions,
+                rng=rng,
+                verbose=verbose,
+                shared_index=getattr(self.structure, "index", None),
+                deterministic_ready=deterministic_snapshot is not None,
+            )
+        elapsed["profile"] = perf_counter() - start
         two_tower_fit = getattr(self.two_tower, "fit", None)
         start = perf_counter()
         if callable(two_tower_fit):
@@ -236,8 +300,14 @@ class HybridFeatureEncoder:
         candidate_prior_features = _candidate_prior_features(self.candidate_prior, queries, stat_features)
         self._profile_elapsed["prior"] += perf_counter() - start
         start = perf_counter()
+        target_window_features = _features_from_tower(self.target_window, queries)
+        self._profile_elapsed["target"] += perf_counter() - start
+        start = perf_counter()
         structure_features = _features_from_tower(self.structure, queries)
         self._profile_elapsed["structure"] += perf_counter() - start
+        start = perf_counter()
+        source_profile_features = _scores_from_tower(self.source_profile, queries)
+        self._profile_elapsed["profile"] += perf_counter() - start
         start = perf_counter()
         two_tower_features = _scores_from_tower(self.two_tower, queries)
         self._profile_elapsed["tower"] += perf_counter() - start
@@ -252,7 +322,9 @@ class HybridFeatureEncoder:
             [
                 stat_features,
                 candidate_prior_features,
+                target_window_features,
                 structure_features,
+                source_profile_features,
                 two_tower_features,
                 graph_features,
                 sequence_features,
@@ -277,6 +349,9 @@ class HybridFeatureEncoder:
         compact_stats = getattr(self.stats, "compact_for_future_queries", None)
         if callable(compact_stats):
             compact_stats()
+        compact_target = getattr(self.target_window, "compact_for_future_queries", None)
+        if callable(compact_target):
+            compact_target()
         compact_future_structure = getattr(self.structure, "compact_transition_cooccur_for_future_queries", None)
         if callable(compact_future_structure):
             compact_future_structure()
@@ -289,10 +364,26 @@ def _build_candidate_prior(config: CandidatePriorConfig) -> Any:
     return CandidatePriorTower(config=config)
 
 
+def _build_target_window(config: TargetWindowConfig) -> Any:
+    if not config.enabled:
+        return _DisabledTargetWindowTower()
+    from .target_window import TargetWindowTower
+
+    return TargetWindowTower(config=config)
+
+
 def _build_structure_tower(config: StructureTowerConfig) -> Any:
     if not config.enabled:
         return _DisabledStructureTower()
     return StructureFeatureTower(config)
+
+
+def _build_source_profile_tower(id_map: NodeIdMap, config: SourceProfileConfig) -> Any:
+    if not config.enabled:
+        return _DisabledSourceProfileTower()
+    from .source_profile import SourceProfileTower
+
+    return SourceProfileTower(id_map=id_map, config=config)
 
 
 def _build_graph_tower(id_map: NodeIdMap, config: GraphTowerConfig) -> Any:
@@ -376,7 +467,9 @@ class TemporalHybridRanker:
         self.feature_names = (
             STAT_FEATURE_NAMES
             + CANDIDATE_PRIOR_FEATURE_NAMES
+            + TARGET_WINDOW_FEATURE_NAMES
             + STRUCTURE_FEATURE_NAMES
+            + SOURCE_PROFILE_FEATURE_NAMES
             + TWO_TOWER_FEATURE_NAMES
             + GRAPH_WINDOW_NAMES
             + SEQUENCE_FEATURE_NAMES
@@ -405,7 +498,9 @@ class TemporalHybridRanker:
         final_snapshot = cache.snapshot_for_prefix(len(interactions)) if cache is not None else None
         log_event(
             "[hybrid-fit] final_encoder "
-            f"prior={final_config.candidate_prior_enabled} tower={final_config.two_tower_enabled} "
+            f"prior={final_config.candidate_prior_enabled} profile={final_config.source_profile_enabled} "
+            f"target={final_config.target_window_enabled} "
+            f"tower={final_config.two_tower_enabled} "
             f"gnn={final_config.gnn_enabled} seq={final_config.seq_enabled} "
             f"future_only_structure={final_config.structure_future_only_transition_cooccur}",
             enabled=training_config.verbose,
@@ -695,8 +790,10 @@ class TemporalHybridRanker:
             id_map=self.id_map,
             recent_window=self.recent_window,
             candidate_prior_config=config.candidate_prior_config(),
+            target_window_config=config.target_window_config(),
             dataset_profile=self.dataset_profile,
             structure_config=config.structure_config(),
+            source_profile_config=config.source_profile_config(),
             graph_config=config.graph_config(),
             sequence_config=config.sequence_config(),
             two_tower_config=config.two_tower_config(),
@@ -716,7 +813,9 @@ class TemporalHybridRanker:
         start = perf_counter()
         log_event(
             f"[hybrid-fit] {label} start events={len(interactions)} "
-            f"prior={config.candidate_prior_enabled} tower={config.two_tower_enabled} "
+            f"prior={config.candidate_prior_enabled} target={config.target_window_enabled} "
+            f"profile={config.source_profile_enabled} "
+            f"tower={config.two_tower_enabled} "
             f"gnn={config.gnn_enabled} seq={config.seq_enabled} "
             f"future_only_structure={config.structure_future_only_transition_cooccur}",
             enabled=verbose,
@@ -748,7 +847,9 @@ class TemporalHybridRanker:
                 interactions,
                 recent_window=self.recent_window,
                 candidate_prior_config=config.candidate_prior_config(),
+                target_window_config=config.target_window_config(),
                 structure_config=config.structure_config(),
+                source_profile_config=config.source_profile_config(),
                 test_candidate_counts=test_counts,
                 verbose=verbose,
             )
@@ -789,20 +890,26 @@ def _sample_events(
 def _feature_masks(feature_count: int) -> list[tuple[str, tuple[int, ...]]]:
     stats_end = len(STAT_FEATURE_NAMES)
     prior_end = stats_end + len(CANDIDATE_PRIOR_FEATURE_NAMES)
-    structure_end = prior_end + len(STRUCTURE_FEATURE_NAMES)
-    tower_end = structure_end + len(TWO_TOWER_FEATURE_NAMES)
+    target_end = prior_end + len(TARGET_WINDOW_FEATURE_NAMES)
+    structure_end = target_end + len(STRUCTURE_FEATURE_NAMES)
+    profile_end = structure_end + len(SOURCE_PROFILE_FEATURE_NAMES)
+    tower_end = profile_end + len(TWO_TOWER_FEATURE_NAMES)
     graph_end = tower_end + len(GRAPH_WINDOW_NAMES)
     masks = [("stats", tuple(range(min(stats_end, feature_count))))]
     if feature_count > stats_end:
         masks.append(("stats_prior", tuple(range(min(prior_end, feature_count)))))
     if feature_count > prior_end:
-        masks.append(("stats_prior_structure", tuple(range(min(structure_end, feature_count)))))
+        masks.append(("stats_prior_target", tuple(range(min(target_end, feature_count)))))
+    if feature_count > target_end:
+        masks.append(("stats_prior_target_structure", tuple(range(min(structure_end, feature_count)))))
     if feature_count > structure_end:
-        masks.append(("stats_prior_structure_tower", tuple(range(min(tower_end, feature_count)))))
+        masks.append(("stats_prior_target_structure_profile", tuple(range(min(profile_end, feature_count)))))
+    if feature_count > profile_end:
+        masks.append(("stats_prior_target_structure_profile_tower", tuple(range(min(tower_end, feature_count)))))
     if feature_count > tower_end:
-        masks.append(("stats_prior_structure_tower_gnn", tuple(range(min(graph_end, feature_count)))))
+        masks.append(("stats_prior_target_structure_profile_tower_gnn", tuple(range(min(graph_end, feature_count)))))
     if feature_count > graph_end:
-        masks.append(("stats_prior_structure_tower_gnn_seq", tuple(range(feature_count))))
+        masks.append(("stats_prior_target_structure_profile_tower_gnn_seq", tuple(range(feature_count))))
 
     unique: list[tuple[str, tuple[int, ...]]] = []
     seen: set[tuple[int, ...]] = set()
@@ -836,17 +943,24 @@ def _auto_mode_code(mode: str) -> float:
 def _config_for_selected_features(config: TrainingConfig, feature_indices: tuple[int, ...]) -> TrainingConfig:
     stats_end = len(STAT_FEATURE_NAMES)
     prior_end = stats_end + len(CANDIDATE_PRIOR_FEATURE_NAMES)
-    structure_end = prior_end + len(STRUCTURE_FEATURE_NAMES)
-    tower_end = structure_end + len(TWO_TOWER_FEATURE_NAMES)
+    target_end = prior_end + len(TARGET_WINDOW_FEATURE_NAMES)
+    structure_end = target_end + len(STRUCTURE_FEATURE_NAMES)
+    profile_end = structure_end + len(SOURCE_PROFILE_FEATURE_NAMES)
+    tower_end = profile_end + len(TWO_TOWER_FEATURE_NAMES)
     graph_end = tower_end + len(GRAPH_WINDOW_NAMES)
     needs_prior = any(stats_end <= idx < prior_end for idx in feature_indices)
-    needs_tower = any(structure_end <= idx < tower_end for idx in feature_indices)
+    needs_target = any(prior_end <= idx < target_end for idx in feature_indices)
+    needs_structure = any(target_end <= idx < structure_end for idx in feature_indices)
+    needs_profile = any(structure_end <= idx < profile_end for idx in feature_indices)
+    needs_tower = any(profile_end <= idx < tower_end for idx in feature_indices)
     needs_graph = any(tower_end <= idx < graph_end for idx in feature_indices)
     needs_sequence = any(idx >= graph_end for idx in feature_indices)
     return replace(
         config,
         candidate_prior_enabled=config.candidate_prior_enabled and needs_prior,
-        structure_enabled=config.structure_enabled and any(prior_end <= idx < structure_end for idx in feature_indices),
+        target_window_enabled=config.target_window_enabled and needs_target,
+        structure_enabled=config.structure_enabled and needs_structure,
+        source_profile_enabled=config.source_profile_enabled and needs_profile,
         two_tower_enabled=config.two_tower_enabled and needs_tower,
         gnn_enabled=config.gnn_enabled and needs_graph,
         seq_enabled=config.seq_enabled and needs_sequence,
@@ -856,6 +970,25 @@ def _config_for_selected_features(config: TrainingConfig, feature_indices: tuple
 def _can_reuse_encoder_cache(source_config: TrainingConfig, target_config: TrainingConfig) -> bool:
     """Return True when a deterministic prefix cache can hydrate the target encoder exactly."""
     if not source_config.encoder_state_cache_enabled or not target_config.encoder_state_cache_enabled:
+        return False
+    if (
+        target_config.target_window_enabled
+        and (
+            not source_config.target_window_enabled
+            or source_config.target_window_fractions != target_config.target_window_fractions
+        )
+    ):
+        return False
+    if (
+        target_config.source_profile_enabled
+        and target_config.source_profile_deterministic_enabled
+        and (
+            not source_config.source_profile_enabled
+            or not source_config.source_profile_deterministic_enabled
+            or source_config.source_profile_window_size != target_config.source_profile_window_size
+            or source_config.source_profile_recent_k != target_config.source_profile_recent_k
+        )
+    ):
         return False
     if not target_config.structure_enabled:
         return True

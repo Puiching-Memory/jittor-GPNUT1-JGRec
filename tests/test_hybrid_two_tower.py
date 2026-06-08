@@ -3,6 +3,7 @@ import sys
 from dataclasses import replace
 
 import numpy as np
+import pytest
 
 from jgrec.core.types import Interaction, InteractionTable, TestQuery
 from jgrec.idmap import NodeIdMap
@@ -11,6 +12,8 @@ from jgrec.rankers.hybrid.candidate_prior import CANDIDATE_PRIOR_FEATURE_NAMES
 from jgrec.rankers.hybrid.config import (
     GRAPH_WINDOW_NAMES,
     SEQUENCE_FEATURE_NAMES,
+    SOURCE_PROFILE_FEATURE_NAMES,
+    TARGET_WINDOW_FEATURE_NAMES,
     TWO_TOWER_FEATURE_NAMES,
     TrainingConfig,
     TwoTowerConfig,
@@ -38,7 +41,12 @@ def _interactions() -> list[Interaction]:
     ]
 
 
+def _require_jittor() -> None:
+    pytest.importorskip("jittor")
+
+
 def test_two_tower_scores_have_expected_shape_and_signal():
+    _require_jittor()
     from jgrec.rankers.hybrid.two_tower import TwoTower
 
     interactions = _interactions()
@@ -73,6 +81,7 @@ def test_two_tower_scores_have_expected_shape_and_signal():
 
 
 def test_two_tower_scoring_batch_size_preserves_scores():
+    _require_jittor()
     from jgrec.rankers.hybrid.two_tower import TwoTower
 
     interactions = _interactions()
@@ -107,6 +116,7 @@ def test_two_tower_scoring_batch_size_preserves_scores():
 
 
 def test_two_tower_reuses_future_only_structure_index():
+    _require_jittor()
     from jgrec.rankers.hybrid.two_tower import TwoTower
 
     interactions = _interactions()
@@ -144,7 +154,7 @@ def test_two_tower_reuses_future_only_structure_index():
 def test_disabled_two_tower_uses_zero_features_without_importing_tower_module():
     interactions = _interactions()
     interaction_table = InteractionTable.from_events(interactions)
-    config = TrainingConfig(gnn_enabled=False, seq_enabled=False, two_tower_enabled=False)
+    config = TrainingConfig(gnn_enabled=False, seq_enabled=False, two_tower_enabled=False, source_profile_enabled=False)
     sys.modules.pop("jgrec.rankers.hybrid.two_tower", None)
     ranker_module = importlib.import_module("jgrec.rankers.hybrid.ranker")
 
@@ -158,13 +168,21 @@ def test_disabled_two_tower_uses_zero_features_without_importing_tower_module():
     encoder.fit(interaction_table, rng=np.random.default_rng(0), verbose=False)
     features = encoder.features_for_queries([TestQuery(src=1, time=110, candidates=(10, 20))])
 
-    tower_start = len(STAT_FEATURE_NAMES) + len(CANDIDATE_PRIOR_FEATURE_NAMES) + len(STRUCTURE_FEATURE_NAMES)
+    tower_start = (
+        len(STAT_FEATURE_NAMES)
+        + len(CANDIDATE_PRIOR_FEATURE_NAMES)
+        + len(TARGET_WINDOW_FEATURE_NAMES)
+        + len(STRUCTURE_FEATURE_NAMES)
+        + len(SOURCE_PROFILE_FEATURE_NAMES)
+    )
     tower_end = tower_start + len(TWO_TOWER_FEATURE_NAMES)
     assert "jgrec.rankers.hybrid.two_tower" not in sys.modules
     assert features.shape[-1] == (
         len(STAT_FEATURE_NAMES)
         + len(CANDIDATE_PRIOR_FEATURE_NAMES)
+        + len(TARGET_WINDOW_FEATURE_NAMES)
         + len(STRUCTURE_FEATURE_NAMES)
+        + len(SOURCE_PROFILE_FEATURE_NAMES)
         + len(TWO_TOWER_FEATURE_NAMES)
         + len(GRAPH_WINDOW_NAMES)
         + len(SEQUENCE_FEATURE_NAMES)
@@ -176,7 +194,9 @@ def test_hybrid_feature_masks_include_two_tower_groups():
     feature_count = (
         len(STAT_FEATURE_NAMES)
         + len(CANDIDATE_PRIOR_FEATURE_NAMES)
+        + len(TARGET_WINDOW_FEATURE_NAMES)
         + len(STRUCTURE_FEATURE_NAMES)
+        + len(SOURCE_PROFILE_FEATURE_NAMES)
         + len(TWO_TOWER_FEATURE_NAMES)
         + len(GRAPH_WINDOW_NAMES)
         + len(SEQUENCE_FEATURE_NAMES)
@@ -187,18 +207,22 @@ def test_hybrid_feature_masks_include_two_tower_groups():
     assert [name for name, _ in masks] == [
         "stats",
         "stats_prior",
-        "stats_prior_structure",
-        "stats_prior_structure_tower",
-        "stats_prior_structure_tower_gnn",
-        "stats_prior_structure_tower_gnn_seq",
+        "stats_prior_target",
+        "stats_prior_target_structure",
+        "stats_prior_target_structure_profile",
+        "stats_prior_target_structure_profile_tower",
+        "stats_prior_target_structure_profile_tower_gnn",
+        "stats_prior_target_structure_profile_tower_gnn_seq",
     ]
 
 
 def test_selected_feature_config_disables_unused_two_tower():
     stats_end = len(STAT_FEATURE_NAMES)
     prior_end = stats_end + len(CANDIDATE_PRIOR_FEATURE_NAMES)
-    structure_end = prior_end + len(STRUCTURE_FEATURE_NAMES)
-    tower_end = structure_end + len(TWO_TOWER_FEATURE_NAMES)
+    target_end = prior_end + len(TARGET_WINDOW_FEATURE_NAMES)
+    structure_end = target_end + len(STRUCTURE_FEATURE_NAMES)
+    profile_end = structure_end + len(SOURCE_PROFILE_FEATURE_NAMES)
+    tower_end = profile_end + len(TWO_TOWER_FEATURE_NAMES)
     config = TrainingConfig(two_tower_enabled=True, gnn_enabled=True, seq_enabled=True)
 
     stats_config = _config_for_selected_features(config, tuple(range(stats_end)))
@@ -206,11 +230,16 @@ def test_selected_feature_config_disables_unused_two_tower():
     tower_config = _config_for_selected_features(config, tuple(range(tower_end)))
 
     assert not stats_config.candidate_prior_enabled
+    assert not stats_config.target_window_enabled
+    assert not stats_config.source_profile_enabled
     assert not stats_config.two_tower_enabled
     assert not stats_config.gnn_enabled
     assert not stats_config.seq_enabled
     assert prior_config.candidate_prior_enabled
+    assert not prior_config.target_window_enabled
+    assert not prior_config.source_profile_enabled
     assert not prior_config.two_tower_enabled
+    assert tower_config.source_profile_enabled
     assert tower_config.two_tower_enabled
     assert not tower_config.gnn_enabled
     assert not tower_config.seq_enabled

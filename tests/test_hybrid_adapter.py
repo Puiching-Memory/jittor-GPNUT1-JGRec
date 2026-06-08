@@ -46,6 +46,7 @@ def test_supervised_query_builder_returns_test_query_array_batches():
         gnn_enabled=False,
         seq_enabled=False,
         two_tower_enabled=False,
+        source_profile_enabled=False,
         negative_sampling_workers=0,
     )
     encoder = HybridFeatureEncoder(

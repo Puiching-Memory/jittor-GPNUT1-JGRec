@@ -24,13 +24,15 @@ def test_disabled_hybrid_ranker_does_not_load_heavy_backends():
     sys.modules.pop("jgrec.rankers.hybrid.gnn", None)
     sys.modules.pop("jgrec.rankers.hybrid.sequence", None)
     sys.modules.pop("jgrec.rankers.hybrid.two_tower", None)
-    args = CLIConfig(disable_gnn=True, disable_seq=True, disable_two_tower=True)
+    sys.modules.pop("jgrec.rankers.hybrid.source_profile", None)
+    args = CLIConfig(disable_gnn=True, disable_seq=True, disable_two_tower=True, disable_source_profile=True)
 
     create_ranker("hybrid", _ranker_config(args))
 
     assert "jgrec.rankers.hybrid.gnn" not in sys.modules
     assert "jgrec.rankers.hybrid.sequence" not in sys.modules
     assert "jgrec.rankers.hybrid.two_tower" not in sys.modules
+    assert "jgrec.rankers.hybrid.source_profile" not in sys.modules
 
 
 def test_run_name_is_human_readable_for_default_hybrid():
@@ -40,7 +42,7 @@ def test_run_name_is_human_readable_for_default_hybrid():
     name = _build_run_name(args, _ranker_config(args))
 
     assert re.fullmatch(
-        r"hybrid_full_cuda_seed-42_gnn-xsimgcl_edges-none_auto-on_prior-on_tower-on_sequence-on_[0-9a-f]{8}",
+        r"hybrid_full_cuda_seed-42_gnn-xsimgcl_edges-none_auto-on_prior-on_target-on_profile-on_tower-on_sequence-on_[0-9a-f]{8}",
         name,
     )
     assert "rw" not in name
@@ -50,12 +52,19 @@ def test_run_name_is_human_readable_for_default_hybrid():
 
 def test_run_name_describes_smoke_cpu_run():
     CLIConfig, _build_run_name, _ranker_config = _cli_symbols()
-    args = CLIConfig(limit_rows=2, cpu=True, disable_gnn=True, disable_seq=True, disable_two_tower=True)
+    args = CLIConfig(
+        limit_rows=2,
+        cpu=True,
+        disable_gnn=True,
+        disable_seq=True,
+        disable_two_tower=True,
+        disable_source_profile=True,
+    )
 
     name = _build_run_name(args, _ranker_config(args))
 
     assert re.fullmatch(
-        r"hybrid_sample-2-rows_cpu_seed-42_gnn-off_edges-off_auto-on_prior-on_tower-off_sequence-off_[0-9a-f]{8}",
+        r"hybrid_sample-2-rows_cpu_seed-42_gnn-off_edges-off_auto-on_prior-on_target-on_profile-off_tower-off_sequence-off_[0-9a-f]{8}",
         name,
     )
 
@@ -67,7 +76,9 @@ def test_run_name_digest_keeps_hidden_config_distinct():
 
     tuned_name = _build_run_name(tuned_args, _ranker_config(tuned_args))
 
-    assert tuned_name.startswith("hybrid_full_cuda_seed-42_gnn-xsimgcl_edges-none_auto-on_prior-on_tower-on_sequence-on_")
+    assert tuned_name.startswith(
+        "hybrid_full_cuda_seed-42_gnn-xsimgcl_edges-none_auto-on_prior-on_target-on_profile-on_tower-on_sequence-on_"
+    )
     assert tuned_name != default_name
 
 
@@ -78,7 +89,7 @@ def test_run_name_describes_graph_edge_weighting():
     name = _build_run_name(args, _ranker_config(args))
 
     assert name.startswith(
-        "hybrid_full_cuda_seed-42_gnn-xsimgcl_edges-time-decay_auto-on_prior-on_tower-on_sequence-on_"
+        "hybrid_full_cuda_seed-42_gnn-xsimgcl_edges-time-decay_auto-on_prior-on_target-on_profile-on_tower-on_sequence-on_"
     )
 
 
@@ -88,7 +99,9 @@ def test_run_name_describes_two_tower_status():
 
     name = _build_run_name(args, _ranker_config(args))
 
-    assert name.startswith("hybrid_full_cuda_seed-42_gnn-xsimgcl_edges-none_auto-on_prior-on_tower-off_sequence-on_")
+    assert name.startswith(
+        "hybrid_full_cuda_seed-42_gnn-xsimgcl_edges-none_auto-on_prior-on_target-on_profile-on_tower-off_sequence-on_"
+    )
 
 
 def test_run_name_describes_auto_strategy_and_candidate_prior_status():
@@ -97,7 +110,19 @@ def test_run_name_describes_auto_strategy_and_candidate_prior_status():
 
     name = _build_run_name(args, _ranker_config(args))
 
-    assert name.startswith("hybrid_full_cuda_seed-42_gnn-xsimgcl_edges-none_auto-off_prior-off_tower-on_sequence-on_")
+    assert name.startswith(
+        "hybrid_full_cuda_seed-42_gnn-xsimgcl_edges-none_auto-off_prior-off_target-on_profile-on_tower-on_sequence-on_"
+    )
+
+
+def test_cli_config_passes_target_window_options_to_hybrid():
+    CLIConfig, _, _ranker_config = _cli_symbols()
+    args = CLIConfig(disable_target_window=True, target_window_fractions="0.02,0.10,0.50,1.00")
+
+    config = _ranker_config(args)
+
+    assert not config.target_window_enabled
+    assert config.target_window_fractions == (0.02, 0.10, 0.50, 1.00)
 
 
 def test_cli_config_passes_negative_sampling_workers_to_hybrid():
@@ -121,6 +146,35 @@ def test_cli_config_passes_auto_strategy_and_candidate_prior_to_hybrid():
     assert not config.auto_strategy_enabled
     assert not config.candidate_prior_enabled
     assert config.test_candidate_negative_ratio == 0.4
+
+
+def test_cli_config_passes_source_profile_options_to_hybrid():
+    CLIConfig, _, _ranker_config = _cli_symbols()
+    args = CLIConfig(
+        disable_source_profile=True,
+        disable_source_profile_deterministic=True,
+        disable_source_profile_item2vec=True,
+        source_profile_embedding_dim=16,
+        source_profile_epochs=1,
+        source_profile_batch_size=64,
+        source_profile_score_batch_size=128,
+        source_profile_max_samples=256,
+        source_profile_window_size=4,
+        source_profile_recent_k=8,
+    )
+
+    config = _ranker_config(args)
+
+    assert not config.source_profile_enabled
+    assert not config.source_profile_deterministic_enabled
+    assert not config.source_profile_item2vec_enabled
+    assert config.source_profile_config().embedding_dim == 16
+    assert config.source_profile_config().epochs == 1
+    assert config.source_profile_config().batch_size == 64
+    assert config.source_profile_config().score_batch_size == 128
+    assert config.source_profile_config().max_samples == 256
+    assert config.source_profile_config().window_size == 4
+    assert config.source_profile_config().recent_k == 8
 
 
 def test_encoder_state_cache_is_operational_and_does_not_change_run_name_digest():

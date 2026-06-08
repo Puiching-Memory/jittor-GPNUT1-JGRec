@@ -7,11 +7,12 @@ from dataclasses import dataclass
 import numpy as np
 
 from jgrec.core.types import InteractionTable
+from jgrec.idmap import NodeIdMap
 from jgrec.logging import log
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
 
 from .candidate_prior import CandidatePriorTower
-from .config import CandidatePriorConfig, StructureTowerConfig
+from .config import CandidatePriorConfig, SourceProfileConfig, StructureTowerConfig, TargetWindowConfig
 from .stats import SrcHistory, TemporalStats
 from .structure import StructureFeatureTower
 
@@ -21,7 +22,9 @@ class HybridDeterministicSnapshot:
     prefix_end: int
     stats: dict
     candidate_prior: dict
+    target_window: dict
     structure: dict
+    source_profile: dict
 
 
 class HybridPrefixStateCache:
@@ -32,7 +35,9 @@ class HybridPrefixStateCache:
         recent_window: int,
         candidate_prior_config: CandidatePriorConfig,
         structure_config: StructureTowerConfig,
-        test_candidate_counts: Counter[int] | None,
+        target_window_config: TargetWindowConfig | None = None,
+        source_profile_config: SourceProfileConfig | None = None,
+        test_candidate_counts: Counter[int] | None = None,
         verbose: bool = True,
     ) -> None:
         if not interactions:
@@ -40,7 +45,9 @@ class HybridPrefixStateCache:
         self.interactions = interactions
         self.recent_window = int(recent_window)
         self.candidate_prior_config = candidate_prior_config
+        self.target_window_config = target_window_config or TargetWindowConfig(enabled=False)
         self.structure_config = structure_config
+        self.source_profile_config = source_profile_config or SourceProfileConfig(enabled=False)
         self.test_candidate_counts = Counter(test_candidate_counts or {})
         self.verbose = verbose
         self._cursor = 0
@@ -128,6 +135,7 @@ class HybridPrefixStateCache:
         stats = self._build_stats(prefix_end)
         candidate_prior = CandidatePriorTower(self.candidate_prior_config)
         candidate_prior.fit_from_counts(set(self._dst_counts), self.test_candidate_counts)
+        target_window = self._build_target_window()
         structure = StructureFeatureTower(self.structure_config)
         structure.index = self._build_structure_index(prefix_end)
         structure.min_time = int(self.interactions.time[0])
@@ -138,11 +146,24 @@ class HybridPrefixStateCache:
             max(structure.graph_span * 0.20, 1.0),
             max(structure.graph_span * 0.50, 1.0),
         )
+        source_profile = {"item_pair_counts": {}, "item_degrees": {}}
+        if self.source_profile_config.enabled and self.source_profile_config.deterministic_enabled:
+            from .source_profile import SourceProfileTower
+
+            profile_tower = SourceProfileTower(
+                id_map=NodeIdMap.from_interactions(self.interactions[:prefix_end]),
+                config=self.source_profile_config,
+            )
+            profile_tower.index = structure.index
+            profile_tower.fit_deterministic(self.interactions[:prefix_end])
+            source_profile = profile_tower.snapshot()
         return HybridDeterministicSnapshot(
             prefix_end=prefix_end,
             stats=stats.snapshot(),
             candidate_prior=candidate_prior.snapshot(),
+            target_window=target_window.snapshot(),
             structure=structure.snapshot(),
+            source_profile=source_profile,
         )
 
     def _build_stats(self, prefix_end: int) -> TemporalStats:
@@ -170,6 +191,18 @@ class HybridPrefixStateCache:
         stats._build_dense_dst_features()
         return stats
 
+    def _build_target_window(self):
+        from .target_window import TargetWindowTower
+
+        target_window = TargetWindowTower(self.target_window_config)
+        target_window.fit_from_grouped(
+            dst_event_times=self._dst_times,
+            event_times=self._event_times,
+            min_time=int(self.interactions.time[0]),
+            max_time=int(self.interactions.time[self._cursor - 1]),
+        )
+        return target_window
+
     def _build_structure_index(self, prefix_end: int) -> TemporalInteractionIndex:
         index = TemporalInteractionIndex()
         index.fit_grouped(
@@ -194,14 +227,22 @@ def hydrate_deterministic_state(
     stats: TemporalStats,
     candidate_prior,
     structure,
+    target_window=None,
+    source_profile=None,
 ) -> None:
     stats.hydrate(snapshot.stats)
     prior_hydrate = getattr(candidate_prior, "hydrate", None)
     if callable(prior_hydrate):
         prior_hydrate(snapshot.candidate_prior)
+    target_window_hydrate = getattr(target_window, "hydrate", None)
+    if callable(target_window_hydrate):
+        target_window_hydrate(snapshot.target_window)
     structure_hydrate = getattr(structure, "hydrate", None)
     if callable(structure_hydrate):
         structure_hydrate(snapshot.structure)
+    source_profile_hydrate = getattr(source_profile, "hydrate", None)
+    if callable(source_profile_hydrate):
+        source_profile_hydrate(snapshot.source_profile)
 
 
 def _finalize_history(source: SrcHistory, log_total_edges: float) -> SrcHistory:

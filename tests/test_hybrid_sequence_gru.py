@@ -2,17 +2,20 @@ import importlib
 import sys
 
 import numpy as np
+import pytest
 
 from jgrec.core.types import Interaction, InteractionTable, TestQuery
 from jgrec.idmap import NodeIdMap
+from jgrec.rankers.hybrid.candidate_prior import CANDIDATE_PRIOR_FEATURE_NAMES
 from jgrec.rankers.hybrid.config import (
     GRAPH_WINDOW_NAMES,
     SEQUENCE_FEATURE_NAMES,
+    SOURCE_PROFILE_FEATURE_NAMES,
+    TARGET_WINDOW_FEATURE_NAMES,
     TWO_TOWER_FEATURE_NAMES,
     SequenceTowerConfig,
     TrainingConfig,
 )
-from jgrec.rankers.hybrid.candidate_prior import CANDIDATE_PRIOR_FEATURE_NAMES
 from jgrec.rankers.hybrid.stats import STAT_FEATURE_NAMES
 from jgrec.rankers.hybrid.structure import STRUCTURE_FEATURE_NAMES
 
@@ -31,7 +34,12 @@ def _interactions() -> list[Interaction]:
     ]
 
 
+def _require_jittor() -> None:
+    pytest.importorskip("jittor")
+
+
 def test_gru_sequence_scores_have_expected_shape_and_signal():
+    _require_jittor()
     from jgrec.rankers.hybrid.sequence import SequenceTower
 
     interactions = _interactions()
@@ -71,7 +79,7 @@ def test_gru_sequence_scores_have_expected_shape_and_signal():
 def test_disabled_sequence_uses_zero_features_without_importing_sequence_module():
     interactions = _interactions()
     interaction_table = InteractionTable.from_events(interactions)
-    config = TrainingConfig(gnn_enabled=False, seq_enabled=False, two_tower_enabled=False)
+    config = TrainingConfig(gnn_enabled=False, seq_enabled=False, two_tower_enabled=False, source_profile_enabled=False)
     sys.modules.pop("jgrec.rankers.hybrid.sequence", None)
     ranker_module = importlib.import_module("jgrec.rankers.hybrid.ranker")
 
@@ -88,7 +96,9 @@ def test_disabled_sequence_uses_zero_features_without_importing_sequence_module(
     sequence_start = (
         len(STAT_FEATURE_NAMES)
         + len(CANDIDATE_PRIOR_FEATURE_NAMES)
+        + len(TARGET_WINDOW_FEATURE_NAMES)
         + len(STRUCTURE_FEATURE_NAMES)
+        + len(SOURCE_PROFILE_FEATURE_NAMES)
         + len(TWO_TOWER_FEATURE_NAMES)
         + len(GRAPH_WINDOW_NAMES)
     )

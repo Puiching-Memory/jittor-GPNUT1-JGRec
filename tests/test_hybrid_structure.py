@@ -8,6 +8,8 @@ from jgrec.rankers.hybrid.candidate_prior import CANDIDATE_PRIOR_FEATURE_NAMES
 from jgrec.rankers.hybrid.config import (
     GRAPH_WINDOW_NAMES,
     SEQUENCE_FEATURE_NAMES,
+    SOURCE_PROFILE_FEATURE_NAMES,
+    TARGET_WINDOW_FEATURE_NAMES,
     TWO_TOWER_FEATURE_NAMES,
     StructureTowerConfig,
 )
@@ -238,7 +240,9 @@ def test_hybrid_feature_masks_include_structure_groups():
     feature_count = (
         len(STAT_FEATURE_NAMES)
         + len(CANDIDATE_PRIOR_FEATURE_NAMES)
+        + len(TARGET_WINDOW_FEATURE_NAMES)
         + len(STRUCTURE_FEATURE_NAMES)
+        + len(SOURCE_PROFILE_FEATURE_NAMES)
         + len(TWO_TOWER_FEATURE_NAMES)
         + len(GRAPH_WINDOW_NAMES)
         + len(SEQUENCE_FEATURE_NAMES)
@@ -249,11 +253,16 @@ def test_hybrid_feature_masks_include_structure_groups():
     assert [name for name, _ in masks] == [
         "stats",
         "stats_prior",
-        "stats_prior_structure",
-        "stats_prior_structure_tower",
-        "stats_prior_structure_tower_gnn",
-        "stats_prior_structure_tower_gnn_seq",
+        "stats_prior_target",
+        "stats_prior_target_structure",
+        "stats_prior_target_structure_profile",
+        "stats_prior_target_structure_profile_tower",
+        "stats_prior_target_structure_profile_tower_gnn",
+        "stats_prior_target_structure_profile_tower_gnn_seq",
     ]
-    assert len(masks[2][1]) == (
-        len(STAT_FEATURE_NAMES) + len(CANDIDATE_PRIOR_FEATURE_NAMES) + len(STRUCTURE_FEATURE_NAMES)
+    assert len(masks[3][1]) == (
+        len(STAT_FEATURE_NAMES)
+        + len(CANDIDATE_PRIOR_FEATURE_NAMES)
+        + len(TARGET_WINDOW_FEATURE_NAMES)
+        + len(STRUCTURE_FEATURE_NAMES)
     )

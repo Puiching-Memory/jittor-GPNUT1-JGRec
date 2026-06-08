@@ -26,6 +26,7 @@ def _encoder(interactions: InteractionTable) -> HybridFeatureEncoder:
     config = TrainingConfig(
         candidate_prior_enabled=True,
         structure_enabled=True,
+        source_profile_enabled=False,
         two_tower_enabled=False,
         gnn_enabled=False,
         seq_enabled=False,
@@ -47,6 +48,7 @@ def _config(**kwargs) -> TrainingConfig:
     return TrainingConfig(
         candidate_prior_enabled=True,
         structure_enabled=True,
+        source_profile_enabled=False,
         two_tower_enabled=False,
         gnn_enabled=False,
         seq_enabled=False,

@@ -6,11 +6,17 @@ import numpy as np
 from jgrec.core.types import Interaction, InteractionTable, TestQuery
 from jgrec.idmap import NodeIdMap
 from jgrec.rankers.hybrid.candidate_prior import CANDIDATE_PRIOR_FEATURE_NAMES, CandidatePriorTower
-from jgrec.rankers.hybrid.config import CandidatePriorConfig, StructureTowerConfig, TrainingConfig
+from jgrec.rankers.hybrid.config import (
+    TARGET_WINDOW_FEATURE_NAMES,
+    CandidatePriorConfig,
+    StructureTowerConfig,
+    TrainingConfig,
+)
 from jgrec.rankers.hybrid.encoder_cache import HybridPrefixStateCache, hydrate_deterministic_state
 from jgrec.rankers.hybrid.ranker import HybridFeatureEncoder, TemporalHybridRanker, _can_reuse_encoder_cache
 from jgrec.rankers.hybrid.stats import STAT_FEATURE_NAMES, TemporalStats
 from jgrec.rankers.hybrid.structure import STRUCTURE_FEATURE_NAMES, StructureFeatureTower
+from jgrec.rankers.hybrid.target_window import TargetWindowTower
 
 
 def _interactions() -> list[Interaction]:
@@ -38,17 +44,26 @@ def _deterministic_features(
 ) -> np.ndarray:
     stats = TemporalStats(recent_window=4)
     prior = CandidatePriorTower(CandidatePriorConfig(enabled=True))
+    target_window = TargetWindowTower(TrainingConfig().target_window_config())
     structure = StructureFeatureTower(structure_config)
     if snapshot is None:
         stats.fit(interactions)
         prior.fit(interactions, test_counts)
+        target_window.fit(interactions)
         structure.fit(interactions, rng=np.random.default_rng(0), verbose=False)
     else:
-        hydrate_deterministic_state(snapshot=snapshot, stats=stats, candidate_prior=prior, structure=structure)
+        hydrate_deterministic_state(
+            snapshot=snapshot,
+            stats=stats,
+            candidate_prior=prior,
+            target_window=target_window,
+            structure=structure,
+        )
     stat_features = stats.features_for_queries(queries)
     prior_features = prior.features_for_queries(queries, stat_features)
+    target_features = target_window.features_for_queries(queries)
     structure_features = structure.features_for_queries(queries)
-    return np.concatenate([stat_features, prior_features, structure_features], axis=2)
+    return np.concatenate([stat_features, prior_features, target_features, structure_features], axis=2)
 
 
 def test_encoder_prefix_cache_matches_independent_fit_for_all_prefixes():
@@ -133,6 +148,7 @@ def test_encoder_prefix_cache_hydrates_disabled_prior_and_structure_as_zero_plac
         id_map=NodeIdMap.from_interactions(interactions),
         recent_window=4,
         candidate_prior_config=config.candidate_prior_config(),
+        target_window_config=config.target_window_config(),
         structure_config=config.structure_config(),
         two_tower_config=config.two_tower_config(),
         graph_config=config.graph_config(),
@@ -144,9 +160,10 @@ def test_encoder_prefix_cache_hydrates_disabled_prior_and_structure_as_zero_plac
 
     prior_start = len(STAT_FEATURE_NAMES)
     prior_end = prior_start + len(CANDIDATE_PRIOR_FEATURE_NAMES)
-    structure_end = prior_end + len(STRUCTURE_FEATURE_NAMES)
+    target_end = prior_end + len(TARGET_WINDOW_FEATURE_NAMES)
+    structure_end = target_end + len(STRUCTURE_FEATURE_NAMES)
     assert np.all(features[:, :, prior_start:prior_end] == 0.0)
-    assert np.all(features[:, :, prior_end:structure_end] == 0.0)
+    assert np.all(features[:, :, target_end:structure_end] == 0.0)
 
 
 def test_final_encoder_reuses_compatible_prefix_cache_builder():
@@ -230,6 +247,7 @@ def test_encoder_cache_reuse_guard_matches_structure_semantics():
 
     assert _can_reuse_encoder_cache(base, base)
     assert _can_reuse_encoder_cache(base, replace(base, structure_enabled=False))
+    assert not _can_reuse_encoder_cache(base, replace(base, target_window_fractions=(0.02, 0.05, 0.20, 1.00)))
     assert not _can_reuse_encoder_cache(base, replace(base, structure_future_only_transition_cooccur=False))
     assert not _can_reuse_encoder_cache(
         replace(base, structure_cooccur_enabled=False),
