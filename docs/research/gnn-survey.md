@@ -14,7 +14,7 @@
 2. **重点尝试谱图/低秩图协同特征**。SVD-GCN、LightGCL、ChebyCF、GSPRec 都说明图推荐正在从“堆 message passing”转向“理解图过滤和谱信号”。这和本项目可以低成本增加谱图候选分数的方向贴合，但必须先做隔离实验。
 3. **负采样必须跟线上反馈一起看**。MixGCF、MixDec Sampling 这类工作说明 GNN-BPR 的收益高度依赖 hard negatives；但本项目已经出现 hard-negative 本地高分、线上低分的反例，因此负采样协议必须先通过线上锚点校准。
 4. **动态图模型要谨慎**。JODIE、TGAT、TGN、DyGFormer 适合连续时间 link prediction，但本项目是 100 候选重排序；可先把时间信息做成多窗口图和时间衰减边权。item-transition 图已经离线高分但线上失败，不能作为默认方向。
-5. **复杂 GNN 只有线上有效才保留**。近年论文普遍报告公开 benchmark 提升，但本项目已有强 stats+XSimGCL 基线；任何 GNN 改动必须先用第一版线上分 `1.1452` 做冠军基线。
+5. **复杂 GNN 只有线上有效才保留**。近年论文普遍报告公开 benchmark 提升，但本项目已有强 stats+XSimGCL 基线；任何 GNN 改动必须先和当前线上最好提交对比。第一版线上分 `1.1452` 只作为历史强基线。
 
 ## 论文地图
 
@@ -197,7 +197,7 @@ GNN 推荐通常用 BPR 或 sampled softmax。如果负样本太容易，图 emb
 
 ## 下一步实验清单
 
-1. 以第一版完整 GNN 提交为冠军基线，记录当前默认命令可复现的 run id。
+1. 以当前线上最好提交为冠军基线，记录默认命令可复现的 run id；第一版完整 GNN 提交只作为历史强基线。
 2. 跑 `stats-only`、`stats+LightGCN`、`stats+XSimGCL` 的 dataset2 中样本严格基线。
 3. 在隔离分支实现谱图特征，只测谱图特征是否让 `stats_gnn` 被选择。
 4. 若 seed 42 提升，立刻复测 seed 7；不稳定则关闭。

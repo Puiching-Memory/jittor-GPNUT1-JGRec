@@ -4,26 +4,26 @@
 
 ## 当前提交候选
 
-记录日期：2026-06-07
+记录日期：2026-06-08
 
 当前工作区已验证提交包：
 
 ```text
-result/hybrid_submit_v14_d1_quality_v9_d2_quality_stream_v6_seed60/result.zip
+result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
 ```
 
 线上反馈：
 
 ```text
-1.0715546895407047
+1.1983
 ```
 
-拼包来源：
+CSV 来源：
 
 | 数据集     | CSV 来源                                                                 |
 | ---------- | ------------------------------------------------------------------------ |
-| `dataset1` | `result/hybrid_submit_v13_d1_quality_v9_d2_stream_memmap_v2_seed60/csv/dataset1.csv` |
-| `dataset2` | `result/hybrid_d2_quality_stream_v6_seed60/csv/dataset2.csv`             |
+| `dataset1` | `result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset1.csv` |
+| `dataset2` | `result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset2.csv` |
 
 当前模型链路：
 
@@ -33,11 +33,21 @@ stats + candidate_prior + structure + two_tower + graph + sequence -> Fusion MLP
 
 关键设置：
 
-- `max_fit_events=0`，final encoder 使用完整训练历史；
-- dataset2 自动画像为 `new_link_cold`，默认 `test_candidate_negative_ratio=0.60`；
-- 监督融合训练使用 `max_train_events=50000`、`max_val_events=10000`；
+- 全量输出 `dataset1` 和 `dataset2`，不使用 `--dataset` 或 `--limit-rows`；
+- `max_fit_events=240000`，final encoder 使用尾部 24 万训练事件；
+- dataset1 自动画像为 `repeat_memory`，dataset2 自动画像为 `new_link_cold`；
+- 手动设置 `test_candidate_negative_ratio=1.00`；
+- 监督融合训练使用 `max_train_events=50000`、`max_val_events=20000`；
+- `selection_metric=mrr`，`structure_cooccur_history_limit=32`；
 - 质量优先，不通过关闭 `structure`、`two_tower`、`candidate_prior` 解决内存或速度问题；
 - 监督特征使用 memmap 和流式 fusion 控制内存。
+
+本地验证结果：
+
+| 数据集     |      AP |     MRR | fusion                        | auto            |
+| ---------- | ------: | ------: | ----------------------------- | --------------- |
+| `dataset1` | 0.75681 | 0.77466 | `stats_prior_structure_tower` | `repeat_memory` |
+| `dataset2` | 0.33042 | 0.54808 | `stats_prior_structure_tower` | `new_link_cold` |
 
 提交结论：
 
@@ -79,10 +89,10 @@ dataset2 small smoke: result/structure_speed_smoke_v8
 - 涉及提交文件的改动，需要校验 CSV 行列数、概率范围、每行和、zip 内容。
 - 没有稳定收益的改动也要记录，避免后续重复投入。
 
-## 线上冠军对照基线
+## 历史线上强基线
 
-以下记录第一版完整 GNN 提交的线上冠军对照。阶段 3 之后，当前工作区默认 `hybrid`
-训练已启用 mixed hard negatives；该线上基线仍作为后续实验门禁对照。
+以下记录第一版完整 GNN 提交的历史线上对照。阶段 3 之后，当前工作区默认 `hybrid`
+训练已启用 mixed hard negatives；该线上基线仍作为后续实验门禁对照，但不再是当前冠军。
 
 - `num_negatives=31`
 - 当时使用随机负采样
@@ -107,7 +117,7 @@ result/rw32-bs2048-vr0p1-cr0p75-tr20000-va5000-neg31-fit0-ep5-tbs512-lr0p001-wd0
 
 结论：
 
-- 第一版端到端链路已经满足比赛提交格式，并且线上成功计分，是当前冠军基线。
+- 第一版端到端链路已经满足比赛提交格式，并且线上成功计分，是历史强基线。
 - 本地验证 MRR 加和为 \(0.80293 + 0.51770 = 1.32063\)，高于线上总分 \(1.1452\)，说明本地时间切分偏乐观。
 - 后续任何模型结构改动，只有在线上反馈或已校准代理验证中超过该基线，才进入默认提交流程。
 
@@ -798,7 +808,7 @@ dataset2.csv
 | -------- | ---------------------------------------------------------- |
 | 实验状态 | `keep`、`reject`、`archive` 三选一                         |
 | 代码状态 | 说明是否进入默认 CLI；未进入默认链路的实验代码应删除或隔离 |
-| 对照基线 | 默认使用第一版完整 GNN 提交，线上分 `1.1452`               |
+| 对照基线 | 默认使用当前线上最好提交，第一版完整 GNN 提交 `1.1452` 只作历史强基线 |
 | 协议     | 数据集、split、负采样、seed、训练事件数、验证事件数、epoch |
 | 本地结果 | 分 dataset AP/MRR、选择的融合特征、关键耗时                |
 | 线上结果 | 提交产物路径、线上总分；未提交要写明原因                   |
@@ -807,7 +817,7 @@ dataset2.csv
 当前门禁：
 
 - 本地 AP 用于对齐官方 baseline 的早停/选择口径；本地 MRR 只能作为诊断信号，不能单独决定模型进入默认链路。
-- 如果线上结果低于第一版冠军基线，默认链路必须恢复到第一版模型。
+- 如果线上结果低于当前线上最好提交，默认链路不能替换；第一版完整 GNN 只作为历史回退参考。
 - 失败实验可以保留简短归档记录，但实验代码不能污染默认命令和运行手册。
 - 如果没有可信代理验证，继续比赛应采用线上 A/B：一次只改一个数据集或一个模块，用线上总分反推增量。
 

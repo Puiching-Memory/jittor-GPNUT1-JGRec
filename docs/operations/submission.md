@@ -7,21 +7,28 @@
 当前工作区已验证提交包：
 
 ```text
-result/hybrid_submit_v14_d1_quality_v9_d2_quality_stream_v6_seed60/result.zip
+result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
 ```
 
 线上反馈：
 
 ```text
-1.0715546895407047
+1.1983
 ```
 
 来源：
 
-| 数据集     | CSV 来源                                                                 |
-| ---------- | ------------------------------------------------------------------------ |
-| `dataset1` | `result/hybrid_submit_v13_d1_quality_v9_d2_stream_memmap_v2_seed60/csv/dataset1.csv` |
-| `dataset2` | `result/hybrid_d2_quality_stream_v6_seed60/csv/dataset2.csv`             |
+| 数据集     | CSV 来源                                                               |
+| ---------- | ---------------------------------------------------------------------- |
+| `dataset1` | `result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset1.csv` |
+| `dataset2` | `result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset2.csv` |
+
+关键设置：
+
+- 全量输出 `dataset1` 和 `dataset2`，不使用 `--dataset` 或 `--limit-rows`。
+- `max_fit_events=240000`、`max_train_events=50000`、`max_val_events=20000`。
+- `selection_metric=mrr`、`test_candidate_negative_ratio=1.00`。
+- `structure_cooccur_history_limit=32`。
 
 提交时只上传 `result.zip`。压缩包根目录应直接包含 `dataset1.csv` 和 `dataset2.csv`。
 
@@ -33,7 +40,7 @@ result/hybrid_submit_v14_d1_quality_v9_d2_quality_stream_v6_seed60/result.zip
 python - <<'PY'
 import zipfile
 
-path = "result/hybrid_submit_v14_d1_quality_v9_d2_quality_stream_v6_seed60/result.zip"
+path = "result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip"
 with zipfile.ZipFile(path) as zf:
     print(zf.namelist())
 PY
@@ -49,7 +56,7 @@ expected = {
     "dataset1": 61051,
     "dataset2": 153420,
 }
-base = Path("result/hybrid_submit_v14_d1_quality_v9_d2_quality_stream_v6_seed60/csv")
+base = Path("result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/csv")
 for name, rows in expected.items():
     path = base / f"{name}.csv"
     actual_rows = 0
@@ -68,7 +75,7 @@ PY
 python - <<'PY'
 from pathlib import Path
 
-base = Path("result/hybrid_submit_v14_d1_quality_v9_d2_quality_stream_v6_seed60/csv")
+base = Path("result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/csv")
 for path in sorted(base.glob("*.csv")):
     checked = 0
     for line in path.open("r", encoding="utf-8"):
@@ -202,15 +209,15 @@ MRR 选择：
 
 ## 参数含义
 
-| 参数 | 含义 |
-| ---- | ---- |
-| `--max-fit-events 0` | 不截断训练历史，最终 encoder 使用完整 `train.csv`。 |
-| `--max-train-events` | 融合器监督训练使用的正样本事件上限。 |
-| `--max-val-events` | 融合器特征组选择、早停和本地 AP/MRR 验证的事件上限。 |
-| `--num-negatives` | 每个正样本配多少个负候选。 |
-| `--selection-metric` | 融合器早停和特征 mask 选择使用 `ap` 或 `mrr`。 |
+| 参数                              | 含义                                                                  |
+| --------------------------------- | --------------------------------------------------------------------- |
+| `--max-fit-events 0`              | 不截断训练历史，最终 encoder 使用完整 `train.csv`。                   |
+| `--max-train-events`              | 融合器监督训练使用的正样本事件上限。                                  |
+| `--max-val-events`                | 融合器特征组选择、早停和本地 AP/MRR 验证的事件上限。                  |
+| `--num-negatives`                 | 每个正样本配多少个负候选。                                            |
+| `--selection-metric`              | 融合器早停和特征 mask 选择使用 `ap` 或 `mrr`。                        |
 | `--test-candidate-negative-ratio` | 负样本中来自 test 候选分布的比例；冷启动/新链接数据通常需要更高比例。 |
-| `--supervised-feature-memmap` | 监督特征落盘分块，降低常驻内存。 |
+| `--supervised-feature-memmap`     | 监督特征落盘分块，降低常驻内存。                                      |
 
 ## 拼包原则
 
@@ -220,4 +227,3 @@ MRR 选择：
 - 每个 CSV 行数等于对应 `test.csv` 行数。
 - zip 根目录只有 CSV 文件。
 - 不使用 `--limit-rows` 产物提交。
-

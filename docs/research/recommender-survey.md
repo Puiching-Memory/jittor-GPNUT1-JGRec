@@ -7,7 +7,7 @@
 - 当前任务是给定每行 100 个候选目标节点后的重排序，不是大规模召回。
 - 生成式推荐、LLM 推荐、Semantic ID、扩散推荐、Mamba 序列推荐等近期热点多数面向召回、跨域或通用推荐基础模型，不进入当前默认链路。
 - 已经尝试过的 Semantic ID 聚类塔因 seed 不稳定被拒绝；后续不要直接恢复为主线。
-- 若继续研究非 GNN 方向，只能作为隔离实验，并且必须以 [模型优化](../experiments/model-optimization.md) 中的第一版线上分 `1.1452` 为冠军基线。
+- 若继续研究非 GNN 方向，只能作为隔离实验，并且必须以 [模型优化](../experiments/model-optimization.md) 中的当前线上最好提交为冠军基线；第一版线上分 `1.1452` 只作为历史强基线。
 
 ## 评估方法
 
@@ -18,7 +18,7 @@
 | [BPR: Bayesian Personalized Ranking from Implicit Feedback](https://arxiv.org/abs/1205.2618)                                                                                                 | 用 `(user, positive, negative)` pairwise 排序目标优化隐式反馈推荐。 | 当前图塔 BPR 合理；融合层可以研究 pairwise/listwise 混合损失。  |
 | [On Sampled Metrics for Item Recommendation](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/)                                                                       | 采样候选上计算 ranking metrics 会引入偏差。                         | 本项目已经出现本地 MRR 与线上得分严重 gap，不能只相信采样验证。 |
 | [Sampling-Bias-Corrected Neural Modeling for Large Corpus Item Recommendations](https://research.google/pubs/sampling-bias-corrected-neural-modeling-for-large-corpus-item-recommendations/) | 大规模 item 推荐中的 sampled softmax 存在抽样偏差，需要校正。       | 若引入非均匀负采样，必须记录采样分布并校验线上效果。            |
-| [Are We Really Making Much Progress?](https://arxiv.org/abs/1907.06902)                                                                                                                      | 很多神经推荐方法在强基线和严谨复现下并不稳。                        | 复杂模型必须和当前第一版 GNN 冠军基线比较。                     |
+| [Are We Really Making Much Progress?](https://arxiv.org/abs/1907.06902)                                                                                                                      | 很多神经推荐方法在强基线和严谨复现下并不稳。                        | 复杂模型必须和当前线上最好提交比较。                            |
 | [Revisiting the Performance of iALS on Item Recommendation Benchmarks](https://arxiv.org/abs/2110.14037)                                                                                     | 经典 iALS 经过认真调参仍很强。                                      | 可作为后续协同过滤特征参考，但不能替代线上验证。                |
 
 ## 序列与目标感知排序

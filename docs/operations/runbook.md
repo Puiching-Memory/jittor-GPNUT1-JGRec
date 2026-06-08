@@ -5,13 +5,13 @@
 提交前先看 [提交说明](submission.md)。当前工作区已验证的提交包是：
 
 ```text
-result/hybrid_submit_v14_d1_quality_v9_d2_quality_stream_v6_seed60/result.zip
+result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
 ```
 
 线上反馈：
 
 ```text
-1.0715546895407047
+1.1983
 ```
 
 该路径是生成产物，不应提交进代码仓库；比赛平台只需要上传 `result.zip`。

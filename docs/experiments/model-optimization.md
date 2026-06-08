@@ -157,11 +157,62 @@ uv run jgrec-tune-temporal-graph --datasets dataset1 --n-trials 1 --n-jobs 1 --g
 
 ## 线上提交记录
 
+### hybrid full 50k/20k MRR r100 seed60
+
+实验日期：2026-06-08。
+
+实验状态：`keep`，当前线上最好提交。
+
+协议：
+
+- 提交产物：`result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip`
+- 全量输出 `dataset1` 和 `dataset2`，不使用 `--dataset` 或 `--limit-rows`
+- Seed：60
+- 训练事件历史上限：`max_fit_events=240000`
+- 融合器监督训练事件数：`max_train_events=50000`
+- 验证事件数：`max_val_events=20000`
+- 候选数：`1 positive + 63 negatives`
+- `selection_metric=mrr`
+- `test_candidate_negative_ratio=1.00`
+- `structure_cooccur_history_limit=32`
+
+关键参数：
+
+- `epochs=3`
+- `train_batch_size=512`
+- `fusion_hidden_dim=64`
+- `gnn_model=xsimgcl`
+- `gnn_edge_weighting=none`
+- `gnn_epochs=1`
+- `gnn_max_graph_edges=120000`
+- `gnn_max_train_edges=60000`
+- `seq_epochs=1`
+- `two_tower_epochs=1`
+- `supervised_feature_memmap=True`
+- `supervised_feature_batch_size=256`
+
+结果：
+
+| 数据集     |      AP |     MRR | fusion                        | auto            |
+| ---------- | ------: | ------: | ----------------------------- | --------------- |
+| `dataset1` | 0.75681 | 0.77466 | `stats_prior_structure_tower` | `repeat_memory` |
+| `dataset2` | 0.33042 | 0.54808 | `stats_prior_structure_tower` | `new_link_cold` |
+
+| 指标            | 值                                                                 |
+| --------------- | ------------------------------------------------------------------ |
+| 线上总分        | `1.1983`                                                           |
+| zip sha256      | `bd6ae23521528e6b7d92e4073eff25ac6d7a0922be2ceac3523bd1be19307736` |
+| `dataset1` 行数 | `61051`                                                            |
+| `dataset2` 行数 | `153420`                                                           |
+
+结论：保留为当前线上冠军基线。后续冲分需要同时记录本地 AP/MRR、全量 zip 路径和线上反馈；若只重跑
+`dataset2`，需要明确拼包来源并重新提交确认。
+
 ### temporal-graph Optuna best v1
 
 实验日期：2026-06-02。
 
-实验状态：`keep`，当前线上最好提交。
+实验状态：`archive`，历史 temporal-graph 基线。
 
 协议：
 

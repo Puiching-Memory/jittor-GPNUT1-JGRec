@@ -53,17 +53,17 @@ stats + candidate_prior + structure + two_tower + graph + sequence
 ## 当前提交候选
 
 ```text
-result/hybrid_submit_v14_d1_quality_v9_d2_quality_stream_v6_seed60/result.zip
+result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
 ```
 
 线上反馈：
 
 ```text
-1.0715546895407047
+1.1983
 ```
 
-该包由当前稳定的 `dataset1.csv` 和已完成的 `dataset2.csv` 拼接生成。新的冲分实验建议先单跑
-`dataset2`，确认线上反馈后再替换拼包。
+该包为全量 `dataset1` + `dataset2` 重新生成结果，不使用 `--dataset` 或 `--limit-rows`。新的冲分实验
+仍建议先单跑 `dataset2`，确认线上反馈后再决定是否替换完整提交包。
 
 ## 最短路径
 
