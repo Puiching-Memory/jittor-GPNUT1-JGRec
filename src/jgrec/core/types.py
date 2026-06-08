@@ -69,6 +69,8 @@ class InteractionTable:
     def sort_by_time(self) -> InteractionTable:
         if len(self) <= 1:
             return self
+        if np.all(self.time[:-1] <= self.time[1:]):
+            return self
         order = np.argsort(self.time, kind="stable")
         return self.take(order)
 

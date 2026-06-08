@@ -36,3 +36,48 @@ def test_interaction_table_supports_table_slices_and_take():
 
     np.testing.assert_array_equal(sliced.to_array(), np.asarray([[2, 20, 200], [3, 30, 300]], dtype=np.int32))
     np.testing.assert_array_equal(taken.to_array(), np.asarray([[3, 30, 300], [1, 10, 100]], dtype=np.int32))
+
+
+def test_interaction_table_sort_by_time_returns_same_table_when_already_sorted():
+    table = InteractionTable.from_array(
+        np.asarray(
+            [
+                [1, 10, 100],
+                [2, 20, 100],
+                [3, 30, 200],
+            ],
+            dtype=np.int32,
+        )
+    )
+
+    assert table.sort_by_time() is table
+
+
+def test_interaction_table_sort_by_time_stably_orders_unsorted_rows():
+    table = InteractionTable.from_array(
+        np.asarray(
+            [
+                [1, 10, 300],
+                [2, 20, 100],
+                [3, 30, 100],
+                [4, 40, 200],
+            ],
+            dtype=np.int32,
+        )
+    )
+
+    sorted_table = table.sort_by_time()
+
+    assert sorted_table is not table
+    np.testing.assert_array_equal(
+        sorted_table.to_array(),
+        np.asarray(
+            [
+                [2, 20, 100],
+                [3, 30, 100],
+                [4, 40, 200],
+                [1, 10, 300],
+            ],
+            dtype=np.int32,
+        ),
+    )
