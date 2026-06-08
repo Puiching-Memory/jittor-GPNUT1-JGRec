@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 from time import perf_counter
@@ -108,11 +107,13 @@ def _dataset_path(data_dir: Path, dataset_name: str):
 
 def _rss_mb() -> float | None:
     try:
-        import psutil
-
-        return float(psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024))
-    except Exception:
+        with open("/proc/self/status", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return float(line.split()[1]) / 1024
+    except OSError:
         return None
+    return None
 
 
 if __name__ == "__main__":

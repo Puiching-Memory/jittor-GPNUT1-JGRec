@@ -31,7 +31,6 @@ nav = [
   { "实验与研究" = [
     { "架构优化" = "experiments/architecture-optimization.md" },
     { "模型优化" = "experiments/model-optimization.md" },
-    { "研究问题综述" = "research/problem-overview.md" },
     { "GNN 推荐论文调研" = "research/gnn-survey.md" },
     { "推荐系统论文调研归档" = "research/recommender-survey.md" },
     { "开源参考" = "research/open-source-references.md" },

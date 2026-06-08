@@ -93,7 +93,7 @@ class InteractionTable:
     def to_events(self) -> list[Interaction]:
         return [
             Interaction(src=int(src), dst=int(dst), time=int(time))
-            for src, dst, time in zip(self.src, self.dst, self.time)
+            for src, dst, time in zip(self.src, self.dst, self.time, strict=True)
         ]
 
     def to_array(self) -> np.ndarray:

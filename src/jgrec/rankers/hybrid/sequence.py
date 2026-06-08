@@ -193,7 +193,7 @@ def _final_sequences(
 ) -> tuple[dict[int, tuple[int, ...]], np.ndarray]:
     histories: dict[int, deque[int]] = defaultdict(lambda: deque(maxlen=max_seq_len))
     seen_items = np.zeros(id_map.num_dst + 1, dtype=bool)
-    for src, dst in zip(interactions.src, interactions.dst):
+    for src, dst in zip(interactions.src, interactions.dst, strict=True):
         src_id = id_map.src_id(int(src))
         dst_id = id_map.dst_id(int(dst))
         if src_id < 0 or dst_id < 0:
@@ -217,7 +217,7 @@ def _build_sequence_samples(
     neg_items: list[int] = []
     seen = 0
 
-    for src, dst in zip(interactions.src, interactions.dst):
+    for src, dst in zip(interactions.src, interactions.dst, strict=True):
         src_id = id_map.src_id(int(src))
         dst_id = id_map.dst_id(int(dst))
         if src_id < 0 or dst_id < 0:

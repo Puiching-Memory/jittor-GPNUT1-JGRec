@@ -52,14 +52,14 @@ def ensure_builtin_rankers() -> None:
         return
 
     def hybrid_factory(config: Any) -> Ranker:
-        from .hybrid.config import TrainingConfig
-        from .hybrid.ranker import HybridRankerAdapter
+        from .hybrid.config import TrainingConfig  # noqa: PLC0415
+        from .hybrid.ranker import HybridRankerAdapter  # noqa: PLC0415
 
         return HybridRankerAdapter(config if isinstance(config, TrainingConfig) else TrainingConfig())
 
     def craft_factory(config: Any) -> Ranker:
-        from .craft.config import CRAFTBaselineConfig
-        from .craft.ranker import CRAFTBaselineRanker
+        from .craft.config import CRAFTBaselineConfig  # noqa: PLC0415
+        from .craft.ranker import CRAFTBaselineRanker  # noqa: PLC0415
 
         return CRAFTBaselineRanker(config if isinstance(config, CRAFTBaselineConfig) else CRAFTBaselineConfig())
 

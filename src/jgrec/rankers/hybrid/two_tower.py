@@ -364,7 +364,7 @@ def _build_training_batch_for_events(
     candidate_count = config.num_negatives + 1
     jobs = [
         NegativeSamplingJob(src=int(src), positive_dst=int(dst), query_time=int(time))
-        for src, dst, time in zip(events.src, events.dst, events.time)
+        for src, dst, time in zip(events.src, events.dst, events.time, strict=True)
     ]
     negatives_by_event = sample_mixed_negatives_batch_seeded(
         jobs=jobs,
@@ -388,7 +388,7 @@ def _build_training_batch_for_events(
     dst_time = np.empty((len(events), candidate_count), dtype=np.int32)
 
     for row_idx, (event_src, event_dst, event_time, negatives) in enumerate(
-        zip(events.src, events.dst, events.time, negatives_by_event)
+        zip(events.src, events.dst, events.time, negatives_by_event, strict=True)
     ):
         src_int = int(event_src)
         dst_int = int(event_dst)

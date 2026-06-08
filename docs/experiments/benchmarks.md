@@ -9,21 +9,21 @@
 当前工作区已验证提交包：
 
 ```text
-result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
+result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
 ```
 
 线上反馈：
 
 ```text
-1.1983
+1.2044345219596662
 ```
 
 CSV 来源：
 
 | 数据集     | CSV 来源                                                                 |
 | ---------- | ------------------------------------------------------------------------ |
-| `dataset1` | `result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset1.csv` |
-| `dataset2` | `result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset2.csv` |
+| `dataset1` | `result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset1.csv` |
+| `dataset2` | `result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset2.csv` |
 
 当前模型链路：
 
@@ -46,12 +46,14 @@ stats + candidate_prior + structure + two_tower + graph + sequence -> Fusion MLP
 
 | 数据集     |      AP |     MRR | fusion                        | auto            |
 | ---------- | ------: | ------: | ----------------------------- | --------------- |
-| `dataset1` | 0.75681 | 0.77466 | `stats_prior_structure_tower` | `repeat_memory` |
-| `dataset2` | 0.33042 | 0.54808 | `stats_prior_structure_tower` | `new_link_cold` |
+| `dataset1` | 0.75512 | 0.77363 | `stats_prior_structure_tower`     | `repeat_memory` |
+| `dataset2` | 0.32691 | 0.55251 | `stats_prior_structure_tower_gnn` | `new_link_cold` |
 
 提交结论：
 
 - 该包是当前工作区可定位、可检查、已得到线上反馈的提交候选。
+- 该包为性能优化后同参数全量复跑，耗时约 `55m57s`，线上反馈从历史最好 `1.1983` 提升到
+  `1.2044345219596662`。
 - 若继续冲分，优先单跑 dataset2 对比 `max_train_events/max_val_events`、`selection_metric=mrr` 和
   `test_candidate_negative_ratio`，再与稳定 dataset1 拼包。
 - 不使用 `--limit-rows` 产物提交。

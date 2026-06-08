@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -91,7 +92,7 @@ class TemporalInteractionIndex:
         dst_srcs: dict[int, list[int]] = defaultdict(list)
         pair_times: dict[tuple[int, int], list[int]] = defaultdict(list)
 
-        for src, dst, time in zip(interactions.src, interactions.dst, interactions.time):
+        for src, dst, time in zip(interactions.src, interactions.dst, interactions.time, strict=True):
             src_int = int(src)
             dst_int = int(dst)
             time_int = int(time)
@@ -141,7 +142,7 @@ class TemporalInteractionIndex:
         self.src_dsts = {src: _compact_int_array(dsts) for src, dsts in src_dsts.items()}
         self.dst_times = {dst: _compact_int_array(times) for dst, times in dst_times.items()}
         self.dst_srcs = {dst: _compact_int_array(srcs) for dst, srcs in dst_srcs.items()}
-        self.dst_unique_src_counts = {int(dst): len(set(int(src) for src in srcs)) for dst, srcs in dst_srcs.items()}
+        self.dst_unique_src_counts = {int(dst): len({int(src) for src in srcs}) for dst, srcs in dst_srcs.items()}
         self.pair_times = {pair: _compact_int_array(times) for pair, times in pair_times.items()}
         if future_only_transition_cooccur:
             self.transition_times = {}
@@ -221,7 +222,7 @@ class TemporalInteractionIndex:
 
     def cooccur_count(self, src: int, candidate_dst: int, query_time: int) -> int:
         total = 0
-        src_dsts = set(int(dst) for dst in self.source_view(src, query_time).visible_dsts)
+        src_dsts = {int(dst) for dst in self.source_view(src, query_time).visible_dsts}
         src_dsts.discard(candidate_dst)
         for seen_dst in src_dsts:
             if self.future_only and query_time > self.max_time:
@@ -328,7 +329,7 @@ def _transition_times(
     times_by_transition: dict[tuple[int, int], list[int]] = defaultdict(list)
     for src, dsts in src_dsts.items():
         times = src_times[src]
-        for previous, current, current_time in zip(dsts, dsts[1:], times[1:]):
+        for previous, current, current_time in zip(dsts[:-1], dsts[1:], times[1:], strict=True):
             times_by_transition[(int(previous), int(current))].append(int(current_time))
     return {
         transition: _compact_int_array(times)
@@ -339,7 +340,7 @@ def _transition_times(
 def _transition_count_maps(src_dsts: dict[int, list[int]]) -> dict[int, dict[int, int]]:
     counts_by_left: dict[int, dict[int, int]] = defaultdict(dict)
     for dsts in src_dsts.values():
-        for previous, current in zip(dsts, dsts[1:]):
+        for previous, current in itertools.pairwise(dsts):
             left = int(previous)
             right = int(current)
             right_counts = counts_by_left[left]
@@ -350,7 +351,7 @@ def _transition_count_maps(src_dsts: dict[int, list[int]]) -> dict[int, dict[int
 def _count_maps_from_time_pairs(times_by_pair: dict[tuple[int, int], np.ndarray]) -> dict[int, dict[int, int]]:
     counts_by_left: dict[int, dict[int, int]] = defaultdict(dict)
     for (left, right), times in times_by_pair.items():
-        counts_by_left[int(left)][int(right)] = int(len(times))
+        counts_by_left[int(left)][int(right)] = len(times)
     return {left: dict(counts) for left, counts in counts_by_left.items()}
 
 
@@ -371,7 +372,7 @@ def _cooccur_times(
     for src, dsts in src_dsts.items():
         seen: set[int] = set()
         recent_unique: list[int] = []
-        for dst, event_time in zip(dsts, src_times[src]):
+        for dst, event_time in zip(dsts, src_times[src], strict=True):
             dst_int = int(dst)
             if dst_int in seen:
                 continue

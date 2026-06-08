@@ -53,13 +53,13 @@ stats + candidate_prior + structure + two_tower + graph + sequence
 ## 当前提交候选
 
 ```text
-result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
+result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
 ```
 
 线上反馈：
 
 ```text
-1.1983
+1.2044345219596662
 ```
 
 该包为全量 `dataset1` + `dataset2` 重新生成结果，不使用 `--dataset` 或 `--limit-rows`。新的冲分实验
@@ -102,7 +102,7 @@ uv run jgrec-build --limit-rows 2 --max-fit-events 512 --max-train-events 32 --m
 ### 实验与研究
 
 - [实验与基准](/experiments/benchmarks/)
-- [研究问题综述](/research/problem-overview/)
+- [研究问题综述 LaTeX 源稿](research/problem-overview.tex)
 - [GNN 推荐论文调研](/research/gnn-survey/)
 - [推荐系统论文调研归档](/research/recommender-survey/)
 - [开源参考](/research/open-source-references/)

@@ -51,10 +51,10 @@ def profile_dataset(interactions: InteractionTable, test_path: Path, val_ratio: 
     train_end = max(1, len(ordered) - val_size)
     history = ordered[:train_end]
     holdout = ordered[train_end:]
-    history_pairs = set(zip(history.src.astype(int, copy=False), history.dst.astype(int, copy=False)))
+    history_pairs = set(zip(history.src.astype(int, copy=False), history.dst.astype(int, copy=False), strict=True))
     pair_hits = sum(
         1
-        for src, dst in zip(holdout.src.astype(int, copy=False), holdout.dst.astype(int, copy=False))
+        for src, dst in zip(holdout.src.astype(int, copy=False), holdout.dst.astype(int, copy=False), strict=True)
         if (src, dst) in history_pairs
     )
     holdout_count = max(len(holdout), 1)
@@ -116,7 +116,11 @@ def profile_dataset_paths(train_path: Path, test_path: Path, val_ratio: float = 
         history_mask[boundary_indices] = True
 
     history_pairs = set(
-        zip(src_values[history_mask].astype(int, copy=False), dst_values[history_mask].astype(int, copy=False))
+        zip(
+            src_values[history_mask].astype(int, copy=False),
+            dst_values[history_mask].astype(int, copy=False),
+            strict=True,
+        )
     )
     holdout_mask = ~history_mask
 
@@ -126,6 +130,7 @@ def profile_dataset_paths(train_path: Path, test_path: Path, val_ratio: float = 
         for src, dst in zip(
             src_values[holdout_mask].astype(int, copy=False),
             dst_values[holdout_mask].astype(int, copy=False),
+            strict=True,
         )
         if (src, dst) in history_pairs
     )
@@ -173,7 +178,7 @@ def test_candidate_arrays(profile: DatasetProfile | None) -> tuple[np.ndarray, n
 def _top_share(counts: Counter[int], total: int, ratio: float) -> float:
     if total <= 0 or not counts:
         return 0.0
-    top_count = max(1, int(math.ceil(len(counts) * ratio)))
+    top_count = max(1, math.ceil(len(counts) * ratio))
     return sum(value for _, value in counts.most_common(top_count)) / total
 
 
@@ -184,7 +189,7 @@ def _scan_test_profile(test_path: Path, train_dst: set[int]) -> tuple[Counter[in
 
     candidates = queries.candidates.astype(np.int64, copy=False).reshape(-1)
     values, counts = np.unique(candidates, return_counts=True)
-    test_counts = Counter({int(value): int(count) for value, count in zip(values, counts)})
+    test_counts = Counter({int(value): int(count) for value, count in zip(values, counts, strict=True)})
     total_candidates = int(candidates.size)
 
     if train_dst:

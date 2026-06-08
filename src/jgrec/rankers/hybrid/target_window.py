@@ -39,7 +39,7 @@ class TargetWindowTower:
         self.max_time = int(interactions.time[-1])
         self.graph_span = max(self.max_time - self.min_time, 1)
         dst_times: dict[int, list[int]] = defaultdict(list)
-        for dst, time in zip(interactions.dst, interactions.time):
+        for dst, time in zip(interactions.dst, interactions.time, strict=True):
             dst_times[int(dst)].append(int(time))
         self.dst_event_times = {
             int(dst): _compact_int_array(times)
@@ -109,7 +109,7 @@ class TargetWindowTower:
             candidate_ids = queries.candidates[row_idx].astype(np.int64, copy=False)
             for window_idx, fraction in enumerate(self.window_fractions):
                 offset = window_idx * FEATURES_PER_WINDOW
-                width = max(int(math.ceil(float(fraction) * self.graph_span)), 1)
+                width = max(math.ceil(float(fraction) * self.graph_span), 1)
                 cutoff_time = min(query_time, self.max_time + 1)
                 start_time = self.min_time if fraction >= 1.0 else cutoff_time - width
                 window_total = _count_in_window(self.event_times, start_time, cutoff_time)

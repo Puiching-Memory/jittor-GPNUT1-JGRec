@@ -4,6 +4,7 @@ import math
 from collections import defaultdict
 from typing import Any
 
+import jittor as jt
 import numpy as np
 
 from jgrec.core.memory import release_memory
@@ -111,7 +112,7 @@ class SourceProfileTower:
         degrees: dict[int, int] = {}
         window_size = max(int(self.config.window_size), 1)
         grouped: dict[int, list[int]] = defaultdict(list)
-        for src, dst in zip(interactions.src, interactions.dst):
+        for src, dst in zip(interactions.src, interactions.dst, strict=True):
             grouped[int(src)].append(int(dst))
 
         for dsts in grouped.values():
@@ -134,8 +135,6 @@ class SourceProfileTower:
         if samples is None:
             self.embeddings = None
             return
-
-        import jittor as jt
 
         centers, positives, negatives = samples
         model = _Item2VecModel(num_items=self.id_map.num_dst, embedding_dim=self.config.embedding_dim)
@@ -235,8 +234,6 @@ class SourceProfileTower:
 
 class _Item2VecModel:
     def __new__(cls, num_items: int, embedding_dim: int):
-        import jittor as jt
-
         class Item2VecModel(jt.nn.Module):
             def __init__(self) -> None:
                 super().__init__()
@@ -265,7 +262,7 @@ def _item2vec_samples(
     positives: list[int] = []
     seen = 0
     histories: dict[int, list[int]] = defaultdict(list)
-    for src, dst in zip(interactions.src, interactions.dst):
+    for src, dst in zip(interactions.src, interactions.dst, strict=True):
         dst_id = id_map.dst_id(int(dst))
         if dst_id < 0:
             continue

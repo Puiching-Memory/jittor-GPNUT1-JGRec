@@ -205,7 +205,7 @@ def sample_mixed_negatives_batch_seeded(
                 test_candidate_negative_ratio=test_candidate_negative_ratio,
                 candidate_pool=candidate_pool,
             )
-            for job, seed in zip(jobs, seed_values)
+            for job, seed in zip(jobs, seed_values, strict=True)
         ]
 
     chunks = _negative_sampling_chunks(jobs, np.asarray(seed_values, dtype=np.uint32), worker_count)
@@ -261,7 +261,7 @@ def sample_mixed_negatives(
     hard_ratio = _clamp_ratio(hard_negative_ratio)
     popular_ratio = _clamp_ratio(popular_negative_ratio)
     test_candidate_ratio = _clamp_ratio(test_candidate_negative_ratio)
-    test_candidate_count = min(num_negatives, int(round(num_negatives * test_candidate_ratio)))
+    test_candidate_count = min(num_negatives, round(num_negatives * test_candidate_ratio))
     if test_candidate_count > 0:
         _take_test_candidate_negatives(
             context,
@@ -273,8 +273,8 @@ def sample_mixed_negatives(
         )
 
     remaining = num_negatives - len(negatives)
-    hard_count = min(remaining, int(round(num_negatives * hard_ratio)))
-    popular_count = min(remaining - hard_count, int(round(num_negatives * popular_ratio)))
+    hard_count = min(remaining, round(num_negatives * hard_ratio))
+    popular_count = min(remaining - hard_count, round(num_negatives * popular_ratio))
 
     hard_start_count = len(negatives)
     recent_count = (hard_count + 1) // 2
@@ -555,7 +555,7 @@ def _sample_negative_chunk(
 ) -> tuple[int, tuple[tuple[int, ...], ...]]:
     chunk_index, jobs, seeds = payload
     results: list[tuple[int, ...]] = []
-    for job, seed in zip(jobs, seeds):
+    for job, seed in zip(jobs, seeds, strict=True):
         results.append(
             sample_mixed_negatives(
                 src=job.src,

@@ -81,7 +81,7 @@ class TemporalStats:
         src_dsts: dict[int, list[int]] = defaultdict(list)
         dst_times: dict[int, list[int]] = defaultdict(list)
         pair_times: dict[tuple[int, int], list[int]] = defaultdict(list)
-        for src, dst, time in zip(interactions.src, interactions.dst, interactions.time):
+        for src, dst, time in zip(interactions.src, interactions.dst, interactions.time, strict=True):
             src_int = int(src)
             dst_int = int(dst)
             time_int = int(time)

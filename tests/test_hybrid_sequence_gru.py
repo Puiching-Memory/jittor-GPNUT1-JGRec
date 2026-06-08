@@ -40,7 +40,7 @@ def _require_jittor() -> None:
 
 def test_gru_sequence_scores_have_expected_shape_and_signal():
     _require_jittor()
-    from jgrec.rankers.hybrid.sequence import SequenceTower
+    from jgrec.rankers.hybrid.sequence import SequenceTower  # noqa: PLC0415
 
     interactions = _interactions()
     interaction_table = InteractionTable.from_events(interactions)

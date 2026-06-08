@@ -1,6 +1,6 @@
 import numpy as np
 
-from jgrec.core.types import Interaction, InteractionTable, TestQueryArray
+from jgrec.core.types import InteractionTable, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.rankers.hybrid.config import TrainingConfig
 from jgrec.rankers.hybrid.ranker import HybridFeatureEncoder, HybridRankerAdapter, _build_supervised_queries
@@ -32,10 +32,6 @@ def test_hybrid_adapter_preserves_test_query_array_for_prediction():
 
 
 def test_supervised_query_builder_returns_test_query_array_batches():
-    positives = [
-        Interaction(src=1, dst=10, time=10),
-        Interaction(src=2, dst=20, time=20),
-    ]
     interaction_table = InteractionTable.from_array(
         np.asarray([[1, 10, 10], [2, 20, 20]], dtype=np.int32)
     )

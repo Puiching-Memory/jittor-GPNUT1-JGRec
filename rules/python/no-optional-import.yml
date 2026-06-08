@@ -1,0 +1,26 @@
+id: no-optional-import
+language: Python
+severity: error
+message: Avoid optional try/except imports; make dependencies explicit or add a targeted ignore with justification.
+files:
+  - "src/**/*.py"
+  - "scripts/**/*.py"
+  - "tests/**/*.py"
+ignores:
+  - "tests/fixtures/**"
+rule:
+  all:
+    - kind: try_statement
+    - has:
+        any:
+          - kind: import_statement
+          - kind: import_from_statement
+        stopBy: end
+    - has:
+        kind: except_clause
+        has:
+          any:
+            - pattern: ImportError
+            - pattern: ModuleNotFoundError
+          stopBy: end
+        stopBy: end

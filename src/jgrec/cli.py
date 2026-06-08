@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Literal
 
+import jittor as jt
+import tyro
 from rich.panel import Panel
 from rich.table import Table
 
@@ -114,11 +116,7 @@ class CLIConfig:
 
 
 def main(argv: list[str] | None = None) -> int:
-    import tyro
-
     args = tyro.cli(CLIConfig, args=argv)
-    import jittor as jt
-
     jt.flags.use_cuda = 0 if args.cpu else 1
 
     ranker_config = _ranker_config(args)

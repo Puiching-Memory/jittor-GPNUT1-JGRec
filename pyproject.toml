@@ -3,6 +3,10 @@ name = "jittor-gpnut1-jgrec"
 version = "0.1.0"
 description = "MVP code for Jittor GPNUT1 dynamic recommendation"
 requires-python = "==3.12.*"
+classifiers = [
+	"Operating System :: POSIX :: Linux",
+	"Programming Language :: Python :: 3.12",
+]
 dependencies = [
 	"einops==0.8.2",
 	"jittor==1.3.11.0",
@@ -34,6 +38,7 @@ build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 dev = [
+	"ast-grep-cli==0.42.3",
 	"pytest==9.0.3",
 	"pytest-cov==7.1.0",
 	"ruff==0.15.16",
@@ -49,12 +54,30 @@ extend-exclude = [
 	"data",
 	"result",
 	"site",
+	"tests/fixtures",
 	"third_party",
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP"]
+select = [
+	"E",
+	"W",
+	"F",
+	"I",
+	"UP",
+	"B",
+	"C4",
+	"SIM",
+	"PIE",
+	"RUF",
+	"NPY",
+	"PERF",
+	"PLC0415",
+]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"sitecustomize.py" = ["SIM112"]
 
 [tool.ruff.format]
 quote-style = "double"

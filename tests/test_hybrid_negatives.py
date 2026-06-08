@@ -216,5 +216,5 @@ def test_parallel_negative_sampling_is_stable_across_worker_counts():
 
     assert two_workers == three_workers
     assert [len(negatives) for negatives in two_workers] == [4, 4, 4, 4]
-    for job, negatives in zip(jobs, two_workers):
+    for job, negatives in zip(jobs, two_workers, strict=True):
         assert job.positive_dst not in negatives

@@ -367,7 +367,7 @@ def _build_candidate_prior(config: CandidatePriorConfig) -> Any:
 def _build_target_window(config: TargetWindowConfig) -> Any:
     if not config.enabled:
         return _DisabledTargetWindowTower()
-    from .target_window import TargetWindowTower
+    from .target_window import TargetWindowTower  # noqa: PLC0415
 
     return TargetWindowTower(config=config)
 
@@ -381,7 +381,7 @@ def _build_structure_tower(config: StructureTowerConfig) -> Any:
 def _build_source_profile_tower(id_map: NodeIdMap, config: SourceProfileConfig) -> Any:
     if not config.enabled:
         return _DisabledSourceProfileTower()
-    from .source_profile import SourceProfileTower
+    from .source_profile import SourceProfileTower  # noqa: PLC0415
 
     return SourceProfileTower(id_map=id_map, config=config)
 
@@ -389,7 +389,7 @@ def _build_source_profile_tower(id_map: NodeIdMap, config: SourceProfileConfig) 
 def _build_graph_tower(id_map: NodeIdMap, config: GraphTowerConfig) -> Any:
     if not config.enabled:
         return _DisabledGraphTower()
-    from .gnn import GraphTower
+    from .gnn import GraphTower  # noqa: PLC0415
 
     return GraphTower(id_map=id_map, config=config)
 
@@ -397,7 +397,7 @@ def _build_graph_tower(id_map: NodeIdMap, config: GraphTowerConfig) -> Any:
 def _build_sequence_tower(id_map: NodeIdMap, config: SequenceTowerConfig) -> Any:
     if not config.enabled:
         return _DisabledSequenceTower()
-    from .sequence import SequenceTower
+    from .sequence import SequenceTower  # noqa: PLC0415
 
     return SequenceTower(id_map=id_map, config=config)
 
@@ -405,7 +405,7 @@ def _build_sequence_tower(id_map: NodeIdMap, config: SequenceTowerConfig) -> Any
 def _build_two_tower(id_map: NodeIdMap, config: TwoTowerConfig) -> Any:
     if not config.enabled:
         return _DisabledTwoTower()
-    from .two_tower import TwoTower
+    from .two_tower import TwoTower  # noqa: PLC0415
 
     return TwoTower(id_map=id_map, config=config)
 
@@ -597,7 +597,7 @@ class TemporalHybridRanker:
         if self.encoder is None or self.fusion is None or self.fusion_result is None:
             raise RuntimeError("ranker is not fitted")
 
-        from .fusion import predict_logits
+        from .fusion import predict_logits  # noqa: PLC0415
 
         features = self.encoder.features_for_queries(queries)
         if self.fusion_result.feature_indices:
@@ -733,7 +733,7 @@ class TemporalHybridRanker:
         rng: np.random.Generator,
         verbose: bool,
     ) -> tuple[FusionMLP, FusionResult]:
-        from .fusion import fit_fusion_mlp, fit_fusion_mlp_streaming
+        from .fusion import fit_fusion_mlp, fit_fusion_mlp_streaming  # noqa: PLC0415
 
         masks = _feature_masks(train_features.shape[-1])
         best_model: FusionMLP | None = None
@@ -1031,7 +1031,7 @@ def _build_supervised_queries(
         candidate_pool = build_candidate_pool(dst_pool, test_values)
     jobs = [
         NegativeSamplingJob(src=int(src), positive_dst=int(dst), query_time=int(time))
-        for src, dst, time in zip(positives.src, positives.dst, positives.time)
+        for src, dst, time in zip(positives.src, positives.dst, positives.time, strict=True)
     ]
     negatives_by_event = sample_mixed_negatives_batch(
         jobs=jobs,
@@ -1051,7 +1051,7 @@ def _build_supervised_queries(
     time = np.empty(len(positives), dtype=np.int32)
     candidates = np.empty((len(positives), int(config.num_negatives) + 1), dtype=np.int32)
     for row_idx, (event_src, event_dst, event_time, negatives) in enumerate(
-        zip(positives.src, positives.dst, positives.time, negatives_by_event)
+        zip(positives.src, positives.dst, positives.time, negatives_by_event, strict=True)
     ):
         src[row_idx] = int(event_src)
         time[row_idx] = int(event_time)
@@ -1083,7 +1083,7 @@ class SupervisedFeatureBuilder:
         sample_start = perf_counter()
         jobs = [
             NegativeSamplingJob(src=int(src), positive_dst=int(dst), query_time=int(time))
-            for src, dst, time in zip(positives.src, positives.dst, positives.time)
+            for src, dst, time in zip(positives.src, positives.dst, positives.time, strict=True)
         ]
         negatives_by_event = sample_mixed_negatives_batch(
             jobs=jobs,
@@ -1139,7 +1139,7 @@ def _supervised_query_array_from_negatives(
     time = np.empty(len(positives), dtype=np.int32)
     candidates = np.empty((len(positives), candidate_count), dtype=np.int32)
     for row_idx, (event_src, event_dst, event_time, negatives) in enumerate(
-        zip(positives.src, positives.dst, positives.time, negatives_by_event)
+        zip(positives.src, positives.dst, positives.time, negatives_by_event, strict=True)
     ):
         if len(negatives) != num_negatives:
             raise ValueError("negative row length does not match num_negatives")

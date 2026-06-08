@@ -1,3 +1,4 @@
+import contextlib
 import os
 import shutil
 import stat
@@ -110,20 +111,16 @@ def _with_file_lock(lock_path, callback):
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
         except FileExistsError:
             if time.monotonic() > deadline:
-                try:
+                with contextlib.suppress(OSError):
                     lock_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
                 continue
             time.sleep(0.05)
     try:
         return callback()
     finally:
         os.close(fd)
-        try:
+        with contextlib.suppress(OSError):
             lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 if "python_config_path" not in os.environ:

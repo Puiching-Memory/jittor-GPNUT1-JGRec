@@ -109,7 +109,7 @@ class HybridPrefixStateCache:
 
     def _advance(self, prefix_end: int) -> None:
         window = self.interactions[self._cursor : prefix_end]
-        for src, dst, time in zip(window.src, window.dst, window.time):
+        for src, dst, time in zip(window.src, window.dst, window.time, strict=True):
             src_int = int(src)
             dst_int = int(dst)
             time_int = int(time)
@@ -148,7 +148,7 @@ class HybridPrefixStateCache:
         )
         source_profile = {"item_pair_counts": {}, "item_degrees": {}}
         if self.source_profile_config.enabled and self.source_profile_config.deterministic_enabled:
-            from .source_profile import SourceProfileTower
+            from .source_profile import SourceProfileTower  # noqa: PLC0415
 
             profile_tower = SourceProfileTower(
                 id_map=NodeIdMap.from_interactions(self.interactions[:prefix_end]),
@@ -192,7 +192,7 @@ class HybridPrefixStateCache:
         return stats
 
     def _build_target_window(self):
-        from .target_window import TargetWindowTower
+        from .target_window import TargetWindowTower  # noqa: PLC0415
 
         target_window = TargetWindowTower(self.target_window_config)
         target_window.fit_from_grouped(

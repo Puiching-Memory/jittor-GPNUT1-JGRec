@@ -289,7 +289,7 @@ class TrainingConfig:
         )
 
     def fusion_config(self) -> FusionConfig:
-        from .fusion import FusionConfig
+        from .fusion import FusionConfig  # noqa: PLC0415
 
         return FusionConfig(
             epochs=self.epochs,

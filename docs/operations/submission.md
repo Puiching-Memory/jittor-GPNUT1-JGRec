@@ -7,21 +7,21 @@
 当前工作区已验证提交包：
 
 ```text
-result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
+result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
 ```
 
 线上反馈：
 
 ```text
-1.1983
+1.2044345219596662
 ```
 
 来源：
 
 | 数据集     | CSV 来源                                                               |
 | ---------- | ---------------------------------------------------------------------- |
-| `dataset1` | `result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset1.csv` |
-| `dataset2` | `result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset2.csv` |
+| `dataset1` | `result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset1.csv` |
+| `dataset2` | `result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset2.csv` |
 
 关键设置：
 
@@ -40,7 +40,7 @@ result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
 python - <<'PY'
 import zipfile
 
-path = "result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip"
+path = "result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip"
 with zipfile.ZipFile(path) as zf:
     print(zf.namelist())
 PY
@@ -56,7 +56,7 @@ expected = {
     "dataset1": 61051,
     "dataset2": 153420,
 }
-base = Path("result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/csv")
+base = Path("result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/csv")
 for name, rows in expected.items():
     path = base / f"{name}.csv"
     actual_rows = 0
@@ -75,7 +75,7 @@ PY
 python - <<'PY'
 from pathlib import Path
 
-base = Path("result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/csv")
+base = Path("result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/csv")
 for path in sorted(base.glob("*.csv")):
     checked = 0
     for line in path.open("r", encoding="utf-8"):

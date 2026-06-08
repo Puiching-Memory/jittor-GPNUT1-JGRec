@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import gc
 import os
-import platform
+import resource
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -34,10 +35,8 @@ def release_memory() -> None:
     for name in ("gc", "clean"):
         func = getattr(jt, name, None)
         if callable(func):
-            try:
+            with contextlib.suppress(Exception):
                 func()
-            except Exception:
-                pass
 
 
 def memory_snapshot() -> str:
@@ -76,29 +75,21 @@ def _write_memory_log(message: str) -> None:
 
 
 def _rss_mb() -> float | None:
-    if os.name == "posix":
-        try:
-            with open("/proc/self/status", encoding="utf-8") as f:
-                for line in f:
-                    if line.startswith("VmRSS:"):
-                        return float(line.split()[1]) / 1024
-        except OSError:
-            pass
+    try:
+        with open("/proc/self/status", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return float(line.split()[1]) / 1024
+    except OSError:
+        pass
 
     try:
-        import resource
-
-        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        if platform.system() == "Darwin":
-            return usage / (1024 * 1024)
-        return usage / 1024
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     except Exception:
         return None
 
 
 def _available_mb() -> float | None:
-    if os.name != "posix":
-        return None
     try:
         with open("/proc/meminfo", encoding="utf-8") as f:
             for line in f:

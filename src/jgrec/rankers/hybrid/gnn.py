@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 
+import jittor as jt
 import numpy as np
 
 from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
@@ -39,7 +40,7 @@ class GraphTower:
             return
 
         total_edges = len(mapped_edges)
-        for name, fraction in zip(GRAPH_WINDOW_NAMES, GRAPH_WINDOW_FRACTIONS):
+        for name, fraction in zip(GRAPH_WINDOW_NAMES, GRAPH_WINDOW_FRACTIONS, strict=True):
             edge_count = max(1, int(total_edges * fraction))
             window_edges = mapped_edges[total_edges - edge_count :]
             edge_index = _graph_window_edges(window_edges, self.config, rng)
@@ -92,8 +93,6 @@ class GraphTower:
         rng: np.random.Generator,
         verbose: bool,
     ) -> None:
-        import jittor as jt
-
         seen_users = np.zeros(self.id_map.num_src, dtype=bool)
         seen_items = np.zeros(self.id_map.num_dst, dtype=bool)
         seen_users[np.unique(edge_index[0])] = True
@@ -143,8 +142,6 @@ class GraphTower:
             self.item_embeddings[name] = np.asarray(item_all.numpy(), dtype=np.float32)
 
     def _build_model(self, edge_index: np.ndarray):
-        import jittor as jt
-
         model_name = self.config.model_name.lower()
         if model_name not in {"lightgcn", "xsimgcl"}:
             raise ValueError(f"unsupported graph model: {self.config.model_name}")
@@ -159,7 +156,7 @@ class GraphTower:
                 reg_weight=self.config.reg_weight,
             )
 
-        from jittor_geometric.nn.models import LightGCN, XSimGCL
+        from jittor_geometric.nn.models import LightGCN, XSimGCL  # noqa: PLC0415
 
         edge_var = jt.array(edge_index, dtype=jt.int32)
         if model_name == "lightgcn":
@@ -196,8 +193,6 @@ class _DenseCPUGraphModel:
         edge_index: np.ndarray,
         reg_weight: float,
     ):
-        import jittor as jt
-
         node_count = int(num_users) + int(num_items)
         edge_count = int(edge_index.shape[1])
         if node_count > DENSE_CPU_NODE_LIMIT or edge_count > DENSE_CPU_EDGE_LIMIT:
@@ -270,7 +265,7 @@ def _mapped_edges(
     tail_limit = _mapped_edge_tail_limit(config)
     if tail_limit > 0:
         edge_buffer = deque(maxlen=tail_limit)
-        for src, dst, time in zip(interactions.src, interactions.dst, interactions.time):
+        for src, dst, time in zip(interactions.src, interactions.dst, interactions.time, strict=True):
             src_id = id_map.src_id(int(src))
             dst_id = id_map.dst_id(int(dst))
             if src_id < 0 or dst_id < 0:
@@ -279,7 +274,7 @@ def _mapped_edges(
         return list(edge_buffer)
 
     edges: list[tuple[int, int, int]] = []
-    for src, dst, time in zip(interactions.src, interactions.dst, interactions.time):
+    for src, dst, time in zip(interactions.src, interactions.dst, interactions.time, strict=True):
         src_id = id_map.src_id(int(src))
         dst_id = id_map.dst_id(int(dst))
         if src_id < 0 or dst_id < 0:

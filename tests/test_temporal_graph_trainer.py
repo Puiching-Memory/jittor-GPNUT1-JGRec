@@ -86,7 +86,7 @@ def test_sample_test_like_candidate_ids_uses_source_rows_and_fallback_pool() -> 
 
     assert candidates.shape == (2, 4)
     np.testing.assert_array_equal(candidates[:, 0], positives)
-    for row, positive in zip(candidates, positives):
+    for row, positive in zip(candidates, positives, strict=True):
         negatives = row[1:]
         assert 0 not in negatives
         assert int(positive) not in negatives

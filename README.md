@@ -13,20 +13,20 @@ Two-Tower 表示、图协同过滤和序列偏好组合为候选级特征，再�
 当前工作区已验证的 A 榜提交包：
 
 ```text
-result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
+result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
 ```
 
 线上反馈分数：
 
 ```text
-1.1983
+1.2044345219596662
 ```
 
 该包为全量 `dataset1` + `dataset2` 重新生成结果，不使用 `--dataset` 或 `--limit-rows`：
 
 ```text
-dataset1 -> result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset1.csv
-dataset2 -> result/hybrid_full_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset2.csv
+dataset1 -> result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset1.csv
+dataset2 -> result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset2.csv
 ```
 
 提交时只上传 `result.zip`。不要上传 `data/`、`result/` 目录或中间日志。

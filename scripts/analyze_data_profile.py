@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import json
 import math
 import time
@@ -553,7 +554,7 @@ def sequence_behavior(events: list[Event], prefix_state: DataState, val_events: 
 
     inter_event_gaps = []
     for history in by_src.values():
-        for prev, cur in zip(history, history[1:]):
+        for prev, cur in itertools.pairwise(history):
             inter_event_gaps.append(cur.time - prev.time)
 
     holdout_history_lengths = []
@@ -772,7 +773,7 @@ def fusion_permutation_importance(
         )
     coefficients = [
         {"feature": name, "coefficient": float(value)}
-        for name, value in zip(FEATURE_NAMES, model.coef_[0])
+        for name, value in zip(FEATURE_NAMES, model.coef_[0], strict=True)
     ]
     return {
         "status": "ok",

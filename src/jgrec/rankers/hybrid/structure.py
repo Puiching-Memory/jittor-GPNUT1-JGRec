@@ -133,7 +133,7 @@ class StructureFeatureTower:
             return
 
         src_view = self.index.source_view(query.src, query.time)
-        src_neighbors = set(int(dst) for dst in src_view.visible_dsts)
+        src_neighbors = {int(dst) for dst in src_view.visible_dsts}
         src_neighbor_count = len(src_neighbors)
         last_visible_dst = int(src_view.visible_dsts[-1]) if src_view.cutoff > 0 else None
 
@@ -146,7 +146,7 @@ class StructureFeatureTower:
                     output[idx, feature_idx] = float(np.exp(-deltas / window).sum())
 
             dst_view = self.index.destination_view(dst_int, query.time)
-            dst_sources = set(int(src) for src in dst_view.visible_srcs)
+            dst_sources = {int(src) for src in dst_view.visible_srcs}
             dst_source_count = len(dst_sources)
             if dst_source_count:
                 output[idx, 3] = math.log1p(dst_source_count)
@@ -237,7 +237,7 @@ class StructureFeatureTower:
             return cached
 
         dsts = self.index.src_dsts.get(src)
-        neighbors = set(int(dst) for dst in dsts) if dsts is not None else set()
+        neighbors = {int(dst) for dst in dsts} if dsts is not None else set()
         self._cache_put(self._full_src_neighbor_cache, src, neighbors, FULL_HISTORY_CACHE_LIMIT)
         return neighbors
 
@@ -248,7 +248,7 @@ class StructureFeatureTower:
             return cached
 
         srcs = self.index.dst_srcs.get(dst)
-        sources = set(int(src) for src in srcs) if srcs is not None else set()
+        sources = {int(src) for src in srcs} if srcs is not None else set()
         self._cache_put(self._full_dst_source_cache, dst, sources, FULL_HISTORY_CACHE_LIMIT)
         return sources
 

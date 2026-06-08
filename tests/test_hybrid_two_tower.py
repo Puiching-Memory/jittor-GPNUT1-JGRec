@@ -47,7 +47,7 @@ def _require_jittor() -> None:
 
 def test_two_tower_scores_have_expected_shape_and_signal():
     _require_jittor()
-    from jgrec.rankers.hybrid.two_tower import TwoTower
+    from jgrec.rankers.hybrid.two_tower import TwoTower  # noqa: PLC0415
 
     interactions = _interactions()
     interaction_table = InteractionTable.from_events(interactions)
@@ -82,7 +82,7 @@ def test_two_tower_scores_have_expected_shape_and_signal():
 
 def test_two_tower_scoring_batch_size_preserves_scores():
     _require_jittor()
-    from jgrec.rankers.hybrid.two_tower import TwoTower
+    from jgrec.rankers.hybrid.two_tower import TwoTower  # noqa: PLC0415
 
     interactions = _interactions()
     interaction_table = InteractionTable.from_events(interactions)
@@ -91,14 +91,14 @@ def test_two_tower_scoring_batch_size_preserves_scores():
         TestQuery(src=2, time=110, candidates=(10, 30, 50)),
         TestQuery(src=4, time=110, candidates=(20, 30, 40)),
     ]
-    common_config = dict(
-        embedding_dim=8,
-        hidden_dim=8,
-        epochs=1,
-        batch_size=4,
-        max_samples=8,
-        num_negatives=2,
-    )
+    common_config = {
+        "embedding_dim": 8,
+        "hidden_dim": 8,
+        "epochs": 1,
+        "batch_size": 4,
+        "max_samples": 8,
+        "num_negatives": 2,
+    }
     tower = TwoTower(
         id_map=NodeIdMap.from_interactions(interaction_table),
         config=TwoTowerConfig(score_batch_size=32, **common_config),
@@ -117,7 +117,7 @@ def test_two_tower_scoring_batch_size_preserves_scores():
 
 def test_two_tower_reuses_future_only_structure_index():
     _require_jittor()
-    from jgrec.rankers.hybrid.two_tower import TwoTower
+    from jgrec.rankers.hybrid.two_tower import TwoTower  # noqa: PLC0415
 
     interactions = _interactions()
     interaction_table = InteractionTable.from_events(interactions)

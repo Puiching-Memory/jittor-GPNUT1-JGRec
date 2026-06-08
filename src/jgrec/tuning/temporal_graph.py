@@ -31,9 +31,9 @@ def main() -> int:
         )
 
     def objective(trial: optuna.Trial) -> float:
-        import jittor as jt
+        import jittor as jt  # noqa: PLC0415
 
-        from jgrec.rankers.temporal_graph import TemporalGraphRanker
+        from jgrec.rankers.temporal_graph import TemporalGraphRanker  # noqa: PLC0415
 
         jt.flags.use_cuda = 0 if args.cpu else 1
         config = _suggest_config(trial, args)
@@ -182,7 +182,7 @@ def _discover_selected_datasets(data_dir: Path, names: list[str]) -> list[Datase
 
 
 def _suggest_config(trial: optuna.Trial, args: argparse.Namespace):
-    from jgrec.rankers.temporal_graph import TemporalGraphTrainingConfig
+    from jgrec.rankers.temporal_graph import TemporalGraphTrainingConfig  # noqa: PLC0415
 
     hidden_size = trial.suggest_categorical("hidden_size", [64, 96, 128, 192])
     possible_heads = [head for head in [2, 3, 4, 6, 8] if hidden_size % head == 0]

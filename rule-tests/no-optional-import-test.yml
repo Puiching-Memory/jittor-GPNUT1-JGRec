@@ -1,0 +1,26 @@
+id: no-optional-import
+valid:
+  - |
+    import psutil
+
+
+    try:
+        value = compute_value()
+    except ImportError:
+        value = None
+  - |
+    try:
+        import required_package
+    except RuntimeError:
+        recover()
+invalid:
+  - |
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+  - |
+    try:
+        from optional_package import feature
+    except ModuleNotFoundError as exc:
+        feature = None

@@ -1,0 +1,28 @@
+id: no-conditional-import
+language: Python
+severity: error
+message: Avoid conditional imports; this project targets Linux only, so dependencies should be imported explicitly at module top-level.
+files:
+  - "src/**/*.py"
+  - "scripts/**/*.py"
+  - "tests/**/*.py"
+ignores:
+  - "tests/fixtures/**"
+rule:
+  all:
+    - kind: if_statement
+    - not:
+        inside:
+          any:
+            - kind: function_definition
+            - kind: class_definition
+          stopBy: end
+    - not:
+        pattern: |
+          if TYPE_CHECKING:
+              $$$BODY
+    - has:
+        any:
+          - kind: import_statement
+          - kind: import_from_statement
+        stopBy: end

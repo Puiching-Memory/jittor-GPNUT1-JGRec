@@ -39,7 +39,7 @@ def test_candidate_prior_features_cover_seen_unseen_and_row_ranks():
 
 
 def test_disabled_candidate_prior_uses_zero_features_in_encoder():
-    from jgrec.rankers.hybrid.ranker import HybridFeatureEncoder
+    from jgrec.rankers.hybrid.ranker import HybridFeatureEncoder  # noqa: PLC0415
 
     interactions = [
         Interaction(src=1, dst=10, time=10),

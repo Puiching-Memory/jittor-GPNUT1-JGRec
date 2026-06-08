@@ -1,0 +1,25 @@
+id: no-conditional-import
+valid:
+  - |
+    import resource
+  - |
+    from typing import TYPE_CHECKING
+
+    if TYPE_CHECKING:
+        from jgrec.rankers.hybrid.fusion import FusionConfig
+  - |
+    if enabled:
+        run()
+  - |
+    def load_backend(enabled):
+        if enabled:
+            import backend
+            return backend
+        return None
+invalid:
+  - |
+    if os.name == "posix":
+        import resource
+  - |
+    if use_optional_backend:
+        from backend import Client

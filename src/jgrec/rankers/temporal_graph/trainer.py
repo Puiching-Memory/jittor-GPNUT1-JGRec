@@ -46,7 +46,7 @@ class TestCandidateIndex:
         for start in range(0, len(queries), chunk_size):
             stop = min(start + chunk_size, len(queries))
             candidate_rows = node_map.dst_ids(queries.candidates[start:stop])
-            for src, candidate_ids in zip(queries.src[start:stop], candidate_rows):
+            for src, candidate_ids in zip(queries.src[start:stop], candidate_rows, strict=True):
                 candidate_ids = candidate_ids[candidate_ids > 0]
                 if candidate_ids.size == 0:
                     continue
