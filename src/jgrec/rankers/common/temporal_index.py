@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from jgrec.core.types import Interaction
+from jgrec.core.types import InteractionTable
 
 DEFAULT_COOCCUR_HISTORY_LIMIT = 128
 
@@ -67,18 +67,18 @@ class TemporalInteractionIndex:
 
     def fit(
         self,
-        interactions: list[Interaction],
+        interactions: InteractionTable,
         *,
         build_transitions: bool = True,
         build_cooccurs: bool = True,
         cooccur_history_limit: int = DEFAULT_COOCCUR_HISTORY_LIMIT,
         future_only_transition_cooccur: bool = False,
     ) -> None:
-        if not interactions:
+        if len(interactions) == 0:
             raise ValueError("training interactions are empty")
 
-        interactions = _ensure_time_order(interactions)
-        self.max_time = interactions[-1].time
+        interactions = interactions.sort_by_time()
+        self.max_time = int(interactions.time[-1])
         self.total_edges = len(interactions)
         self.built_transitions = bool(build_transitions)
         self.built_cooccurs = bool(build_cooccurs)
@@ -89,12 +89,15 @@ class TemporalInteractionIndex:
         dst_srcs: dict[int, list[int]] = defaultdict(list)
         pair_times: dict[tuple[int, int], list[int]] = defaultdict(list)
 
-        for item in interactions:
-            src_times[item.src].append(item.time)
-            src_dsts[item.src].append(item.dst)
-            dst_times[item.dst].append(item.time)
-            dst_srcs[item.dst].append(item.src)
-            pair_times[(item.src, item.dst)].append(item.time)
+        for src, dst, time in zip(interactions.src, interactions.dst, interactions.time):
+            src_int = int(src)
+            dst_int = int(dst)
+            time_int = int(time)
+            src_times[src_int].append(time_int)
+            src_dsts[src_int].append(dst_int)
+            dst_times[dst_int].append(time_int)
+            dst_srcs[dst_int].append(src_int)
+            pair_times[(src_int, dst_int)].append(time_int)
 
         self.src_times = {src: _compact_int_array(times) for src, times in src_times.items()}
         self.src_dsts = {src: _compact_int_array(dsts) for src, dsts in src_dsts.items()}
@@ -255,12 +258,6 @@ def _compact_int_array(values: list[int]) -> np.ndarray:
     int32 = np.iinfo(np.int32)
     dtype = np.int32 if int32.min <= min_value <= max_value <= int32.max else np.int64
     return np.asarray(values, dtype=dtype)
-
-
-def _ensure_time_order(interactions: list[Interaction]) -> list[Interaction]:
-    if all(left.time <= right.time for left, right in zip(interactions, interactions[1:])):
-        return interactions
-    return sorted(interactions, key=lambda item: item.time)
 
 
 def _transition_times(

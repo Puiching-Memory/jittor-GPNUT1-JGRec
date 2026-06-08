@@ -4,7 +4,7 @@ import numpy as np
 
 from jgrec.core import runner
 from jgrec.core.runner import build_dataset_submission
-from jgrec.core.types import DatasetPaths, FitContext, InteractionArray, TestQueryArray, TrainingReport
+from jgrec.core.types import DatasetPaths, FitContext, InteractionTable, TestQueryArray, TrainingReport
 from jgrec.submission import validate_submission_file
 
 
@@ -12,11 +12,11 @@ class DummyRanker:
     name = "dummy"
 
     def __init__(self) -> None:
-        self.fit_interactions: InteractionArray | None = None
+        self.fit_interactions: InteractionTable | None = None
         self.fit_context: FitContext | None = None
         self.batch_sizes: list[int] = []
 
-    def fit(self, interactions: InteractionArray, context: FitContext) -> TrainingReport:
+    def fit(self, interactions: InteractionTable, context: FitContext) -> TrainingReport:
         self.fit_interactions = interactions
         self.fit_context = context
         return TrainingReport(model_name=self.name, train_events=len(interactions))
@@ -70,10 +70,8 @@ def test_build_dataset_submission_limits_rows_and_clips_predictions(tmp_path):
     assert result.name == "dataset1"
     assert result.rows == 2
     assert result.training_report.model_name == "dummy"
-    np.testing.assert_array_equal(
-        ranker.fit_interactions,
-        np.asarray([[1, 10, 100], [2, 20, 200]], dtype=np.int32),
-    )
+    assert ranker.fit_interactions is not None
+    np.testing.assert_array_equal(ranker.fit_interactions.to_array(), np.asarray([[1, 10, 100], [2, 20, 200]], dtype=np.int32))
     assert ranker.fit_context == FitContext(dataset=dataset, seed=7, limit_rows=2, verbose=False)
     assert ranker.batch_sizes == [2]
     validate_submission_file(result.output_path, expected_rows=2)

@@ -52,10 +52,10 @@ def test_read_interactions_accepts_extra_columns(tmp_path):
         ],
     )
 
-    np.testing.assert_array_equal(
-        read_interactions(path),
-        np.asarray([[2, 3, 4], [5, 8, 13]], dtype=np.int32),
-    )
+    interactions = read_interactions(path)
+    np.testing.assert_array_equal(interactions.src, np.asarray([2, 5], dtype=np.int32))
+    np.testing.assert_array_equal(interactions.dst, np.asarray([3, 8], dtype=np.int32))
+    np.testing.assert_array_equal(interactions.time, np.asarray([4, 13], dtype=np.int32))
 
 
 def test_read_interactions_requires_core_columns(tmp_path):

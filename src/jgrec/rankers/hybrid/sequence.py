@@ -6,7 +6,7 @@ from collections import defaultdict, deque
 import jittor as jt
 import numpy as np
 
-from jgrec.core.types import Interaction, TestQuery
+from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log, track
 
@@ -25,7 +25,7 @@ class SequenceTower:
     def feature_names(self) -> tuple[str, ...]:
         return SEQUENCE_FEATURE_NAMES
 
-    def fit(self, interactions: list[Interaction], rng: np.random.Generator, verbose: bool = True) -> None:
+    def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool = True) -> None:
         self.src_sequences, self.seen_items = _final_sequences(interactions, self.id_map, self.config.max_seq_len)
         if not self.config.enabled or self.config.epochs < 1:
             return
@@ -67,7 +67,7 @@ class SequenceTower:
             mean_loss = float(np.mean(losses)) if losses else 0.0
             log(f"[gru-seq] epoch={epoch} loss={mean_loss:.5f}", enabled=verbose)
 
-    def scores_for_queries(self, queries: list[TestQuery]) -> np.ndarray:
+    def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, len(SEQUENCE_FEATURE_NAMES)), dtype=np.float32)
 
@@ -184,15 +184,15 @@ def _split_gates(gates: jt.Var, hidden_size: int) -> tuple[jt.Var, jt.Var, jt.Va
 
 
 def _final_sequences(
-    interactions: list[Interaction],
+    interactions: InteractionTable,
     id_map: NodeIdMap,
     max_seq_len: int,
 ) -> tuple[dict[int, tuple[int, ...]], np.ndarray]:
     histories: dict[int, deque[int]] = defaultdict(lambda: deque(maxlen=max_seq_len))
     seen_items = np.zeros(id_map.num_dst + 1, dtype=bool)
-    for item in interactions:
-        src_id = id_map.src_id(item.src)
-        dst_id = id_map.dst_id(item.dst)
+    for src, dst in zip(interactions.src, interactions.dst):
+        src_id = id_map.src_id(int(src))
+        dst_id = id_map.dst_id(int(dst))
         if src_id < 0 or dst_id < 0:
             continue
         item_id = dst_id + 1
@@ -202,7 +202,7 @@ def _final_sequences(
 
 
 def _build_sequence_samples(
-    interactions: list[Interaction],
+    interactions: InteractionTable,
     id_map: NodeIdMap,
     config: SequenceTowerConfig,
     rng: np.random.Generator,
@@ -214,9 +214,9 @@ def _build_sequence_samples(
     neg_items: list[int] = []
     seen = 0
 
-    for item in interactions:
-        src_id = id_map.src_id(item.src)
-        dst_id = id_map.dst_id(item.dst)
+    for src, dst in zip(interactions.src, interactions.dst):
+        src_id = id_map.src_id(int(src))
+        dst_id = id_map.dst_id(int(dst))
         if src_id < 0 or dst_id < 0:
             continue
 

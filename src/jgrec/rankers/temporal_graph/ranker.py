@@ -6,10 +6,8 @@ import numpy as np
 
 from jgrec.core.io import read_test_queries
 from jgrec.core.types import (
-    INTERACTION_DST,
-    INTERACTION_TIME,
     FitContext,
-    InteractionArray,
+    InteractionTable,
     TestQueryArray,
     TrainingReport,
 )
@@ -63,15 +61,15 @@ class TemporalGraphRanker:
 
     def fit(
         self,
-        interactions: InteractionArray,
+        interactions: InteractionTable,
         training_config: TemporalGraphTrainingConfig,
         context: FitContext,
     ) -> TrainingReport:
         if len(interactions) == 0:
             raise ValueError("training interactions are empty")
-        interactions = interactions[np.argsort(interactions[:, INTERACTION_TIME], kind="stable")]
+        interactions = interactions.sort_by_time()
         if training_config.max_fit_events > 0 and len(interactions) > training_config.max_fit_events:
-            interactions = interactions[-training_config.max_fit_events :]
+            interactions = interactions.tail(training_config.max_fit_events)
         if len(interactions) < 4:
             raise ValueError("temporal graph ranker needs at least four interactions")
 
@@ -80,7 +78,7 @@ class TemporalGraphRanker:
         full_data = temporal_data_from_interactions(interactions, self.node_map)
         _, get_neighbor_sampler = temporal_loader_api()
         self.neighbor_sampler = safe_neighbor_sampler(get_neighbor_sampler(full_data, "recent", seed=training_config.seed))
-        dst_pool = np.unique(self.node_map.dst_ids(interactions[:, INTERACTION_DST])).astype(np.int32, copy=False)
+        dst_pool = np.unique(self.node_map.dst_ids(interactions.dst)).astype(np.int32, copy=False)
         dst_pool = dst_pool[dst_pool > 0]
 
         n_events = len(interactions)
@@ -90,7 +88,7 @@ class TemporalGraphRanker:
             train_end = n_events - 1
         train_events = interactions[:train_end]
         val_events = interactions[train_end:]
-        time_span = max(int(interactions[-1, INTERACTION_TIME]) - int(interactions[0, INTERACTION_TIME]), 1)
+        time_span = max(int(interactions.time[-1]) - int(interactions.time[0]), 1)
 
         rng = np.random.default_rng(training_config.seed)
         self.model = self._build_model(time_span)
@@ -211,7 +209,7 @@ class TemporalGraphRankerAdapter:
         self.config = config or TemporalGraphTrainingConfig()
         self.impl = TemporalGraphRanker()
 
-    def fit(self, interactions: InteractionArray, context: FitContext) -> TrainingReport:
+    def fit(self, interactions: InteractionTable, context: FitContext) -> TrainingReport:
         config = replace(
             self.config,
             seed=context.seed,

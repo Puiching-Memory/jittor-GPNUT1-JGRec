@@ -4,7 +4,7 @@ from collections import Counter
 
 import numpy as np
 
-from jgrec.core.types import Interaction, TestQuery
+from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 
 from .config import CandidatePriorConfig
 from .stats import DENSE_NODE_LIMIT, STAT_FEATURE_NAMES
@@ -37,15 +37,15 @@ class CandidatePriorTower:
 
     def fit(
         self,
-        interactions: list[Interaction],
+        interactions: InteractionTable,
         test_candidate_counts: Counter[int] | None = None,
     ) -> None:
-        self.train_dst = {int(item.dst) for item in interactions}
+        self.train_dst = set(np.unique(interactions.dst).astype(int).tolist())
         self.test_candidate_counts = Counter(test_candidate_counts or {})
         self.test_candidate_total = sum(self.test_candidate_counts.values())
         self._build_dense_features()
 
-    def features_for_queries(self, queries: list[TestQuery], stat_features: np.ndarray) -> np.ndarray:
+    def features_for_queries(self, queries: TestQueryArray | list[TestQuery], stat_features: np.ndarray) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, CANDIDATE_PRIOR_FEATURE_DIM), dtype=np.float32)
         candidate_count = len(queries[0].candidates)

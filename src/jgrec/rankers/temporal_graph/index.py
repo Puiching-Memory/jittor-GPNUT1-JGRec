@@ -11,7 +11,7 @@ import numpy as np
 from jittor_geometric.data import TemporalData
 
 from jgrec.core.io import read_test_queries
-from jgrec.core.types import INTERACTION_DST, INTERACTION_SRC, INTERACTION_TIME, InteractionArray
+from jgrec.core.types import InteractionTable
 
 PAD_NODE_ID = 0
 
@@ -161,16 +161,16 @@ class TemporalNodeMap:
     dst_compact_ids: np.ndarray
 
     @classmethod
-    def from_interactions_and_test(cls, interactions: InteractionArray, test_path: Path | None) -> TemporalNodeMap:
-        src_values = set(np.unique(interactions[:, INTERACTION_SRC]).astype(int).tolist())
-        dst_values = set(np.unique(interactions[:, INTERACTION_DST]).astype(int).tolist())
+    def from_interactions_and_test(cls, interactions: InteractionTable, test_path: Path | None) -> TemporalNodeMap:
+        src_values = np.unique(interactions.src.astype(np.int64, copy=False))
+        dst_values = np.unique(interactions.dst.astype(np.int64, copy=False))
         if test_path is not None and test_path.exists():
             queries = read_test_queries(test_path)
-            src_values.update(queries.src.astype(int).tolist())
-            dst_values.update(np.unique(queries.candidates).astype(int).tolist())
+            src_values = np.union1d(src_values, queries.src.astype(np.int64, copy=False))
+            dst_values = np.union1d(dst_values, queries.candidates.astype(np.int64, copy=False).reshape(-1))
 
-        ordered_src = tuple(sorted(src_values))
-        ordered_dst = tuple(sorted(dst_values))
+        ordered_src = tuple(src_values.astype(int).tolist())
+        ordered_dst = tuple(dst_values.astype(int).tolist())
         src_raw_ids = np.asarray(ordered_src, dtype=np.int64)
         dst_raw_ids = np.asarray(ordered_dst, dtype=np.int64)
         src_compact_ids = np.arange(1, len(ordered_src) + 1, dtype=np.int32)
@@ -218,10 +218,10 @@ class TemporalNodeMap:
         return _map_sorted_ids(raw_ids, self.dst_raw_ids, self.dst_compact_ids)
 
 
-def temporal_data_from_interactions(interactions: InteractionArray, node_map: TemporalNodeMap) -> TemporalData:
-    src = node_map.src_ids(interactions[:, INTERACTION_SRC])
-    dst = node_map.dst_ids(interactions[:, INTERACTION_DST])
-    times = interactions[:, INTERACTION_TIME].astype(np.int32, copy=False)
+def temporal_data_from_interactions(interactions: InteractionTable, node_map: TemporalNodeMap) -> TemporalData:
+    src = node_map.src_ids(interactions.src)
+    dst = node_map.dst_ids(interactions.dst)
+    times = interactions.time.astype(np.int32, copy=False)
     edge_ids = np.arange(len(interactions), dtype=np.int32) + 1
     return TemporalData(
         src=jt.array(src, dtype=jt.int32),
@@ -237,7 +237,9 @@ def safe_neighbor_sampler(sampler: Any) -> SafeTemporalNeighborSampler:
 
 def scan_test_nodes_csv(path: Path) -> tuple[set[int], set[int]]:
     queries = read_test_queries(path)
-    return set(queries.src.astype(int).tolist()), set(np.unique(queries.candidates).astype(int).tolist())
+    src_values = np.unique(queries.src).astype(int).tolist()
+    dst_values = np.unique(queries.candidates).astype(int).tolist()
+    return set(src_values), set(dst_values)
 
 
 def _map_sorted_ids(raw_ids: np.ndarray, raw_values: np.ndarray, compact_values: np.ndarray) -> np.ndarray:

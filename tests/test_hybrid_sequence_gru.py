@@ -3,7 +3,7 @@ import sys
 
 import numpy as np
 
-from jgrec.core.types import Interaction, TestQuery
+from jgrec.core.types import Interaction, InteractionTable, TestQuery
 from jgrec.idmap import NodeIdMap
 from jgrec.rankers.hybrid.config import (
     GRAPH_WINDOW_NAMES,
@@ -35,8 +35,9 @@ def test_gru_sequence_scores_have_expected_shape_and_signal():
     from jgrec.rankers.hybrid.sequence import SequenceTower
 
     interactions = _interactions()
+    interaction_table = InteractionTable.from_events(interactions)
     tower = SequenceTower(
-        id_map=NodeIdMap.from_interactions(interactions),
+        id_map=NodeIdMap.from_interactions(interaction_table),
         config=SequenceTowerConfig(
             epochs=1,
             batch_size=4,
@@ -49,7 +50,7 @@ def test_gru_sequence_scores_have_expected_shape_and_signal():
         ),
     )
 
-    tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    tower.fit(interaction_table, rng=np.random.default_rng(0), verbose=False)
     scores = tower.scores_for_queries(
         [
             TestQuery(src=1, time=100, candidates=(10, 20, 40)),
@@ -69,18 +70,19 @@ def test_gru_sequence_scores_have_expected_shape_and_signal():
 
 def test_disabled_sequence_uses_zero_features_without_importing_sequence_module():
     interactions = _interactions()
+    interaction_table = InteractionTable.from_events(interactions)
     config = TrainingConfig(gnn_enabled=False, seq_enabled=False, two_tower_enabled=False)
     sys.modules.pop("jgrec.rankers.hybrid.sequence", None)
     ranker_module = importlib.import_module("jgrec.rankers.hybrid.ranker")
 
     encoder = ranker_module.HybridFeatureEncoder(
-        id_map=NodeIdMap.from_interactions(interactions),
+        id_map=NodeIdMap.from_interactions(interaction_table),
         recent_window=4,
         graph_config=config.graph_config(),
         sequence_config=config.sequence_config(),
         two_tower_config=config.two_tower_config(),
     )
-    encoder.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    encoder.fit(interaction_table, rng=np.random.default_rng(0), verbose=False)
     features = encoder.features_for_queries([TestQuery(src=1, time=100, candidates=(10, 20))])
 
     sequence_start = (

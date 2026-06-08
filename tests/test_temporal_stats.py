@@ -2,22 +2,26 @@ import math
 
 import numpy as np
 
-from jgrec.core.types import Interaction
+from jgrec.core.types import Interaction, InteractionTable
 from jgrec.core.types import TestQuery as Query
 from jgrec.rankers.hybrid.stats import STAT_FEATURE_NAMES, TemporalStats
 
 FEATURE = {name: idx for idx, name in enumerate(STAT_FEATURE_NAMES)}
 
 
+def _table(events: list[Interaction]) -> InteractionTable:
+    return InteractionTable.from_events(events)
+
+
 def test_temporal_stats_cutoff_ignores_future_pair_events():
     stats = TemporalStats(recent_window=4)
     stats.fit(
-        [
+        _table([
             Interaction(src=1, dst=10, time=10),
             Interaction(src=1, dst=20, time=20),
             Interaction(src=1, dst=10, time=30),
             Interaction(src=2, dst=10, time=40),
-        ]
+        ])
     )
 
     features = stats.features_for_queries([Query(src=1, time=25, candidates=(10, 20, 30))])[0]
@@ -45,10 +49,10 @@ def test_temporal_stats_cutoff_ignores_future_pair_events():
 def test_temporal_stats_cutoff_excludes_events_at_query_time():
     stats = TemporalStats(recent_window=4)
     stats.fit(
-        [
+        _table([
             Interaction(src=1, dst=10, time=10),
             Interaction(src=1, dst=10, time=20),
-        ]
+        ])
     )
 
     features = stats.features_for_queries([Query(src=1, time=20, candidates=(10,))])[0]
@@ -63,12 +67,12 @@ def test_temporal_stats_cutoff_excludes_events_at_query_time():
 def test_temporal_stats_uses_aggregate_fast_path_after_training_window():
     stats = TemporalStats(recent_window=4)
     stats.fit(
-        [
+        _table([
             Interaction(src=1, dst=10, time=10),
             Interaction(src=1, dst=20, time=20),
             Interaction(src=1, dst=10, time=30),
             Interaction(src=2, dst=10, time=40),
-        ]
+        ])
     )
 
     batch_features = stats.features_for_queries([Query(src=1, time=50, candidates=(10, 20))])[0]

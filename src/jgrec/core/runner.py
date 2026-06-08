@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import deque
 from pathlib import Path
 from time import perf_counter
 
@@ -10,7 +9,7 @@ from jgrec.rankers.base import Ranker
 
 from .io import read_interactions, read_test_queries
 from .memory import log_event, log_memory, release_memory
-from .types import DatasetPaths, DatasetResult, FitContext, TestQuery
+from .types import DatasetPaths, DatasetResult, FitContext, TestQueryArray
 
 PREDICT_PROGRESS_INTERVAL = 10_000
 
@@ -47,37 +46,13 @@ def build_dataset_submission(
     predict_start = perf_counter()
     next_progress_row = PREDICT_PROGRESS_INTERVAL
     log_memory(f"predict_start:{dataset.name}", enabled=verbose)
+    queries = read_test_queries(dataset.test_path, max_rows=limit_rows)
     with output_path.open("w", newline="") as f:
-        batch: list[TestQuery] = []
-        for query in read_test_queries(dataset.test_path):
-            batch.append(query)
-            should_flush = len(batch) >= batch_size
-            if limit_rows is not None and row_count + len(batch) >= limit_rows:
-                should_flush = True
-
-            if should_flush:
-                if limit_rows is not None:
-                    batch = batch[: limit_rows - row_count]
-                batch_rows = _write_batch(f, ranker, batch)
-                row_count += batch_rows
-                next_progress_row = _log_predict_progress(
-                    dataset=dataset,
-                    output_path=output_path,
-                    row_count=row_count,
-                    batch_rows=batch_rows,
-                    elapsed=perf_counter() - predict_start,
-                    next_progress_row=next_progress_row,
-                    verbose=verbose,
-                )
-                batch.clear()
-                if limit_rows is not None and row_count >= limit_rows:
-                    break
-        if batch and (limit_rows is None or row_count < limit_rows):
-            if limit_rows is not None:
-                batch = batch[: limit_rows - row_count]
+        for start in range(0, len(queries), batch_size):
+            batch = queries[start : start + batch_size]
             batch_rows = _write_batch(f, ranker, batch)
             row_count += batch_rows
-            _log_predict_progress(
+            next_progress_row = _log_predict_progress(
                 dataset=dataset,
                 output_path=output_path,
                 row_count=row_count,
@@ -98,17 +73,18 @@ def build_dataset_submission(
 
 def _read_fit_interactions(dataset: DatasetPaths, ranker: Ranker):
     max_fit_events = int(getattr(getattr(ranker, "config", None), "max_fit_events", 0) or 0)
+    interactions = read_interactions(dataset.train_path)
     if max_fit_events <= 0:
-        return list(read_interactions(dataset.train_path))
-    return list(deque(read_interactions(dataset.train_path), maxlen=max_fit_events))
+        return interactions
+    return interactions.tail(max_fit_events)
 
 
-def _write_batch(output_file, ranker: Ranker, batch: list[TestQuery]) -> int:
+def _write_batch(output_file, ranker: Ranker, batch: TestQueryArray) -> int:
     probs_batch = ranker.predict_batch(batch)
-    if probs_batch.shape != (len(batch), len(batch[0].candidates)):
+    if probs_batch.shape != (len(batch), batch.candidate_count):
         raise ValueError(
             "ranker returned invalid prediction shape: "
-            f"{probs_batch.shape}, expected {(len(batch), len(batch[0].candidates))}"
+            f"{probs_batch.shape}, expected {(len(batch), batch.candidate_count)}"
         )
     np.clip(probs_batch, 0.0, 1.0, out=probs_batch)
     np.savetxt(output_file, probs_batch, delimiter=",", fmt="%.8f")
@@ -138,4 +114,3 @@ def _log_predict_progress(
     while row_count >= next_progress_row:
         next_progress_row += PREDICT_PROGRESS_INTERVAL
     return next_progress_row
-

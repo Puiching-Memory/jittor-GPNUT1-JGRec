@@ -5,7 +5,7 @@ from collections import OrderedDict
 
 import numpy as np
 
-from jgrec.core.types import Interaction, TestQuery
+from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
 
 from .config import StructureTowerConfig
@@ -45,10 +45,10 @@ class StructureFeatureTower:
     def feature_names(self) -> tuple[str, ...]:
         return STRUCTURE_FEATURE_NAMES
 
-    def fit(self, interactions: list[Interaction], rng: np.random.Generator, verbose: bool = True) -> None:
-        if not interactions:
+    def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool = True) -> None:
+        if len(interactions) == 0:
             raise ValueError("training interactions are empty")
-        interactions = _ensure_time_order(interactions)
+        interactions = interactions.sort_by_time()
         self.index.fit(
             interactions,
             build_transitions=self.config.transition_enabled,
@@ -56,8 +56,8 @@ class StructureFeatureTower:
             cooccur_history_limit=self.config.cooccur_history_limit,
             future_only_transition_cooccur=self.config.future_only_transition_cooccur,
         )
-        self.min_time = interactions[0].time
-        self.max_time = interactions[-1].time
+        self.min_time = int(interactions.time[0])
+        self.max_time = int(interactions.time[-1])
         self.graph_span = max(self.max_time - self.min_time, 1)
         self.decay_windows = (
             max(self.graph_span * 0.05, 1.0),
@@ -78,7 +78,7 @@ class StructureFeatureTower:
         self.index.compact_transition_cooccur_for_future_queries()
         self._full_src_cooccur_cache.clear()
 
-    def features_for_queries(self, queries: list[TestQuery]) -> np.ndarray:
+    def features_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, STRUCTURE_FEATURE_DIM), dtype=np.float32)
 
@@ -273,9 +273,3 @@ class StructureFeatureTower:
         cache.move_to_end(key)
         while len(cache) > limit:
             cache.popitem(last=False)
-
-
-def _ensure_time_order(interactions: list[Interaction]) -> list[Interaction]:
-    if all(left.time <= right.time for left, right in zip(interactions, interactions[1:])):
-        return interactions
-    return sorted(interactions, key=lambda item: item.time)

@@ -2,7 +2,7 @@ import math
 
 import numpy as np
 
-from jgrec.core.types import Interaction
+from jgrec.core.types import Interaction, InteractionTable
 from jgrec.core.types import TestQuery as Query
 from jgrec.rankers.hybrid.candidate_prior import CANDIDATE_PRIOR_FEATURE_NAMES
 from jgrec.rankers.hybrid.config import (
@@ -18,17 +18,21 @@ from jgrec.rankers.hybrid.structure import STRUCTURE_FEATURE_NAMES, StructureFea
 FEATURE = {name: idx for idx, name in enumerate(STRUCTURE_FEATURE_NAMES)}
 
 
+def _table(events: list[Interaction]) -> InteractionTable:
+    return InteractionTable.from_events(events)
+
+
 def test_structure_features_use_temporal_cutoff():
     tower = StructureFeatureTower()
     tower.fit(
-        [
+        _table([
             Interaction(src=1, dst=10, time=10),
             Interaction(src=10, dst=1, time=25),
             Interaction(src=2, dst=10, time=30),
             Interaction(src=10, dst=20, time=32),
             Interaction(src=2, dst=20, time=40),
             Interaction(src=1, dst=10, time=50),
-        ],
+        ]),
         rng=np.random.default_rng(0),
         verbose=False,
     )
@@ -56,12 +60,12 @@ def test_structure_features_use_temporal_cutoff():
 def test_structure_features_after_training_window_include_full_history():
     tower = StructureFeatureTower()
     tower.fit(
-        [
+        _table([
             Interaction(src=1, dst=10, time=10),
             Interaction(src=2, dst=10, time=30),
             Interaction(src=10, dst=20, time=35),
             Interaction(src=2, dst=20, time=40),
-        ],
+        ]),
         rng=np.random.default_rng(0),
         verbose=False,
     )
@@ -86,8 +90,9 @@ def test_future_only_structure_compaction_preserves_full_history_features():
     query = Query(src=1, time=80, candidates=(10, 20, 30, 40))
     full_tower = StructureFeatureTower()
     compact_tower = StructureFeatureTower()
-    full_tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
-    compact_tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    interaction_table = _table(interactions)
+    full_tower.fit(interaction_table, rng=np.random.default_rng(0), verbose=False)
+    compact_tower.fit(interaction_table, rng=np.random.default_rng(0), verbose=False)
 
     expected = full_tower.features_for_queries([query])
     compact_tower.compact_transition_cooccur_for_future_queries()
@@ -111,8 +116,9 @@ def test_future_only_structure_build_preserves_full_history_features_without_tim
     query = Query(src=1, time=80, candidates=(10, 20, 30, 40))
     full_tower = StructureFeatureTower()
     future_tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
-    full_tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
-    future_tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    interaction_table = _table(interactions)
+    full_tower.fit(interaction_table, rng=np.random.default_rng(0), verbose=False)
+    future_tower.fit(interaction_table, rng=np.random.default_rng(0), verbose=False)
 
     expected = full_tower.features_for_queries([query])
     actual = future_tower.features_for_queries([query])
@@ -133,8 +139,9 @@ def test_future_only_structure_preaggregates_large_source_cooccurs():
     query = Query(src=1, time=400, candidates=(1001, 1050, 1128, 1309))
     full_tower = StructureFeatureTower()
     future_tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
-    full_tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
-    future_tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    interaction_table = _table(interactions)
+    full_tower.fit(interaction_table, rng=np.random.default_rng(0), verbose=False)
+    future_tower.fit(interaction_table, rng=np.random.default_rng(0), verbose=False)
 
     expected = full_tower.features_for_queries([query])
     actual = future_tower.features_for_queries([query])
@@ -152,12 +159,12 @@ def test_structure_memory_switches_disable_heavy_features_only():
         )
     )
     tower.fit(
-        [
+        _table([
             Interaction(src=1, dst=10, time=10),
             Interaction(src=2, dst=10, time=30),
             Interaction(src=10, dst=20, time=35),
             Interaction(src=2, dst=20, time=40),
-        ],
+        ]),
         rng=np.random.default_rng(0),
         verbose=False,
     )

@@ -7,7 +7,7 @@ import jittor as jt
 import numpy as np
 from sklearn.metrics import average_precision_score
 
-from jgrec.core.types import INTERACTION_DST, INTERACTION_SRC, INTERACTION_TIME, InteractionArray, TestQueryArray
+from jgrec.core.types import InteractionTable, TestQueryArray
 from jgrec.logging import log, track
 
 from .index import TemporalNodeMap
@@ -60,8 +60,8 @@ class TestCandidateIndex:
 
 def train_listwise(
     model: EndToEndTemporalGraphModel,
-    train_events: InteractionArray,
-    val_events: InteractionArray,
+    train_events: InteractionTable,
+    val_events: InteractionTable,
     node_map: TemporalNodeMap,
     neighbor_sampler: Any,
     dst_pool: np.ndarray,
@@ -162,7 +162,7 @@ def train_listwise(
 
 def fit_full_epochs(
     model: EndToEndTemporalGraphModel,
-    events: InteractionArray,
+    events: InteractionTable,
     node_map: TemporalNodeMap,
     neighbor_sampler: Any,
     dst_pool: np.ndarray,
@@ -205,7 +205,7 @@ def fit_full_epochs(
 
 def evaluate_listwise(
     model: EndToEndTemporalGraphModel,
-    events: InteractionArray,
+    events: InteractionTable,
     node_map: TemporalNodeMap,
     neighbor_sampler: Any,
     dst_pool: np.ndarray,
@@ -239,7 +239,7 @@ def evaluate_listwise(
 
 
 def build_evaluation_batch(
-    events: InteractionArray,
+    events: InteractionTable,
     node_map: TemporalNodeMap,
     neighbor_sampler: Any,
     dst_pool: np.ndarray,
@@ -261,9 +261,9 @@ def build_evaluation_batch(
             candidate_history_len=candidate_history_len,
         )
 
-    src_ids = node_map.src_ids(events[:, INTERACTION_SRC])
-    times = events[:, INTERACTION_TIME].astype(np.int32, copy=False)
-    positives = node_map.dst_ids(events[:, INTERACTION_DST])
+    src_ids = node_map.src_ids(events.src)
+    times = events.time.astype(np.int32, copy=False)
+    positives = node_map.dst_ids(events.dst)
     src_neighbor_ids, _, src_neighbor_times = neighbor_sampler.get_historical_neighbors_left(
         node_ids=src_ids,
         node_interact_times=times,
@@ -290,7 +290,7 @@ def build_evaluation_batch(
 
 
 def build_training_batch(
-    events: InteractionArray,
+    events: InteractionTable,
     node_map: TemporalNodeMap,
     neighbor_sampler: Any,
     dst_pool: np.ndarray,
@@ -299,9 +299,9 @@ def build_training_batch(
     history_len: int,
     candidate_history_len: int,
 ) -> TemporalTrainingBatch:
-    src_ids = node_map.src_ids(events[:, INTERACTION_SRC])
-    times = events[:, INTERACTION_TIME].astype(np.int32, copy=False)
-    positives = node_map.dst_ids(events[:, INTERACTION_DST])
+    src_ids = node_map.src_ids(events.src)
+    times = events.time.astype(np.int32, copy=False)
+    positives = node_map.dst_ids(events.dst)
     src_neighbor_ids, _, src_neighbor_times = neighbor_sampler.get_historical_neighbors_left(
         node_ids=src_ids,
         node_interact_times=times,
@@ -467,7 +467,7 @@ def _sample_candidate_ids(
 
 
 def _sample_test_like_candidate_ids(
-    events: InteractionArray,
+    events: InteractionTable,
     positives: np.ndarray,
     candidate_index: TestCandidateIndex,
     dst_pool: np.ndarray,
@@ -483,7 +483,7 @@ def _sample_test_like_candidate_ids(
     for row_idx, positive in enumerate(positives):
         used = {int(positive), 0}
         negatives: list[int] = []
-        raw_src = int(events[row_idx, INTERACTION_SRC])
+        raw_src = int(events.src[row_idx])
         source_rows = candidate_index.by_src.get(raw_src)
         if source_rows:
             row = source_rows[int(rng.integers(0, len(source_rows)))]
@@ -538,16 +538,16 @@ def _candidate_softmax_loss(logits: jt.Var) -> jt.Var:
     return -log_probs[:, 0].mean()
 
 
-def _event_batches(events: InteractionArray, batch_size: int):
+def _event_batches(events: InteractionTable, batch_size: int):
     for start in range(0, len(events), batch_size):
         yield events[start : start + batch_size]
 
 
-def _sample_events(events: InteractionArray, max_events: int, rng: np.random.Generator) -> InteractionArray:
+def _sample_events(events: InteractionTable, max_events: int, rng: np.random.Generator) -> InteractionTable:
     if max_events <= 0 or len(events) <= max_events:
         return events
     indices = np.sort(rng.choice(len(events), size=max_events, replace=False))
-    return events[indices]
+    return events.take(indices)
 
 
 def _ap_from_scores(scores: np.ndarray) -> float:

@@ -4,7 +4,7 @@ from collections import deque
 
 import numpy as np
 
-from jgrec.core.types import Interaction, TestQuery
+from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log, track
 
@@ -28,7 +28,7 @@ class GraphTower:
     def feature_names(self) -> tuple[str, ...]:
         return GRAPH_WINDOW_NAMES
 
-    def fit(self, interactions: list[Interaction], rng: np.random.Generator, verbose: bool = True) -> None:
+    def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool = True) -> None:
         if not self.config.enabled or self.config.epochs < 1:
             return
         if self.id_map.num_src == 0 or self.id_map.num_dst == 0:
@@ -52,7 +52,7 @@ class GraphTower:
             )
             self._fit_one_window(name, edge_index, rng, verbose)
 
-    def scores_for_queries(self, queries: list[TestQuery]) -> np.ndarray:
+    def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, len(GRAPH_WINDOW_NAMES)), dtype=np.float32)
 
@@ -255,28 +255,28 @@ def _dense_normalized_bipartite_adj(edge_index: np.ndarray, num_users: int, num_
 
 
 def _mapped_edges(
-    interactions: list[Interaction],
+    interactions: InteractionTable,
     id_map: NodeIdMap,
     config: GraphTowerConfig,
 ) -> list[tuple[int, int, int]]:
     tail_limit = _mapped_edge_tail_limit(config)
     if tail_limit > 0:
         edge_buffer = deque(maxlen=tail_limit)
-        for item in interactions:
-            src_id = id_map.src_id(item.src)
-            dst_id = id_map.dst_id(item.dst)
+        for src, dst, time in zip(interactions.src, interactions.dst, interactions.time):
+            src_id = id_map.src_id(int(src))
+            dst_id = id_map.dst_id(int(dst))
             if src_id < 0 or dst_id < 0:
                 continue
-            edge_buffer.append((src_id, dst_id, item.time))
+            edge_buffer.append((src_id, dst_id, int(time)))
         return list(edge_buffer)
 
     edges: list[tuple[int, int, int]] = []
-    for item in interactions:
-        src_id = id_map.src_id(item.src)
-        dst_id = id_map.dst_id(item.dst)
+    for src, dst, time in zip(interactions.src, interactions.dst, interactions.time):
+        src_id = id_map.src_id(int(src))
+        dst_id = id_map.dst_id(int(dst))
         if src_id < 0 or dst_id < 0:
             continue
-        edges.append((src_id, dst_id, item.time))
+        edges.append((src_id, dst_id, int(time)))
     return edges
 
 

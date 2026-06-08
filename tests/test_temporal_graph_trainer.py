@@ -1,6 +1,6 @@
 import numpy as np
 
-from jgrec.core.types import TestQueryArray
+from jgrec.core.types import InteractionTable, TestQueryArray
 from jgrec.rankers.temporal_graph.index import TemporalNodeMap
 from jgrec.rankers.temporal_graph.trainer import (
     TemporalTrainingBatch,
@@ -13,18 +13,20 @@ from jgrec.rankers.temporal_graph.trainer import (
 
 
 def _node_map() -> TemporalNodeMap:
-    interactions = np.asarray(
-        [
-            [1, 100, 10],
-            [1, 101, 11],
-            [1, 102, 12],
-            [2, 103, 13],
-            [2, 104, 14],
-            [3, 105, 15],
-            [3, 106, 16],
-            [3, 107, 17],
-        ],
-        dtype=np.int32,
+    interactions = InteractionTable.from_array(
+        np.asarray(
+            [
+                [1, 100, 10],
+                [1, 101, 11],
+                [1, 102, 12],
+                [2, 103, 13],
+                [2, 104, 14],
+                [3, 105, 15],
+                [3, 106, 16],
+                [3, 107, 17],
+            ],
+            dtype=np.int32,
+        )
     )
     return TemporalNodeMap.from_interactions_and_test(interactions, test_path=None)
 
@@ -61,14 +63,16 @@ def test_sample_test_like_candidate_ids_uses_source_rows_and_fallback_pool() -> 
         candidates=np.asarray([[101, 102, 103]], dtype=np.int32),
     )
     index = CandidateIndex.from_queries(queries, node_map)
-    events = np.asarray(
-        [
-            [1, 100, 30],
-            [99, 101, 31],
-        ],
-        dtype=np.int32,
+    events = InteractionTable.from_array(
+        np.asarray(
+            [
+                [1, 100, 30],
+                [99, 101, 31],
+            ],
+            dtype=np.int32,
+        )
     )
-    positives = node_map.dst_ids(events[:, 1])
+    positives = node_map.dst_ids(events.dst)
     dst_pool = node_map.dst_ids(np.asarray([100, 101, 102, 103, 104, 105], dtype=np.int32))
 
     candidates = _sample_test_like_candidate_ids(
@@ -94,7 +98,7 @@ def test_sample_test_like_candidate_ids_keeps_full_source_row_order() -> None:
         by_src={7: (np.asarray([0, 14, 11, 12, 13, 15], dtype=np.int32),)},
         global_candidates=np.empty(0, dtype=np.int32),
     )
-    events = np.asarray([[7, 100, 30]], dtype=np.int32)
+    events = InteractionTable.from_array(np.asarray([[7, 100, 30]], dtype=np.int32))
 
     candidates = _sample_test_like_candidate_ids(
         events=events,

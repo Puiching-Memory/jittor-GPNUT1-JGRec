@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .types import DatasetPaths, InteractionArray, TestQueryArray
+from .types import DatasetPaths, InteractionTable, TestQueryArray
 
 
 def discover_datasets(data_dir: Path) -> list[DatasetPaths]:
@@ -35,7 +35,7 @@ def discover_datasets(data_dir: Path) -> list[DatasetPaths]:
     return datasets
 
 
-def read_interactions(path: Path) -> InteractionArray:
+def read_interactions(path: Path) -> InteractionTable:
     with path.open("r", newline="") as f:
         reader = csv.reader(f)
         header = next(reader, None)
@@ -56,8 +56,8 @@ def read_interactions(path: Path) -> InteractionArray:
         )
     interactions = np.asarray(interactions, dtype=np.int32)
     if interactions.size == 0:
-        return np.empty((0, 3), dtype=np.int32)
-    return interactions
+        return InteractionTable.empty()
+    return InteractionTable.from_array(interactions)
 
 
 def read_test_queries(path: Path, max_rows: int | None = None) -> TestQueryArray:

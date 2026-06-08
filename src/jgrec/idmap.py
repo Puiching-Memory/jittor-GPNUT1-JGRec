@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-
 import numpy as np
 
-from .core.types import INTERACTION_DST, INTERACTION_SRC, InteractionArray
+from .core.types import InteractionTable
 
 
 @dataclass(frozen=True)
@@ -15,9 +14,9 @@ class NodeIdMap:
     dst_values: tuple[int, ...]
 
     @classmethod
-    def from_interactions(cls, interactions: InteractionArray) -> NodeIdMap:
-        src_values = tuple(sorted(np.unique(interactions[:, INTERACTION_SRC]).astype(int).tolist()))
-        dst_values = tuple(sorted(np.unique(interactions[:, INTERACTION_DST]).astype(int).tolist()))
+    def from_interactions(cls, interactions: InteractionTable) -> NodeIdMap:
+        src_values = tuple(np.unique(interactions.src).astype(int).tolist())
+        dst_values = tuple(np.unique(interactions.dst).astype(int).tolist())
         return cls(
             src_to_id={value: idx for idx, value in enumerate(src_values)},
             dst_to_id={value: idx for idx, value in enumerate(dst_values)},

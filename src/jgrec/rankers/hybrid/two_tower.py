@@ -7,7 +7,7 @@ import jittor as jt
 import numpy as np
 
 from jgrec.core.memory import release_memory
-from jgrec.core.types import Interaction, TestQuery
+from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log, track
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
@@ -51,7 +51,7 @@ class _TowerTrainingContext:
     @classmethod
     def from_interactions(
         cls,
-        interactions: list[Interaction],
+        interactions: InteractionTable,
         id_map: NodeIdMap,
         index: TemporalInteractionIndex,
     ) -> _TowerTrainingContext:
@@ -62,8 +62,8 @@ class _TowerTrainingContext:
             negative_context=NegativeSamplingContext(index=index, dst_values=id_map.dst_values),
             dst_pool=dst_pool,
             candidate_pool=build_candidate_pool(dst_pool),
-            min_time=interactions[0].time,
-            graph_span=max(interactions[-1].time - interactions[0].time, 1),
+            min_time=int(interactions.time[0]),
+            graph_span=max(int(interactions.time[-1]) - int(interactions.time[0]), 1),
         )
 
 
@@ -83,15 +83,15 @@ class TwoTower:
 
     def fit(
         self,
-        interactions: list[Interaction],
+        interactions: InteractionTable,
         rng: np.random.Generator,
         verbose: bool = True,
         shared_index: TemporalInteractionIndex | None = None,
     ) -> None:
-        if not interactions:
+        if len(interactions) == 0:
             raise ValueError("training interactions are empty")
 
-        interactions = _ensure_time_order(interactions)
+        interactions = interactions.sort_by_time()
         needs_structural_negatives = self.config.enabled and self.config.num_negatives > 0 and self.config.hard_negative_ratio > 0
         owns_index = not _can_reuse_index(shared_index, needs_structural_negatives)
         if owns_index:
@@ -103,8 +103,8 @@ class TwoTower:
             )
         else:
             self.index = shared_index
-        self.min_time = interactions[0].time
-        self.max_time = interactions[-1].time
+        self.min_time = int(interactions.time[0])
+        self.max_time = int(interactions.time[-1])
         self.graph_span = max(self.max_time - self.min_time, 1)
 
         if not self.config.enabled or self.config.epochs < 1 or self.config.num_negatives < 1:
@@ -113,7 +113,7 @@ class TwoTower:
             return
 
         sampled_events = _sample_events(interactions, self.config.max_samples, rng)
-        if not sampled_events:
+        if len(sampled_events) == 0:
             return
 
         self.model = _TwoTowerModel(
@@ -138,7 +138,7 @@ class TwoTower:
             for start in range(0, train_size, self.config.batch_size):
                 batch_idx = order[start : start + self.config.batch_size]
                 samples = _build_training_batch_for_events(
-                    events=[sampled_events[int(index)] for index in batch_idx],
+                    events=sampled_events.take(batch_idx),
                     negative_seeds=negative_seeds[batch_idx],
                     training_context=training_context,
                     config=self.config,
@@ -177,7 +177,7 @@ class TwoTower:
             self.index.cooccur_times = {}
             self.index.cooccurs_by_left = {}
 
-    def scores_for_queries(self, queries: list[TestQuery]) -> np.ndarray:
+    def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, len(TWO_TOWER_FEATURE_NAMES)), dtype=np.float32)
 
@@ -219,7 +219,7 @@ class TwoTower:
         scores[:, :, 1][~valid_dst] = 0.0
         return scores
 
-    def _batch_for_queries(self, queries: list[TestQuery]) -> _TowerBatch:
+    def _batch_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> _TowerBatch:
         candidate_count = len(queries[0].candidates)
         src_ids = np.empty(len(queries), dtype=np.int32)
         src_activity = np.empty(len(queries), dtype=np.int32)
@@ -347,17 +347,17 @@ class _TwoTowerModel(jt.nn.Module):
 
 
 def _build_training_batch_for_events(
-    events: list[Interaction],
+    events: InteractionTable,
     negative_seeds: np.ndarray,
     training_context: _TowerTrainingContext,
     config: TwoTowerConfig,
 ) -> _TowerBatch:
-    if not events:
+    if len(events) == 0:
         raise ValueError("two-tower training batch is empty")
     candidate_count = config.num_negatives + 1
     jobs = [
-        NegativeSamplingJob(src=event.src, positive_dst=event.dst, query_time=event.time)
-        for event in events
+        NegativeSamplingJob(src=int(src), positive_dst=int(dst), query_time=int(time))
+        for src, dst, time in zip(events.src, events.dst, events.time)
     ]
     negatives_by_event = sample_mixed_negatives_batch_seeded(
         jobs=jobs,
@@ -380,23 +380,28 @@ def _build_training_batch_for_events(
     dst_recency = np.empty((len(events), candidate_count), dtype=np.int32)
     dst_time = np.empty((len(events), candidate_count), dtype=np.int32)
 
-    for row_idx, (event, negatives) in enumerate(zip(events, negatives_by_event)):
-        source_view = training_context.index.source_view(event.src, event.time)
-        src_ids[row_idx] = _src_model_id(training_context.id_map, event.src)
+    for row_idx, (event_src, event_dst, event_time, negatives) in enumerate(
+        zip(events.src, events.dst, events.time, negatives_by_event)
+    ):
+        src_int = int(event_src)
+        dst_int = int(event_dst)
+        time_int = int(event_time)
+        source_view = training_context.index.source_view(src_int, time_int)
+        src_ids[row_idx] = _src_model_id(training_context.id_map, src_int)
         src_activity[row_idx] = _count_bucket(source_view.cutoff)
-        src_recency[row_idx] = _history_recency_bucket(source_view.visible_times, event.time, training_context.graph_span)
-        time_bucket = _time_bucket(event.time, training_context.min_time, training_context.graph_span)
+        src_recency[row_idx] = _history_recency_bucket(source_view.visible_times, time_int, training_context.graph_span)
+        time_bucket = _time_bucket(time_int, training_context.min_time, training_context.graph_span)
         src_time[row_idx] = time_bucket
         dst_time[row_idx, :] = time_bucket
 
-        for col_idx, dst in enumerate((event.dst, *negatives)):
-            dst_int = int(dst)
-            destination_view = training_context.index.destination_view(dst_int, event.time)
-            dst_ids[row_idx, col_idx] = _dst_model_id(training_context.id_map, dst_int)
+        for col_idx, candidate_dst in enumerate((dst_int, *negatives)):
+            candidate_dst_int = int(candidate_dst)
+            destination_view = training_context.index.destination_view(candidate_dst_int, time_int)
+            dst_ids[row_idx, col_idx] = _dst_model_id(training_context.id_map, candidate_dst_int)
             dst_popularity[row_idx, col_idx] = _count_bucket(destination_view.cutoff)
             dst_recency[row_idx, col_idx] = _history_recency_bucket(
                 destination_view.visible_times,
-                event.time,
+                time_int,
                 training_context.graph_span,
             )
 
@@ -413,14 +418,14 @@ def _build_training_batch_for_events(
 
 
 def _sample_events(
-    events: list[Interaction],
+    events: InteractionTable,
     max_events: int,
     rng: np.random.Generator,
-) -> list[Interaction]:
+) -> InteractionTable:
     if max_events <= 0 or len(events) <= max_events:
-        return list(events)
+        return events
     indices = np.sort(rng.choice(len(events), size=max_events, replace=False))
-    return [events[int(index)] for index in indices]
+    return events.take(indices)
 
 
 def _src_model_id(id_map: NodeIdMap, src: int) -> int:
@@ -451,9 +456,3 @@ def _time_bucket(query_time: int, min_time: int, graph_span: int) -> int:
     position = (int(query_time) - int(min_time)) / max(graph_span, 1)
     position = min(max(position, 0.0), 1.0)
     return min(int(position * TIME_BUCKETS), TIME_BUCKETS - 1)
-
-
-def _ensure_time_order(interactions: list[Interaction]) -> list[Interaction]:
-    if all(left.time <= right.time for left, right in zip(interactions, interactions[1:])):
-        return interactions
-    return sorted(interactions, key=lambda item: item.time)

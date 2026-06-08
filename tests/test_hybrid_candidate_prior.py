@@ -2,7 +2,7 @@ from collections import Counter
 
 import numpy as np
 
-from jgrec.core.types import Interaction, TestQuery
+from jgrec.core.types import Interaction, InteractionTable, TestQuery
 from jgrec.idmap import NodeIdMap
 from jgrec.rankers.hybrid.candidate_prior import CANDIDATE_PRIOR_FEATURE_NAMES, CandidatePriorTower
 from jgrec.rankers.hybrid.config import CandidatePriorConfig, TrainingConfig
@@ -12,10 +12,10 @@ from jgrec.rankers.hybrid.stats import STAT_FEATURE_DIM, STAT_FEATURE_NAMES
 def test_candidate_prior_features_cover_seen_unseen_and_row_ranks():
     tower = CandidatePriorTower(CandidatePriorConfig(enabled=True))
     tower.fit(
-        [
+        InteractionTable.from_events([
             Interaction(src=1, dst=10, time=10),
             Interaction(src=1, dst=20, time=20),
-        ],
+        ]),
         Counter({999: 50, 20: 25, 10: 5}),
     )
     queries = [TestQuery(src=1, time=30, candidates=(999, 20, 10))]
@@ -52,14 +52,14 @@ def test_disabled_candidate_prior_uses_zero_features_in_encoder():
         two_tower_enabled=False,
     )
     encoder = HybridFeatureEncoder(
-        id_map=NodeIdMap.from_interactions(interactions),
+        id_map=NodeIdMap.from_interactions(InteractionTable.from_events(interactions)),
         recent_window=4,
         candidate_prior_config=config.candidate_prior_config(),
         graph_config=config.graph_config(),
         sequence_config=config.sequence_config(),
         two_tower_config=config.two_tower_config(),
     )
-    encoder.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    encoder.fit(InteractionTable.from_events(interactions), rng=np.random.default_rng(0), verbose=False)
     features = encoder.features_for_queries([TestQuery(src=1, time=30, candidates=(10, 20))])
 
     prior_start = len(STAT_FEATURE_NAMES)

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from jgrec.core.types import Interaction, TestQuery
+from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 
 STAT_FEATURE_NAMES = (
     "pair_strength",
@@ -53,11 +53,11 @@ class TemporalStats:
         self.graph_span = 1
         self.log_total_edges = 1.0
 
-    def fit(self, interactions: list[Interaction]) -> None:
-        if not interactions:
+    def fit(self, interactions: InteractionTable) -> None:
+        if len(interactions) == 0:
             raise ValueError("training interactions are empty")
 
-        interactions = _ensure_time_order(interactions)
+        interactions = interactions.sort_by_time()
         self.src_histories = {}
         self.src_event_times = {}
         self.src_event_dsts = {}
@@ -68,10 +68,10 @@ class TemporalStats:
         self.dst_popularity = {}
         self.dst_popularity_dense = None
         self.dst_recent_time_dense = None
-        self.event_times = _compact_int_array([item.time for item in interactions])
+        self.event_times = _compact_int_array(interactions.time.astype(int).tolist())
         self.total_edges = len(interactions)
-        self.min_time = interactions[0].time
-        self.max_time = interactions[-1].time
+        self.min_time = int(interactions.time[0])
+        self.max_time = int(interactions.time[-1])
         self.graph_span = max(self.max_time - self.min_time, 1)
         self.log_total_edges = math.log1p(max(self.total_edges, 1))
 
@@ -80,20 +80,23 @@ class TemporalStats:
         src_dsts: dict[int, list[int]] = defaultdict(list)
         dst_times: dict[int, list[int]] = defaultdict(list)
         pair_times: dict[tuple[int, int], list[int]] = defaultdict(list)
-        for item in interactions:
-            history = histories[item.src]
+        for src, dst, time in zip(interactions.src, interactions.dst, interactions.time):
+            src_int = int(src)
+            dst_int = int(dst)
+            time_int = int(time)
+            history = histories[src_int]
             history.total += 1
-            history.last_time = item.time
-            history.dst_counts[item.dst] += 1
-            history.pair_recent_time[item.dst] = item.time
-            history.recent_dsts.append(item.dst)
+            history.last_time = time_int
+            history.dst_counts[dst_int] += 1
+            history.pair_recent_time[dst_int] = time_int
+            history.recent_dsts.append(dst_int)
 
-            self.dst_counts[item.dst] += 1
-            self.dst_recent_time[item.dst] = item.time
-            src_times[item.src].append(item.time)
-            src_dsts[item.src].append(item.dst)
-            dst_times[item.dst].append(item.time)
-            pair_times[(item.src, item.dst)].append(item.time)
+            self.dst_counts[dst_int] += 1
+            self.dst_recent_time[dst_int] = time_int
+            src_times[src_int].append(time_int)
+            src_dsts[src_int].append(dst_int)
+            dst_times[dst_int].append(time_int)
+            pair_times[(src_int, dst_int)].append(time_int)
 
         self.src_histories = dict(histories)
         self.src_event_times = {
@@ -132,7 +135,7 @@ class TemporalStats:
         self.pair_event_times = {}
         self.event_times = np.empty(0, dtype=np.int64)
 
-    def features_for_queries(self, queries: list[TestQuery]) -> np.ndarray:
+    def features_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, STAT_FEATURE_DIM), dtype=np.float32)
 
@@ -387,9 +390,3 @@ def _compact_int_array(values: list[int]) -> np.ndarray:
     int32 = np.iinfo(np.int32)
     dtype = np.int32 if int32.min <= min_value <= max_value <= int32.max else np.int64
     return np.asarray(values, dtype=dtype)
-
-
-def _ensure_time_order(interactions: list[Interaction]) -> list[Interaction]:
-    if all(left.time <= right.time for left, right in zip(interactions, interactions[1:])):
-        return interactions
-    return sorted(interactions, key=lambda item: item.time)

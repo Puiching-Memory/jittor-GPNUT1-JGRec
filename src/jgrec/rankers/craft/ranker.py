@@ -13,11 +13,8 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 
 from jgrec.core.io import read_test_queries
 from jgrec.core.types import (
-    INTERACTION_DST,
-    INTERACTION_SRC,
-    INTERACTION_TIME,
     FitContext,
-    InteractionArray,
+    InteractionTable,
     TestQueryArray,
     TrainingReport,
 )
@@ -46,13 +43,13 @@ class CRAFTBaselineRanker:
         self.neighbor_sampler = None
         self.num_neighbors = self.config.num_neighbors
 
-    def fit(self, interactions: InteractionArray, context: FitContext) -> TrainingReport:
+    def fit(self, interactions: InteractionTable, context: FitContext) -> TrainingReport:
         if len(interactions) == 0:
             raise ValueError("training interactions are empty")
-        interactions = interactions[np.argsort(interactions[:, INTERACTION_TIME], kind="stable")]
-        src_np = interactions[:, INTERACTION_SRC].astype(np.int32, copy=False)
-        dst_np = interactions[:, INTERACTION_DST].astype(np.int32, copy=False)
-        time_np = interactions[:, INTERACTION_TIME].astype(np.int32, copy=False)
+        interactions = interactions.sort_by_time()
+        src_np = interactions.src.astype(np.int32, copy=False)
+        dst_np = interactions.dst.astype(np.int32, copy=False)
+        time_np = interactions.time.astype(np.int32, copy=False)
         edge_ids_np = np.arange(len(interactions), dtype=np.int32) + 1
         test_candidates, test_src = _scan_test_nodes(context.dataset.test_path)
 

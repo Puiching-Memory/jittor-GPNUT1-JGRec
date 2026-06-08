@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from jgrec.core.types import Interaction, TestQuery
+from jgrec.core.types import Interaction, InteractionTable, TestQuery
 from jgrec.idmap import NodeIdMap
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
 from jgrec.rankers.hybrid.candidate_prior import CANDIDATE_PRIOR_FEATURE_NAMES
@@ -42,8 +42,9 @@ def test_two_tower_scores_have_expected_shape_and_signal():
     from jgrec.rankers.hybrid.two_tower import TwoTower
 
     interactions = _interactions()
+    interaction_table = InteractionTable.from_events(interactions)
     tower = TwoTower(
-        id_map=NodeIdMap.from_interactions(interactions),
+        id_map=NodeIdMap.from_interactions(interaction_table),
         config=TwoTowerConfig(
             embedding_dim=8,
             hidden_dim=8,
@@ -54,7 +55,7 @@ def test_two_tower_scores_have_expected_shape_and_signal():
         ),
     )
 
-    tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    tower.fit(interaction_table, rng=np.random.default_rng(0), verbose=False)
     scores = tower.scores_for_queries(
         [
             TestQuery(src=1, time=110, candidates=(10, 20, 40)),
@@ -75,6 +76,7 @@ def test_two_tower_scoring_batch_size_preserves_scores():
     from jgrec.rankers.hybrid.two_tower import TwoTower
 
     interactions = _interactions()
+    interaction_table = InteractionTable.from_events(interactions)
     queries = [
         TestQuery(src=1, time=110, candidates=(10, 20, 40)),
         TestQuery(src=2, time=110, candidates=(10, 30, 50)),
@@ -89,10 +91,10 @@ def test_two_tower_scoring_batch_size_preserves_scores():
         num_negatives=2,
     )
     tower = TwoTower(
-        id_map=NodeIdMap.from_interactions(interactions),
+        id_map=NodeIdMap.from_interactions(interaction_table),
         config=TwoTowerConfig(score_batch_size=32, **common_config),
     )
-    tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    tower.fit(interaction_table, rng=np.random.default_rng(0), verbose=False)
     full_scores = tower.scores_for_queries(queries)
     tower.config = replace(tower.config, score_batch_size=1)
 
@@ -108,15 +110,16 @@ def test_two_tower_reuses_future_only_structure_index():
     from jgrec.rankers.hybrid.two_tower import TwoTower
 
     interactions = _interactions()
+    interaction_table = InteractionTable.from_events(interactions)
     shared_index = TemporalInteractionIndex()
     shared_index.fit(
-        interactions,
+        interaction_table,
         build_transitions=True,
         build_cooccurs=True,
         future_only_transition_cooccur=True,
     )
     tower = TwoTower(
-        id_map=NodeIdMap.from_interactions(interactions),
+        id_map=NodeIdMap.from_interactions(interaction_table),
         config=TwoTowerConfig(
             embedding_dim=8,
             hidden_dim=8,
@@ -127,7 +130,7 @@ def test_two_tower_reuses_future_only_structure_index():
         ),
     )
 
-    tower.fit(interactions, rng=np.random.default_rng(0), verbose=False, shared_index=shared_index)
+    tower.fit(interaction_table, rng=np.random.default_rng(0), verbose=False, shared_index=shared_index)
     scores = tower.scores_for_queries([TestQuery(src=1, time=110, candidates=(10, 20, 40))])
 
     assert tower.index is shared_index
@@ -140,18 +143,19 @@ def test_two_tower_reuses_future_only_structure_index():
 
 def test_disabled_two_tower_uses_zero_features_without_importing_tower_module():
     interactions = _interactions()
+    interaction_table = InteractionTable.from_events(interactions)
     config = TrainingConfig(gnn_enabled=False, seq_enabled=False, two_tower_enabled=False)
     sys.modules.pop("jgrec.rankers.hybrid.two_tower", None)
     ranker_module = importlib.import_module("jgrec.rankers.hybrid.ranker")
 
     encoder = ranker_module.HybridFeatureEncoder(
-        id_map=NodeIdMap.from_interactions(interactions),
+        id_map=NodeIdMap.from_interactions(interaction_table),
         recent_window=4,
         graph_config=config.graph_config(),
         sequence_config=config.sequence_config(),
         two_tower_config=config.two_tower_config(),
     )
-    encoder.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    encoder.fit(interaction_table, rng=np.random.default_rng(0), verbose=False)
     features = encoder.features_for_queries([TestQuery(src=1, time=110, candidates=(10, 20))])
 
     tower_start = len(STAT_FEATURE_NAMES) + len(CANDIDATE_PRIOR_FEATURE_NAMES) + len(STRUCTURE_FEATURE_NAMES)

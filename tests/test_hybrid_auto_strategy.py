@@ -2,7 +2,7 @@ import csv
 
 import numpy as np
 
-from jgrec.core.types import Interaction
+from jgrec.core.types import Interaction, InteractionTable
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
 from jgrec.rankers.hybrid.auto_strategy import (
     NEW_LINK_COLD_MODE,
@@ -44,7 +44,7 @@ def test_auto_strategy_detects_new_link_cold_without_dataset_name(tmp_path):
     ]
     _write_test(test_path, [_row(1, 100, list(range(2000, 2100)))])
 
-    profile = profile_dataset(interactions, test_path, val_ratio=0.2)
+    profile = profile_dataset(InteractionTable.from_events(interactions), test_path, val_ratio=0.2)
     strategy = choose_auto_strategy(profile)
 
     assert profile.holdout_pair_hit_rate == 0.0
@@ -61,13 +61,37 @@ def test_auto_strategy_detects_repeat_memory_without_dataset_name(tmp_path):
     ]
     _write_test(test_path, [_row(1, 100, [10, 20] * 50)])
 
-    profile = profile_dataset(interactions, test_path, val_ratio=0.2)
+    profile = profile_dataset(InteractionTable.from_events(interactions), test_path, val_ratio=0.2)
     strategy = choose_auto_strategy(profile)
 
     assert profile.holdout_pair_hit_rate >= 0.25
     assert profile.candidate_unseen_dst_rate <= 0.20
     assert strategy.mode == REPEAT_MEMORY_MODE
     assert strategy.test_candidate_negative_ratio == 0.10
+
+
+def test_profile_dataset_counts_test_candidates_and_min_time_once(tmp_path):
+    test_path = tmp_path / "test.csv"
+    interactions = [
+        Interaction(src=1, dst=10, time=1),
+        Interaction(src=2, dst=20, time=2),
+    ]
+    _write_test(
+        test_path,
+        [
+            _row(1, 80, [10, 10, 20]),
+            _row(2, 50, [10, 30]),
+        ],
+    )
+
+    profile = profile_dataset(InteractionTable.from_events(interactions), test_path, val_ratio=0.5)
+
+    assert profile.test_min_time == 50
+    assert profile.test_candidate_total == 200
+    assert profile.test_candidate_counts[10] == 3
+    assert profile.test_candidate_counts[20] == 1
+    assert profile.test_candidate_counts[30] == 1
+    assert profile.candidate_unseen_dst_rate == 196 / 200
 
 
 def test_path_profile_uses_time_order_not_file_order(tmp_path):
@@ -97,7 +121,7 @@ def test_test_candidate_negative_sampling_can_use_test_only_destinations():
         Interaction(src=2, dst=30, time=30),
     ]
     index = TemporalInteractionIndex()
-    index.fit(interactions)
+    index.fit(InteractionTable.from_events(interactions))
     context = NegativeSamplingContext(
         index=index,
         dst_values=(10, 20, 30),

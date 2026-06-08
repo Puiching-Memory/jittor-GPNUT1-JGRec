@@ -1,6 +1,6 @@
 import numpy as np
 
-from jgrec.core.types import Interaction
+from jgrec.core.types import Interaction, InteractionTable
 from jgrec.idmap import NodeIdMap
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
 from jgrec.rankers.hybrid.sampling import (
@@ -12,9 +12,13 @@ from jgrec.rankers.hybrid.sampling import (
 
 
 def _context(interactions: list[Interaction]) -> NegativeSamplingContext:
+    interaction_table = InteractionTable.from_events(interactions)
     index = TemporalInteractionIndex()
-    index.fit(interactions)
-    return NegativeSamplingContext(index=index, dst_values=NodeIdMap.from_interactions(interactions).dst_values)
+    index.fit(interaction_table)
+    return NegativeSamplingContext(
+        index=index,
+        dst_values=NodeIdMap.from_interactions(interaction_table).dst_values,
+    )
 
 
 def test_mixed_negative_sampling_prefers_recent_and_structural_hard_candidates():

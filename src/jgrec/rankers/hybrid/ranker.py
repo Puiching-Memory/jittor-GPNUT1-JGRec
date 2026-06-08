@@ -8,7 +8,13 @@ from typing import Any
 import numpy as np
 
 from jgrec.core.memory import log_event, log_memory, release_memory
-from jgrec.core.types import FitContext, Interaction, TestQuery, TrainingReport
+from jgrec.core.types import (
+    FitContext,
+    InteractionTable,
+    TestQuery,
+    TestQueryArray,
+    TrainingReport,
+)
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
@@ -49,48 +55,48 @@ FEATURE_MEMMAP_FLUSH_INTERVAL = 8
 
 
 class _DisabledGraphTower:
-    def fit(self, interactions: list[Interaction], rng: np.random.Generator, verbose: bool = True, **kwargs) -> None:
+    def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool = True, **kwargs) -> None:
         return
 
-    def scores_for_queries(self, queries: list[TestQuery]) -> np.ndarray:
+    def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         return _zero_scores(queries, len(GRAPH_WINDOW_NAMES))
 
 
 class _DisabledSequenceTower:
-    def fit(self, interactions: list[Interaction], rng: np.random.Generator, verbose: bool = True, **kwargs) -> None:
+    def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool = True, **kwargs) -> None:
         return
 
-    def scores_for_queries(self, queries: list[TestQuery]) -> np.ndarray:
+    def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         return _zero_scores(queries, len(SEQUENCE_FEATURE_NAMES))
 
 
 class _DisabledTwoTower:
-    def fit(self, interactions: list[Interaction], rng: np.random.Generator, verbose: bool = True, **kwargs) -> None:
+    def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool = True, **kwargs) -> None:
         return
 
-    def scores_for_queries(self, queries: list[TestQuery]) -> np.ndarray:
+    def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         return _zero_scores(queries, len(TWO_TOWER_FEATURE_NAMES))
 
 
 class _DisabledCandidatePriorTower:
     def fit(
         self,
-        interactions: list[Interaction],
+        interactions: InteractionTable,
         test_candidate_counts=None,
     ) -> None:
         return
 
-    def features_for_queries(self, queries: list[TestQuery], stat_features: np.ndarray) -> np.ndarray:
+    def features_for_queries(self, queries: TestQueryArray | list[TestQuery], stat_features: np.ndarray) -> np.ndarray:
         return _zero_scores(queries, len(CANDIDATE_PRIOR_FEATURE_NAMES))
 
 
 class _DisabledStructureTower:
     index: Any = None
 
-    def fit(self, interactions: list[Interaction], rng: np.random.Generator, verbose: bool = True) -> None:
+    def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool = True) -> None:
         return
 
-    def features_for_queries(self, queries: list[TestQuery]) -> np.ndarray:
+    def features_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         return _zero_scores(queries, len(STRUCTURE_FEATURE_NAMES))
 
     def compact_for_future_queries(self) -> None:
@@ -142,7 +148,7 @@ class HybridFeatureEncoder:
     def feature_dim(self) -> int:
         return len(self.feature_names)
 
-    def fit(self, interactions: list[Interaction], rng: np.random.Generator, verbose: bool) -> None:
+    def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool) -> None:
         self.verbose = verbose
         self.stats.fit(interactions)
         test_counts = self.dataset_profile.test_candidate_counts if self.dataset_profile is not None else None
@@ -159,7 +165,7 @@ class HybridFeatureEncoder:
         self.graph.fit(interactions, rng=rng, verbose=verbose)
         self.sequence.fit(interactions, rng=rng, verbose=verbose)
 
-    def features_for_queries(self, queries: list[TestQuery]) -> np.ndarray:
+    def features_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, self.feature_dim), dtype=np.float32)
         start = perf_counter()
@@ -252,7 +258,7 @@ def _build_two_tower(id_map: NodeIdMap, config: TwoTowerConfig) -> Any:
     return TwoTower(id_map=id_map, config=config)
 
 
-def _zero_scores(queries: list[TestQuery], feature_count: int) -> np.ndarray:
+def _zero_scores(queries: TestQueryArray | list[TestQuery], feature_count: int) -> np.ndarray:
     if not queries:
         return np.empty((0, 0, feature_count), dtype=np.float32)
     candidate_count = len(queries[0].candidates)
@@ -273,13 +279,13 @@ class TemporalHybridRanker:
         self._fusion_hidden_dim = 64
         self.dataset_profile: DatasetProfile | None = None
 
-    def fit(self, interactions: list[Interaction], training_config: TrainingConfig) -> TrainingReport:
-        if not interactions:
+    def fit(self, interactions: InteractionTable, training_config: TrainingConfig) -> TrainingReport:
+        if len(interactions) == 0:
             raise ValueError("training interactions are empty")
 
-        interactions.sort(key=lambda item: item.time)
+        interactions = interactions.sort_by_time()
         if training_config.max_fit_events > 0 and len(interactions) > training_config.max_fit_events:
-            interactions = interactions[-training_config.max_fit_events :]
+            interactions = interactions.tail(training_config.max_fit_events)
         self.id_map = NodeIdMap.from_interactions(interactions)
         self.feature_names = (
             STAT_FEATURE_NAMES
@@ -328,7 +334,7 @@ class TemporalHybridRanker:
             and self.dataset_profile.test_min_time > self.dataset_profile.train_max_time
         )
 
-    def _apply_auto_strategy(self, interactions: list[Interaction], config: TrainingConfig) -> TrainingConfig:
+    def _apply_auto_strategy(self, interactions: InteractionTable, config: TrainingConfig) -> TrainingConfig:
         if config.dataset_test_path is None:
             return config
 
@@ -377,7 +383,7 @@ class TemporalHybridRanker:
             test_candidate_negative_ratio=ratio,
         )
 
-    def _dataset_profile(self, interactions: list[Interaction], config: TrainingConfig) -> DatasetProfile:
+    def _dataset_profile(self, interactions: InteractionTable, config: TrainingConfig) -> DatasetProfile:
         if config.dataset_test_path is None:
             raise RuntimeError("dataset test path is required for profiling")
         if config.dataset_train_path is not None:
@@ -387,7 +393,7 @@ class TemporalHybridRanker:
     def predict(self, query: TestQuery) -> np.ndarray:
         return self.predict_batch([query])[0]
 
-    def predict_batch(self, queries: list[TestQuery]) -> np.ndarray:
+    def predict_batch(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 100), dtype=np.float64)
         if self.encoder is None or self.fusion is None or self.fusion_result is None:
@@ -404,7 +410,7 @@ class TemporalHybridRanker:
 
     def _learn_fusion(
         self,
-        interactions: list[Interaction],
+        interactions: InteractionTable,
         config: TrainingConfig,
     ) -> tuple[FusionMLP, FusionResult, TrainingReport]:
         n_events = len(interactions)
@@ -423,7 +429,7 @@ class TemporalHybridRanker:
         train_events = interactions[context_end:train_end]
         val_context_events = interactions[:train_end]
         val_events = interactions[train_end:]
-        if not train_events or not val_events:
+        if len(train_events) == 0 or len(val_events) == 0:
             raise ValueError(
                 "invalid temporal split for hybrid reranker: "
                 f"context={len(context_events)}, train={len(train_events)}, val={len(val_events)}"
@@ -431,7 +437,7 @@ class TemporalHybridRanker:
 
         train_events = _sample_events(train_events, config.max_train_events, rng)
         val_events = _sample_events(val_events, config.max_val_events, rng)
-        dst_pool = np.asarray(sorted({item.dst for item in interactions}), dtype=np.int64)
+        dst_pool = np.unique(interactions.dst).astype(np.int64, copy=False)
 
         log_event(
             "[hybrid-fit] split "
@@ -559,7 +565,7 @@ class TemporalHybridRanker:
 
     def _fit_encoder(
         self,
-        interactions: list[Interaction],
+        interactions: InteractionTable,
         config: TrainingConfig,
         rng: np.random.Generator,
         verbose: bool,
@@ -582,7 +588,7 @@ class TemporalHybridRanker:
     def _timed_fit_encoder(
         self,
         label: str,
-        interactions: list[Interaction],
+        interactions: InteractionTable,
         config: TrainingConfig,
         rng: np.random.Generator,
         verbose: bool,
@@ -603,14 +609,14 @@ class TemporalHybridRanker:
 
 
 def _sample_events(
-    events: list[Interaction],
+    events: InteractionTable,
     max_events: int,
     rng: np.random.Generator,
-) -> list[Interaction]:
+) -> InteractionTable:
     if max_events <= 0 or len(events) <= max_events:
-        return list(events)
+        return events
     indices = np.sort(rng.choice(len(events), size=max_events, replace=False))
-    return [events[int(index)] for index in indices]
+    return events.take(indices)
 
 
 def _feature_masks(feature_count: int) -> list[tuple[str, tuple[int, ...]]]:
@@ -681,13 +687,13 @@ def _config_for_selected_features(config: TrainingConfig, feature_indices: tuple
 
 
 def _build_supervised_queries(
-    positives: list[Interaction],
+    positives: InteractionTable,
     encoder: HybridFeatureEncoder,
     dst_pool: np.ndarray,
     config: TrainingConfig,
     rng: np.random.Generator,
     candidate_pool=None,
-) -> list[TestQuery]:
+) -> TestQueryArray:
     test_values, test_weights = test_candidate_arrays(encoder.dataset_profile)
     index = getattr(encoder.structure, "index", None)
     if index is None:
@@ -706,8 +712,8 @@ def _build_supervised_queries(
     if candidate_pool is None:
         candidate_pool = build_candidate_pool(dst_pool, test_values)
     jobs = [
-        NegativeSamplingJob(src=event.src, positive_dst=event.dst, query_time=event.time)
-        for event in positives
+        NegativeSamplingJob(src=int(src), positive_dst=int(dst), query_time=int(time))
+        for src, dst, time in zip(positives.src, positives.dst, positives.time)
     ]
     negatives_by_event = sample_mixed_negatives_batch(
         jobs=jobs,
@@ -723,20 +729,27 @@ def _build_supervised_queries(
         verbose=config.verbose,
         label="fusion",
     )
-    return [
-        TestQuery(src=event.src, time=event.time, candidates=(event.dst, *negatives))
-        for event, negatives in zip(positives, negatives_by_event)
-    ]
+    src = np.empty(len(positives), dtype=np.int32)
+    time = np.empty(len(positives), dtype=np.int32)
+    candidates = np.empty((len(positives), int(config.num_negatives) + 1), dtype=np.int32)
+    for row_idx, (event_src, event_dst, event_time, negatives) in enumerate(
+        zip(positives.src, positives.dst, positives.time, negatives_by_event)
+    ):
+        src[row_idx] = int(event_src)
+        time[row_idx] = int(event_time)
+        candidates[row_idx, 0] = int(event_dst)
+        candidates[row_idx, 1:] = np.asarray(negatives, dtype=np.int32)
+    return TestQueryArray(src=src, time=time, candidates=candidates)
 
 
 def _build_supervised_features(
-    positives: list[Interaction],
+    positives: InteractionTable,
     encoder: HybridFeatureEncoder,
     dst_pool: np.ndarray,
     config: TrainingConfig,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    if not positives:
+    if len(positives) == 0:
         return np.empty((0, 0, encoder.feature_dim), dtype=np.float32)
 
     batch_size = max(int(config.supervised_feature_batch_size), 1)
@@ -828,7 +841,7 @@ class HybridRankerAdapter:
         self.recent_window = recent_window
         self.impl = TemporalHybridRanker(recent_window=recent_window)
 
-    def fit(self, interactions: list[Interaction], context: FitContext) -> TrainingReport:
+    def fit(self, interactions: InteractionTable, context: FitContext) -> TrainingReport:
         config = replace(
             self.config,
             seed=context.seed,
@@ -838,5 +851,5 @@ class HybridRankerAdapter:
         )
         return self.impl.fit(interactions, training_config=config)
 
-    def predict_batch(self, queries: list[TestQuery]) -> np.ndarray:
+    def predict_batch(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         return self.impl.predict_batch(queries)
