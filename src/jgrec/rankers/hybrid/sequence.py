@@ -70,8 +70,13 @@ class SequenceTower:
     def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, len(SEQUENCE_FEATURE_NAMES)), dtype=np.float32)
+        return self.scores_for_query_array(TestQueryArray.from_queries(queries))
 
-        candidate_count = len(queries[0].candidates)
+    def scores_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
+        if not queries:
+            return np.empty((0, 0, len(SEQUENCE_FEATURE_NAMES)), dtype=np.float32)
+
+        candidate_count = queries.candidate_count
         scores = np.zeros((len(queries), candidate_count, len(SEQUENCE_FEATURE_NAMES)), dtype=np.float32)
         if self.model is None:
             return scores
@@ -81,21 +86,19 @@ class SequenceTower:
         candidate_ids = np.zeros((len(queries), candidate_count), dtype=np.int32)
         candidate_valid = np.zeros((len(queries), candidate_count), dtype=bool)
         active = np.zeros(len(queries), dtype=bool)
+        src_ids = self.id_map.src_ids(queries.src)
+        dst_ids_by_row = self.id_map.dst_ids(queries.candidates)
 
-        for row_idx, query in enumerate(queries):
-            if len(query.candidates) != candidate_count:
-                raise ValueError("all queries in a batch must have the same candidate count")
-
-            src_id = self.id_map.src_id(query.src)
+        for row_idx, src_id in enumerate(src_ids):
             if src_id >= 0:
-                history = self.src_sequences.get(src_id, ())
+                history = self.src_sequences.get(int(src_id), ())
                 if history:
                     length = min(len(history), self.config.max_seq_len)
                     seqs[row_idx, :length] = history[-length:]
                     lengths[row_idx] = length
                     active[row_idx] = True
 
-            dst_ids = self.id_map.dst_ids(query.candidates)
+            dst_ids = dst_ids_by_row[row_idx]
             valid = dst_ids >= 0
             if self.seen_items is not None:
                 valid = valid & self.seen_items[dst_ids.clip(min=0) + 1]
@@ -145,7 +148,7 @@ class _GRUSequenceModel(jt.nn.Module):
         last_mask = (positions == last_index.unsqueeze(1)).float32().unsqueeze(-1)
         return (x * last_mask).sum(dim=1)
 
-    def _run_layer(self, cell: "_GRUCell", x: jt.Var, lengths: jt.Var) -> jt.Var:
+    def _run_layer(self, cell: _GRUCell, x: jt.Var, lengths: jt.Var) -> jt.Var:
         batch_size = x.shape[0]
         hidden = jt.zeros((batch_size, self.hidden_size), dtype=jt.float32)
         outputs = []

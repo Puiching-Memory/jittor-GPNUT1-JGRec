@@ -150,6 +150,63 @@ def test_future_only_structure_preaggregates_large_source_cooccurs():
     np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 
 
+def test_future_only_structure_preaggregates_large_source_common_neighbors():
+    interactions = [Interaction(src=1, dst=1000 + idx, time=idx) for idx in range(1, 310)]
+    interactions.extend(
+        Interaction(src=1000 + idx, dst=2000 + (idx % 7), time=400 + idx)
+        for idx in range(1, 310)
+    )
+    query = Query(src=1, time=1000, candidates=(2000, 2001, 2002, 9999))
+    full_tower = StructureFeatureTower()
+    future_tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
+    full_tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    future_tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+
+    expected = full_tower.features_for_queries([query])
+    actual = future_tower.features_for_queries([query])
+
+    assert 1 in future_tower._full_src_common_neighbor_cache
+    np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_structure_common_neighbor_counts_unique_neighbor_once():
+    tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
+    tower.fit(
+        [
+            Interaction(src=1, dst=10, time=10),
+            Interaction(src=10, dst=20, time=20),
+            Interaction(src=10, dst=20, time=30),
+        ],
+        rng=np.random.default_rng(0),
+        verbose=False,
+    )
+
+    features = tower.features_for_queries([Query(src=1, time=100, candidates=(20,))])[0]
+
+    assert features[0, FEATURE["common_neighbors"]] == np.float32(math.log1p(1))
+    assert features[0, FEATURE["jaccard"]] == np.float32(1.0)
+
+
+def test_full_history_dst_unique_src_counts_are_unique():
+    tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
+    tower.fit(
+        [
+            Interaction(src=1, dst=10, time=10),
+            Interaction(src=2, dst=20, time=20),
+            Interaction(src=2, dst=20, time=30),
+            Interaction(src=3, dst=20, time=40),
+        ],
+        rng=np.random.default_rng(0),
+        verbose=False,
+    )
+
+    features = tower.features_for_queries([Query(src=1, time=100, candidates=(20,))])[0]
+
+    assert tower.index.dst_unique_src_counts[20] == 2
+    assert features[0, FEATURE["dst_unique_src"]] == np.float32(math.log1p(2))
+    assert features[0, FEATURE["dst_pop_rank"]] == np.float32(1.0 / math.log1p(3))
+
+
 def test_structure_memory_switches_disable_heavy_features_only():
     tower = StructureFeatureTower(
         StructureTowerConfig(

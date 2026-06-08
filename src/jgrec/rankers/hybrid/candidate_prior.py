@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 
 import numpy as np
 
@@ -40,7 +41,14 @@ class CandidatePriorTower:
         interactions: InteractionTable,
         test_candidate_counts: Counter[int] | None = None,
     ) -> None:
-        self.train_dst = set(np.unique(interactions.dst).astype(int).tolist())
+        self.fit_from_counts(np.unique(interactions.dst).astype(int).tolist(), test_candidate_counts)
+
+    def fit_from_counts(
+        self,
+        train_dst: set[int] | list[int] | tuple[int, ...],
+        test_candidate_counts: Counter[int] | None = None,
+    ) -> None:
+        self.train_dst = {int(dst) for dst in train_dst}
         self.test_candidate_counts = Counter(test_candidate_counts or {})
         self.test_candidate_total = sum(self.test_candidate_counts.values())
         self._build_dense_features()
@@ -48,17 +56,35 @@ class CandidatePriorTower:
     def features_for_queries(self, queries: TestQueryArray | list[TestQuery], stat_features: np.ndarray) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, CANDIDATE_PRIOR_FEATURE_DIM), dtype=np.float32)
-        candidate_count = len(queries[0].candidates)
-        features = np.zeros((len(queries), candidate_count, CANDIDATE_PRIOR_FEATURE_DIM), dtype=np.float32)
+        if isinstance(queries, TestQueryArray):
+            return self.features_for_query_array(queries, stat_features)
+        return self.features_for_query_array(TestQueryArray.from_queries(queries), stat_features)
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "train_dst": set(self.train_dst),
+            "test_candidate_counts": Counter(self.test_candidate_counts),
+            "test_candidate_total": self.test_candidate_total,
+            "train_seen_dense": self.train_seen_dense,
+            "test_freq_dense": self.test_freq_dense,
+        }
+
+    def hydrate(self, snapshot: dict[str, Any]) -> None:
+        self.train_dst = set(snapshot["train_dst"])
+        self.test_candidate_counts = Counter(snapshot["test_candidate_counts"])
+        self.test_candidate_total = int(snapshot["test_candidate_total"])
+        self.train_seen_dense = snapshot["train_seen_dense"]
+        self.test_freq_dense = snapshot["test_freq_dense"]
+
+    def features_for_query_array(self, queries: TestQueryArray, stat_features: np.ndarray) -> np.ndarray:
+        if not queries:
+            return np.empty((0, 0, CANDIDATE_PRIOR_FEATURE_DIM), dtype=np.float32)
+        features = np.zeros((len(queries), queries.candidate_count, CANDIDATE_PRIOR_FEATURE_DIM), dtype=np.float32)
         if not self.config.enabled:
             return features
 
         denominator = max(float(self.test_candidate_total), 1.0)
-        candidate_ids = np.empty((len(queries), candidate_count), dtype=np.int64)
-        for row_idx, query in enumerate(queries):
-            if len(query.candidates) != candidate_count:
-                raise ValueError("all queries in a batch must have the same candidate count")
-            candidate_ids[row_idx] = query.candidates
+        candidate_ids = queries.candidates.astype(np.int64, copy=False)
 
         seen, test_freq = self._lookup_candidate_features(candidate_ids, denominator)
         features[:, :, 0] = seen.astype(np.float32, copy=False)
@@ -77,7 +103,6 @@ class CandidatePriorTower:
         values.extend(int(value) for value in self.test_candidate_counts)
         if values:
             max_id = max(values)
-            min_id = min(values)
         if min(values, default=0) < 0 or max_id < 0 or max_id > DENSE_NODE_LIMIT:
             return
 

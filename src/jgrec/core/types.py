@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
+
+INTERACTION_SRC = 0
+INTERACTION_DST = 1
+INTERACTION_TIME = 2
+InteractionArray = np.ndarray
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +104,8 @@ class InteractionTable:
 
 @dataclass(frozen=True, slots=True)
 class TestQuery:
+    __test__: ClassVar[bool] = False
+
     src: int
     time: int
     candidates: tuple[int, ...]
@@ -105,6 +113,8 @@ class TestQuery:
 
 @dataclass(frozen=True, slots=True)
 class TestQueryArray:
+    __test__: ClassVar[bool] = False
+
     src: np.ndarray
     time: np.ndarray
     candidates: np.ndarray
@@ -113,41 +123,63 @@ class TestQueryArray:
         src = np.asarray(self.src, dtype=np.int32)
         time = np.asarray(self.time, dtype=np.int32)
         candidates = np.asarray(self.candidates, dtype=np.int32)
-        if candidates.ndim != 2:
-            raise ValueError("candidates must be a 2D array")
-        if src.ndim != 1 or time.ndim != 1:
-            raise ValueError("src and time must be 1D arrays")
-        if src.shape[0] != time.shape[0] or src.shape[0] != candidates.shape[0]:
-            raise ValueError("src, time, and candidates must have the same row count")
+        if candidates.ndim == 1:
+            candidates = candidates.reshape((1, -1)) if candidates.size else candidates.reshape((0, 0))
+        if src.ndim != 1 or time.ndim != 1 or candidates.ndim != 2:
+            raise ValueError("TestQueryArray expects src/time vectors and a candidate matrix")
+        if len(src) != len(time) or len(src) != candidates.shape[0]:
+            raise ValueError("TestQueryArray row counts do not match")
         object.__setattr__(self, "src", src)
         object.__setattr__(self, "time", time)
         object.__setattr__(self, "candidates", candidates)
 
-    def __len__(self) -> int:
-        return int(self.src.shape[0])
-
-    def __iter__(self):
-        for idx in range(len(self)):
-            yield self[idx]
-
-    def __getitem__(self, item):
-        if isinstance(item, (int, np.integer)):
-            idx = int(item)
-            return TestQuery(
-                src=int(self.src[idx]),
-                time=int(self.time[idx]),
-                candidates=tuple(int(value) for value in self.candidates[idx]),
+    @classmethod
+    def from_queries(cls, queries: list[TestQuery] | tuple[TestQuery, ...]) -> TestQueryArray:
+        if not queries:
+            return cls(
+                src=np.empty(0, dtype=np.int32),
+                time=np.empty(0, dtype=np.int32),
+                candidates=np.empty((0, 0), dtype=np.int32),
             )
-        return TestQueryArray(
-            src=self.src[item],
-            time=self.time[item],
-            candidates=self.candidates[item],
-        )
+        candidate_count = len(queries[0].candidates)
+        candidates = np.empty((len(queries), candidate_count), dtype=np.int32)
+        src = np.empty(len(queries), dtype=np.int32)
+        time = np.empty(len(queries), dtype=np.int32)
+        for row_idx, query in enumerate(queries):
+            if len(query.candidates) != candidate_count:
+                raise ValueError("all queries in a batch must have the same candidate count")
+            src[row_idx] = int(query.src)
+            time[row_idx] = int(query.time)
+            candidates[row_idx] = np.asarray(query.candidates, dtype=np.int32)
+        return cls(src=src, time=time, candidates=candidates)
 
     @property
     def candidate_count(self) -> int:
         return int(self.candidates.shape[1]) if self.candidates.ndim == 2 else 0
 
+    def __len__(self) -> int:
+        return int(self.src.shape[0])
+
+    def __bool__(self) -> bool:
+        return len(self) > 0
+
+    def __iter__(self):
+        for idx in range(len(self)):
+            yield self[idx]
+
+    def __getitem__(self, index):
+        if isinstance(index, (int, np.integer)):
+            row = int(index)
+            return TestQuery(
+                src=int(self.src[row]),
+                time=int(self.time[row]),
+                candidates=tuple(int(candidate) for candidate in self.candidates[row]),
+            )
+        return TestQueryArray(
+            src=self.src[index],
+            time=self.time[index],
+            candidates=self.candidates[index],
+        )
 
 @dataclass(frozen=True, slots=True)
 class DatasetPaths:

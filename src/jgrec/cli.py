@@ -6,7 +6,6 @@ from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Literal
 
-import tyro
 from rich.panel import Panel
 from rich.table import Table
 
@@ -92,6 +91,7 @@ class CLIConfig:
     quiet_ranker: bool = False
     cpu: bool = False
     skip_validate: bool = False
+    encoder_state_cache: bool = True
     auto_strategy: bool = True
     disable_candidate_prior: bool = False
     test_candidate_negative_ratio: float = 0.0
@@ -102,6 +102,8 @@ class CLIConfig:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import tyro
+
     args = tyro.cli(CLIConfig, args=argv)
     import jittor as jt
 
@@ -194,6 +196,7 @@ def _ranker_config(args: CLIConfig):
         early_stop_patience=args.early_stop,
         seed=args.seed,
         verbose=not args.quiet_ranker,
+        encoder_state_cache_enabled=args.encoder_state_cache,
         auto_strategy_enabled=args.auto_strategy,
         candidate_prior_enabled=not args.disable_candidate_prior,
         test_candidate_negative_ratio=args.test_candidate_negative_ratio,
@@ -258,12 +261,15 @@ def _build_run_name(args: CLIConfig, config) -> str:
 
 def _config_digest(args: CLIConfig, config) -> str:
     cli_payload = _jsonable(args)
-    for operational_key in ("dataset", "run_name", "resume_existing"):
+    for operational_key in ("dataset", "run_name", "resume_existing", "encoder_state_cache"):
         if isinstance(cli_payload, dict):
             cli_payload.pop(operational_key, None)
+    ranker_payload = _jsonable(config)
+    if isinstance(ranker_payload, dict):
+        ranker_payload.pop("encoder_state_cache_enabled", None)
     payload = {
         "cli": cli_payload,
-        "ranker": _jsonable(config),
+        "ranker": ranker_payload,
     }
     encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return hashlib.blake2s(encoded, digest_size=4).hexdigest()
@@ -300,6 +306,7 @@ def _run_panel(run_dir: Path, zip_path: Path, args: CLIConfig, config) -> Panel:
         table.add_row("gnn", config.gnn_model if config.gnn_enabled else "off")
         table.add_row("gnn_edge_weighting", config.gnn_edge_weighting if config.gnn_enabled else "off")
         table.add_row("auto_strategy", "on" if config.auto_strategy_enabled else "off")
+        table.add_row("encoder_cache", "on" if config.encoder_state_cache_enabled else "off")
         table.add_row("candidate_prior", "on" if config.candidate_prior_enabled else "off")
         table.add_row("auto_mode", config.auto_mode if config.auto_mode != "manual" else "pending")
         table.add_row("candidate_unseen_dst_rate", f"{config.profile_candidate_unseen_dst_rate:.5f}")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
@@ -46,6 +47,7 @@ class TemporalInteractionIndex:
         self.src_dsts: dict[int, np.ndarray] = {}
         self.dst_times: dict[int, np.ndarray] = {}
         self.dst_srcs: dict[int, np.ndarray] = {}
+        self.dst_unique_src_counts: dict[int, int] = {}
         self.pair_times: dict[tuple[int, int], np.ndarray] = {}
         self.transition_times: dict[tuple[int, int], np.ndarray] = {}
         self.transitions_by_left: dict[int, tuple[tuple[int, np.ndarray], ...]] = {}
@@ -99,10 +101,47 @@ class TemporalInteractionIndex:
             dst_srcs[dst_int].append(src_int)
             pair_times[(src_int, dst_int)].append(time_int)
 
+        self.fit_grouped(
+            src_times=src_times,
+            src_dsts=src_dsts,
+            dst_times=dst_times,
+            dst_srcs=dst_srcs,
+            pair_times=pair_times,
+            max_time=int(interactions.time[-1]),
+            total_edges=len(interactions),
+            build_transitions=build_transitions,
+            build_cooccurs=build_cooccurs,
+            cooccur_history_limit=cooccur_history_limit,
+            future_only_transition_cooccur=future_only_transition_cooccur,
+        )
+
+    def fit_grouped(
+        self,
+        *,
+        src_times: Mapping[int, list[int]],
+        src_dsts: Mapping[int, list[int]],
+        dst_times: Mapping[int, list[int]],
+        dst_srcs: Mapping[int, list[int]],
+        pair_times: Mapping[tuple[int, int], list[int]],
+        max_time: int,
+        total_edges: int,
+        build_transitions: bool = True,
+        build_cooccurs: bool = True,
+        cooccur_history_limit: int = DEFAULT_COOCCUR_HISTORY_LIMIT,
+        future_only_transition_cooccur: bool = False,
+    ) -> None:
+        if total_edges <= 0:
+            raise ValueError("training interactions are empty")
+        self.max_time = int(max_time)
+        self.total_edges = int(total_edges)
+        self.built_transitions = bool(build_transitions)
+        self.built_cooccurs = bool(build_cooccurs)
+        self.cooccur_history_limit = int(cooccur_history_limit)
         self.src_times = {src: _compact_int_array(times) for src, times in src_times.items()}
         self.src_dsts = {src: _compact_int_array(dsts) for src, dsts in src_dsts.items()}
         self.dst_times = {dst: _compact_int_array(times) for dst, times in dst_times.items()}
         self.dst_srcs = {dst: _compact_int_array(srcs) for dst, srcs in dst_srcs.items()}
+        self.dst_unique_src_counts = {int(dst): len(set(int(src) for src in srcs)) for dst, srcs in dst_srcs.items()}
         self.pair_times = {pair: _compact_int_array(times) for pair, times in pair_times.items()}
         if future_only_transition_cooccur:
             self.transition_times = {}
@@ -245,6 +284,28 @@ class TemporalInteractionIndex:
         self.cooccurs_by_left = {}
         self.future_only = True
 
+    def shallow_copy(self) -> TemporalInteractionIndex:
+        clone = TemporalInteractionIndex()
+        clone.__dict__.update(self.__dict__)
+        clone.src_times = dict(self.src_times)
+        clone.src_dsts = dict(self.src_dsts)
+        clone.dst_times = dict(self.dst_times)
+        clone.dst_srcs = dict(self.dst_srcs)
+        clone.dst_unique_src_counts = dict(self.dst_unique_src_counts)
+        clone.pair_times = dict(self.pair_times)
+        clone.transition_times = dict(self.transition_times)
+        clone.transitions_by_left = dict(self.transitions_by_left)
+        clone.cooccur_times = dict(self.cooccur_times)
+        clone.cooccurs_by_left = dict(self.cooccurs_by_left)
+        clone.transition_counts_by_pair = dict(self.transition_counts_by_pair)
+        clone.cooccur_counts_by_pair = dict(self.cooccur_counts_by_pair)
+        clone.future_transition_count_maps = _copy_nested_counts(self.future_transition_count_maps)
+        clone.future_cooccur_count_maps = _copy_nested_counts(self.future_cooccur_count_maps)
+        clone.future_transitions_by_left = dict(self.future_transitions_by_left)
+        clone.future_cooccurs_by_left = dict(self.future_cooccurs_by_left)
+        clone.popular_dsts = tuple(self.popular_dsts)
+        return clone
+
 
 def _cutoff(times: np.ndarray, query_time: int) -> int:
     return int(np.searchsorted(times, query_time, side="left"))
@@ -291,6 +352,10 @@ def _count_maps_from_time_pairs(times_by_pair: dict[tuple[int, int], np.ndarray]
     for (left, right), times in times_by_pair.items():
         counts_by_left[int(left)][int(right)] = int(len(times))
     return {left: dict(counts) for left, counts in counts_by_left.items()}
+
+
+def _copy_nested_counts(values: dict[int, dict[int, int]]) -> dict[int, dict[int, int]]:
+    return {int(left): dict(counts) for left, counts in values.items()}
 
 
 def _cooccur_times(

@@ -97,6 +97,7 @@ class TrainingConfig:
     early_stop_patience: int = 10
     seed: int = 42
     verbose: bool = True
+    encoder_state_cache_enabled: bool = True
     auto_strategy_enabled: bool = True
     candidate_prior_enabled: bool = True
     test_candidate_negative_ratio: float = 0.0

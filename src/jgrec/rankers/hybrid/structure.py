@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections import OrderedDict
+from typing import Any
 
 import numpy as np
 
@@ -25,6 +26,7 @@ STRUCTURE_FEATURE_NAMES = (
 )
 STRUCTURE_FEATURE_DIM = len(STRUCTURE_FEATURE_NAMES)
 FULL_HISTORY_CACHE_LIMIT = 2048
+FULL_COMMON_NEIGHBOR_CACHE_LIMIT = 2048
 FULL_COOCCUR_CACHE_LIMIT = 4096
 FULL_COOCCUR_PREAGGREGATE_NEIGHBOR_THRESHOLD = 256
 
@@ -39,6 +41,7 @@ class StructureFeatureTower:
         self.decay_windows: tuple[float, float, float] = (1.0, 1.0, 1.0)
         self._full_src_neighbor_cache: OrderedDict[int, set[int]] = OrderedDict()
         self._full_dst_source_cache: OrderedDict[int, set[int]] = OrderedDict()
+        self._full_src_common_neighbor_cache: OrderedDict[int, dict[int, int]] = OrderedDict()
         self._full_src_cooccur_cache: OrderedDict[int, dict[int, int]] = OrderedDict()
 
     @property
@@ -66,27 +69,54 @@ class StructureFeatureTower:
         )
         self._full_src_neighbor_cache.clear()
         self._full_dst_source_cache.clear()
+        self._full_src_common_neighbor_cache.clear()
         self._full_src_cooccur_cache.clear()
 
     def compact_for_future_queries(self) -> None:
         self.index.compact_for_future_queries()
         self._full_src_neighbor_cache.clear()
         self._full_dst_source_cache.clear()
+        self._full_src_common_neighbor_cache.clear()
         self._full_src_cooccur_cache.clear()
 
     def compact_transition_cooccur_for_future_queries(self) -> None:
         self.index.compact_transition_cooccur_for_future_queries()
+        self._full_src_neighbor_cache.clear()
+        self._full_dst_source_cache.clear()
+        self._full_src_common_neighbor_cache.clear()
+        self._full_src_cooccur_cache.clear()
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "index": self.index.shallow_copy(),
+            "min_time": self.min_time,
+            "max_time": self.max_time,
+            "graph_span": self.graph_span,
+            "decay_windows": self.decay_windows,
+        }
+
+    def hydrate(self, snapshot: dict[str, Any]) -> None:
+        self.index = snapshot["index"].shallow_copy()
+        self.min_time = int(snapshot["min_time"])
+        self.max_time = int(snapshot["max_time"])
+        self.graph_span = int(snapshot["graph_span"])
+        self.decay_windows = tuple(float(value) for value in snapshot["decay_windows"])
+        self._full_src_neighbor_cache.clear()
+        self._full_dst_source_cache.clear()
+        self._full_src_common_neighbor_cache.clear()
         self._full_src_cooccur_cache.clear()
 
     def features_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, STRUCTURE_FEATURE_DIM), dtype=np.float32)
+        return self.features_for_query_array(TestQueryArray.from_queries(queries))
 
-        candidate_count = len(queries[0].candidates)
-        features = np.zeros((len(queries), candidate_count, STRUCTURE_FEATURE_DIM), dtype=np.float32)
+    def features_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
+        if not queries:
+            return np.empty((0, 0, STRUCTURE_FEATURE_DIM), dtype=np.float32)
+
+        features = np.zeros((len(queries), queries.candidate_count, STRUCTURE_FEATURE_DIM), dtype=np.float32)
         for row_idx, query in enumerate(queries):
-            if len(query.candidates) != candidate_count:
-                raise ValueError("all queries in a batch must have the same candidate count")
             self._fill_query_features(query, features[row_idx])
         return features
 
@@ -143,10 +173,16 @@ class StructureFeatureTower:
         src_dsts = self.index.src_dsts.get(query.src)
         last_visible_dst = int(src_dsts[-1]) if src_dsts is not None and src_dsts.size else None
         candidate_ids = tuple(int(dst) for dst in query.candidates)
+        common_counts = self._full_src_common_neighbors(query.src, src_neighbors) if src_neighbor_count else {}
         cooccur_counts = (
             self._full_cooccur_counts(query.src, src_neighbors, candidate_ids)
             if self.config.cooccur_enabled
             else np.zeros(len(candidate_ids), dtype=np.int32)
+        )
+        transition_counts = (
+            self.index.future_transition_count_maps.get(last_visible_dst, {})
+            if self.index.future_only and self.config.transition_enabled and last_visible_dst is not None
+            else None
         )
 
         for idx, dst_int in enumerate(candidate_ids):
@@ -156,8 +192,7 @@ class StructureFeatureTower:
                 for feature_idx, window in enumerate(self.decay_windows):
                     output[idx, feature_idx] = float(np.exp(-deltas / window).sum())
 
-            dst_sources = self._full_dst_sources(dst_int)
-            dst_source_count = len(dst_sources)
+            dst_source_count = self.index.dst_unique_src_counts.get(dst_int, 0)
             if dst_source_count:
                 output[idx, 3] = math.log1p(dst_source_count)
                 output[idx, 4] = 1.0 / math.log1p(dst_source_count + 1)
@@ -169,7 +204,7 @@ class StructureFeatureTower:
                 output[idx, 6] = math.exp(-max(query.time - reverse_last_time, 0) / self.graph_span)
 
             if src_neighbor_count and dst_source_count:
-                common = len(src_neighbors & dst_sources)
+                common = common_counts.get(dst_int, 0)
                 union = src_neighbor_count + dst_source_count - common
                 output[idx, 7] = math.log1p(common)
                 output[idx, 8] = common / max(union, 1)
@@ -180,7 +215,11 @@ class StructureFeatureTower:
                     output[idx, 9] = math.log1p(cooccur)
 
             if self.config.transition_enabled and last_visible_dst is not None:
-                transition = self.index.transition_count(last_visible_dst, dst_int, query.time)
+                transition = (
+                    transition_counts.get(dst_int, 0)
+                    if transition_counts is not None
+                    else self.index.transition_count(last_visible_dst, dst_int, query.time)
+                )
                 if transition:
                     output[idx, 10] = math.log1p(transition)
 
@@ -205,6 +244,23 @@ class StructureFeatureTower:
         sources = set(int(src) for src in srcs) if srcs is not None else set()
         self._cache_put(self._full_dst_source_cache, dst, sources, FULL_HISTORY_CACHE_LIMIT)
         return sources
+
+    def _full_src_common_neighbors(self, src: int, src_neighbors: set[int]) -> dict[int, int]:
+        cached = self._full_src_common_neighbor_cache.get(src)
+        if cached is not None:
+            self._full_src_common_neighbor_cache.move_to_end(src)
+            return cached
+
+        counts: dict[int, int] = {}
+        for neighbor_src in src_neighbors:
+            neighbor_dsts = self.index.src_dsts.get(neighbor_src)
+            if neighbor_dsts is None or not neighbor_dsts.size:
+                continue
+            for candidate in self._full_src_neighbors(neighbor_src):
+                candidate_int = int(candidate)
+                counts[candidate_int] = counts.get(candidate_int, 0) + 1
+        self._cache_put(self._full_src_common_neighbor_cache, src, counts, FULL_COMMON_NEIGHBOR_CACHE_LIMIT)
+        return counts
 
     def _full_cooccur_counts(
         self,

@@ -180,13 +180,17 @@ class TwoTower:
     def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, len(TWO_TOWER_FEATURE_NAMES)), dtype=np.float32)
+        return self.scores_for_query_array(TestQueryArray.from_queries(queries))
 
-        candidate_count = len(queries[0].candidates)
-        scores = np.zeros((len(queries), candidate_count, len(TWO_TOWER_FEATURE_NAMES)), dtype=np.float32)
+    def scores_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
+        if not queries:
+            return np.empty((0, 0, len(TWO_TOWER_FEATURE_NAMES)), dtype=np.float32)
+
+        scores = np.zeros((len(queries), queries.candidate_count, len(TWO_TOWER_FEATURE_NAMES)), dtype=np.float32)
         if self.model is None:
             return scores
 
-        batch = self._batch_for_queries(queries)
+        batch = self._batch_for_query_array(queries)
         valid_src = batch.src_ids < self.id_map.num_src
         valid_dst = batch.dst_ids < self.id_map.num_dst
         with jt.no_grad():
@@ -219,8 +223,11 @@ class TwoTower:
         scores[:, :, 1][~valid_dst] = 0.0
         return scores
 
-    def _batch_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> _TowerBatch:
-        candidate_count = len(queries[0].candidates)
+    def _batch_for_queries(self, queries: list[TestQuery]) -> _TowerBatch:
+        return self._batch_for_query_array(TestQueryArray.from_queries(queries))
+
+    def _batch_for_query_array(self, queries: TestQueryArray) -> _TowerBatch:
+        candidate_count = queries.candidate_count
         src_ids = np.empty(len(queries), dtype=np.int32)
         src_activity = np.empty(len(queries), dtype=np.int32)
         src_recency = np.empty(len(queries), dtype=np.int32)
@@ -230,25 +237,25 @@ class TwoTower:
         dst_recency = np.empty((len(queries), candidate_count), dtype=np.int32)
         dst_time = np.empty((len(queries), candidate_count), dtype=np.int32)
 
-        for row_idx, query in enumerate(queries):
-            if len(query.candidates) != candidate_count:
-                raise ValueError("all queries in a batch must have the same candidate count")
-            source_view = self.index.source_view(query.src, query.time)
-            src_ids[row_idx] = _src_model_id(self.id_map, query.src)
+        for row_idx in range(len(queries)):
+            src = int(queries.src[row_idx])
+            query_time = int(queries.time[row_idx])
+            source_view = self.index.source_view(src, query_time)
+            src_ids[row_idx] = _src_model_id(self.id_map, src)
             src_activity[row_idx] = _count_bucket(source_view.cutoff)
-            src_recency[row_idx] = _history_recency_bucket(source_view.visible_times, query.time, self.graph_span)
-            time_bucket = _time_bucket(query.time, self.min_time, self.graph_span)
+            src_recency[row_idx] = _history_recency_bucket(source_view.visible_times, query_time, self.graph_span)
+            time_bucket = _time_bucket(query_time, self.min_time, self.graph_span)
             src_time[row_idx] = time_bucket
             dst_time[row_idx, :] = time_bucket
 
-            for col_idx, dst in enumerate(query.candidates):
+            for col_idx, dst in enumerate(queries.candidates[row_idx]):
                 dst_int = int(dst)
-                destination_view = self.index.destination_view(dst_int, query.time)
+                destination_view = self.index.destination_view(dst_int, query_time)
                 dst_ids[row_idx, col_idx] = _dst_model_id(self.id_map, dst_int)
                 dst_popularity[row_idx, col_idx] = _count_bucket(destination_view.cutoff)
                 dst_recency[row_idx, col_idx] = _history_recency_bucket(
                     destination_view.visible_times,
-                    query.time,
+                    query_time,
                     self.graph_span,
                 )
 

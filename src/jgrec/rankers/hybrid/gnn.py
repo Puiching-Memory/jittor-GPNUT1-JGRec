@@ -55,26 +55,34 @@ class GraphTower:
     def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, len(GRAPH_WINDOW_NAMES)), dtype=np.float32)
+        return self.scores_for_query_array(TestQueryArray.from_queries(queries))
 
-        candidate_count = len(queries[0].candidates)
-        scores = np.zeros((len(queries), candidate_count, len(GRAPH_WINDOW_NAMES)), dtype=np.float32)
+    def scores_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
+        if not queries:
+            return np.empty((0, 0, len(GRAPH_WINDOW_NAMES)), dtype=np.float32)
+
+        scores = np.zeros((len(queries), queries.candidate_count, len(GRAPH_WINDOW_NAMES)), dtype=np.float32)
+        src_ids = self.id_map.src_ids(queries.src)
+        dst_ids = self.id_map.dst_ids(queries.candidates)
         for feature_idx, name in enumerate(GRAPH_WINDOW_NAMES):
             user_emb = self.user_embeddings.get(name)
             item_emb = self.item_embeddings.get(name)
             if user_emb is None or item_emb is None:
                 continue
 
-            for row_idx, query in enumerate(queries):
-                src_id = self.id_map.src_id(query.src)
-                seen_user = self.seen_users.get(name)
-                seen_item = self.seen_items.get(name)
-                if src_id < 0 or seen_user is None or seen_item is None or not seen_user[src_id]:
+            seen_user = self.seen_users.get(name)
+            seen_item = self.seen_items.get(name)
+            if seen_user is None or seen_item is None:
+                continue
+            valid_src = (src_ids >= 0) & seen_user[src_ids.clip(min=0)]
+            valid_dst = (dst_ids >= 0) & seen_item[dst_ids.clip(min=0)]
+            for row_idx, src_id in enumerate(src_ids):
+                if not valid_src[row_idx]:
                     continue
-                dst_ids = self.id_map.dst_ids(query.candidates)
-                valid = (dst_ids >= 0) & seen_item[dst_ids.clip(min=0)]
+                valid = valid_dst[row_idx]
                 if not np.any(valid):
                     continue
-                scores[row_idx, valid, feature_idx] = item_emb[dst_ids[valid]] @ user_emb[src_id]
+                scores[row_idx, valid, feature_idx] = item_emb[dst_ids[row_idx, valid]] @ user_emb[int(src_id)]
         return scores
 
     def _fit_one_window(

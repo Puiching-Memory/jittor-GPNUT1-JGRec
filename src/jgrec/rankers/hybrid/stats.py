@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -138,16 +139,60 @@ class TemporalStats:
     def features_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, STAT_FEATURE_DIM), dtype=np.float32)
+        if isinstance(queries, TestQueryArray):
+            return self.features_for_query_array(queries)
+        return self.features_for_query_array(TestQueryArray.from_queries(queries))
 
-        candidate_count = len(queries[0].candidates)
-        features = np.empty((len(queries), candidate_count, STAT_FEATURE_DIM), dtype=np.float32)
-        candidate_ids = np.empty((len(queries), candidate_count), dtype=np.int64)
-        query_times = np.empty(len(queries), dtype=np.int64)
-        for row_idx, query in enumerate(queries):
-            if len(query.candidates) != candidate_count:
-                raise ValueError("all queries in a batch must have the same candidate count")
-            candidate_ids[row_idx] = query.candidates
-            query_times[row_idx] = query.time
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "recent_window": self.recent_window,
+            "src_histories": {int(src): _copy_history(history) for src, history in self.src_histories.items()},
+            "src_event_times": dict(self.src_event_times),
+            "src_event_dsts": dict(self.src_event_dsts),
+            "dst_event_times": dict(self.dst_event_times),
+            "pair_event_times": dict(self.pair_event_times),
+            "dst_counts": Counter(self.dst_counts),
+            "dst_recent_time": dict(self.dst_recent_time),
+            "dst_popularity": dict(self.dst_popularity),
+            "dst_popularity_dense": self.dst_popularity_dense,
+            "dst_recent_time_dense": self.dst_recent_time_dense,
+            "event_times": self.event_times,
+            "total_edges": self.total_edges,
+            "min_time": self.min_time,
+            "max_time": self.max_time,
+            "graph_span": self.graph_span,
+            "log_total_edges": self.log_total_edges,
+        }
+
+    def hydrate(self, snapshot: dict[str, Any]) -> None:
+        self.recent_window = int(snapshot["recent_window"])
+        self.src_histories = {
+            int(src): _copy_history(history)
+            for src, history in snapshot["src_histories"].items()
+        }
+        self.src_event_times = dict(snapshot["src_event_times"])
+        self.src_event_dsts = dict(snapshot["src_event_dsts"])
+        self.dst_event_times = dict(snapshot["dst_event_times"])
+        self.pair_event_times = dict(snapshot["pair_event_times"])
+        self.dst_counts = Counter(snapshot["dst_counts"])
+        self.dst_recent_time = dict(snapshot["dst_recent_time"])
+        self.dst_popularity = dict(snapshot["dst_popularity"])
+        self.dst_popularity_dense = snapshot["dst_popularity_dense"]
+        self.dst_recent_time_dense = snapshot["dst_recent_time_dense"]
+        self.event_times = snapshot["event_times"]
+        self.total_edges = int(snapshot["total_edges"])
+        self.min_time = int(snapshot["min_time"])
+        self.max_time = int(snapshot["max_time"])
+        self.graph_span = int(snapshot["graph_span"])
+        self.log_total_edges = float(snapshot["log_total_edges"])
+
+    def features_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
+        if not queries:
+            return np.empty((0, 0, STAT_FEATURE_DIM), dtype=np.float32)
+
+        candidate_ids = queries.candidates.astype(np.int64, copy=False)
+        query_times = queries.time.astype(np.int64, copy=False)
+        features = np.empty((len(queries), queries.candidate_count, STAT_FEATURE_DIM), dtype=np.float32)
         if np.all(query_times > self.max_time):
             for row_idx, query in enumerate(queries):
                 self.fill_features(query, features[row_idx], candidate_ids=candidate_ids[row_idx], fill_dst=False)
@@ -390,3 +435,14 @@ def _compact_int_array(values: list[int]) -> np.ndarray:
     int32 = np.iinfo(np.int32)
     dtype = np.int32 if int32.min <= min_value <= max_value <= int32.max else np.int64
     return np.asarray(values, dtype=dtype)
+
+
+def _copy_history(source: SrcHistory) -> SrcHistory:
+    history = SrcHistory(recent_dsts=deque(source.recent_dsts, maxlen=source.recent_dsts.maxlen))
+    history.total = int(source.total)
+    history.last_time = int(source.last_time)
+    history.activity = float(source.activity)
+    history.dst_counts = Counter(source.dst_counts)
+    history.pair_recent_time = dict(source.pair_recent_time)
+    history.recent_ranks = dict(source.recent_ranks)
+    return history

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 import tempfile
 from dataclasses import replace
 from time import perf_counter
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -38,7 +39,7 @@ from .config import (
     TrainingConfig,
     TwoTowerConfig,
 )
-from .fusion import FusionMLP, FusionResult, fit_fusion_mlp, fit_fusion_mlp_streaming, predict_logits
+from .encoder_cache import HybridDeterministicSnapshot, HybridPrefixStateCache, hydrate_deterministic_state
 from .sampling import (
     NegativeSamplingContext,
     NegativeSamplingJob,
@@ -48,6 +49,9 @@ from .sampling import (
 )
 from .stats import STAT_FEATURE_NAMES, TemporalStats
 from .structure import STRUCTURE_FEATURE_NAMES, StructureFeatureTower
+
+if TYPE_CHECKING:
+    from .fusion import FusionMLP, FusionResult
 
 _FEATURE_MEMMAP_TEMP_FILES: list[Any] = []
 FEATURE_PROFILE_INTERVAL = 10_000
@@ -61,6 +65,9 @@ class _DisabledGraphTower:
     def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         return _zero_scores(queries, len(GRAPH_WINDOW_NAMES))
 
+    def scores_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
+        return _zero_scores_for_array(queries, len(GRAPH_WINDOW_NAMES))
+
 
 class _DisabledSequenceTower:
     def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool = True, **kwargs) -> None:
@@ -69,6 +76,9 @@ class _DisabledSequenceTower:
     def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         return _zero_scores(queries, len(SEQUENCE_FEATURE_NAMES))
 
+    def scores_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
+        return _zero_scores_for_array(queries, len(SEQUENCE_FEATURE_NAMES))
+
 
 class _DisabledTwoTower:
     def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool = True, **kwargs) -> None:
@@ -76,6 +86,9 @@ class _DisabledTwoTower:
 
     def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         return _zero_scores(queries, len(TWO_TOWER_FEATURE_NAMES))
+
+    def scores_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
+        return _zero_scores_for_array(queries, len(TWO_TOWER_FEATURE_NAMES))
 
 
 class _DisabledCandidatePriorTower:
@@ -89,6 +102,9 @@ class _DisabledCandidatePriorTower:
     def features_for_queries(self, queries: TestQueryArray | list[TestQuery], stat_features: np.ndarray) -> np.ndarray:
         return _zero_scores(queries, len(CANDIDATE_PRIOR_FEATURE_NAMES))
 
+    def features_for_query_array(self, queries: TestQueryArray, stat_features: np.ndarray) -> np.ndarray:
+        return _zero_scores_for_array(queries, len(CANDIDATE_PRIOR_FEATURE_NAMES))
+
 
 class _DisabledStructureTower:
     index: Any = None
@@ -98,6 +114,9 @@ class _DisabledStructureTower:
 
     def features_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         return _zero_scores(queries, len(STRUCTURE_FEATURE_NAMES))
+
+    def features_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
+        return _zero_scores_for_array(queries, len(STRUCTURE_FEATURE_NAMES))
 
     def compact_for_future_queries(self) -> None:
         return
@@ -148,13 +167,40 @@ class HybridFeatureEncoder:
     def feature_dim(self) -> int:
         return len(self.feature_names)
 
-    def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool) -> None:
+    def fit(
+        self,
+        interactions: InteractionTable,
+        rng: np.random.Generator,
+        verbose: bool,
+        deterministic_snapshot: HybridDeterministicSnapshot | None = None,
+    ) -> None:
         self.verbose = verbose
-        self.stats.fit(interactions)
-        test_counts = self.dataset_profile.test_candidate_counts if self.dataset_profile is not None else None
-        self.candidate_prior.fit(interactions, test_counts)
-        self.structure.fit(interactions, rng=rng, verbose=verbose)
+        start_total = perf_counter()
+        elapsed: dict[str, float] = {}
+        if deterministic_snapshot is not None:
+            start = perf_counter()
+            hydrate_deterministic_state(
+                snapshot=deterministic_snapshot,
+                stats=self.stats,
+                candidate_prior=self.candidate_prior,
+                structure=self.structure,
+            )
+            elapsed["deterministic"] = perf_counter() - start
+            cache_status = "hit"
+        else:
+            start = perf_counter()
+            self.stats.fit(interactions)
+            elapsed["stats"] = perf_counter() - start
+            start = perf_counter()
+            test_counts = self.dataset_profile.test_candidate_counts if self.dataset_profile is not None else None
+            self.candidate_prior.fit(interactions, test_counts)
+            elapsed["prior"] = perf_counter() - start
+            start = perf_counter()
+            self.structure.fit(interactions, rng=rng, verbose=verbose)
+            elapsed["structure"] = perf_counter() - start
+            cache_status = "build"
         two_tower_fit = getattr(self.two_tower, "fit", None)
+        start = perf_counter()
         if callable(two_tower_fit):
             two_tower_fit(
                 interactions,
@@ -162,29 +208,44 @@ class HybridFeatureEncoder:
                 verbose=verbose,
                 shared_index=getattr(self.structure, "index", None),
             )
+        elapsed["tower"] = perf_counter() - start
+        start = perf_counter()
         self.graph.fit(interactions, rng=rng, verbose=verbose)
+        elapsed["graph"] = perf_counter() - start
+        start = perf_counter()
         self.sequence.fit(interactions, rng=rng, verbose=verbose)
+        elapsed["sequence"] = perf_counter() - start
+        total = perf_counter() - start_total
+        pieces = " ".join(f"{name}={seconds:.1f}s" for name, seconds in elapsed.items())
+        log_event(f"[encoder-fit] cache={cache_status} {pieces} total={total:.1f}s", enabled=verbose)
 
     def features_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, self.feature_dim), dtype=np.float32)
+        if isinstance(queries, TestQueryArray):
+            return self.features_for_query_array(queries)
+        return self.features_for_query_array(TestQueryArray.from_queries(queries))
+
+    def features_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
+        if not queries:
+            return np.empty((0, 0, self.feature_dim), dtype=np.float32)
         start = perf_counter()
-        stat_features = self.stats.features_for_queries(queries)
+        stat_features = _features_from_tower(self.stats, queries)
         self._profile_elapsed["stats"] += perf_counter() - start
         start = perf_counter()
-        candidate_prior_features = self.candidate_prior.features_for_queries(queries, stat_features)
+        candidate_prior_features = _candidate_prior_features(self.candidate_prior, queries, stat_features)
         self._profile_elapsed["prior"] += perf_counter() - start
         start = perf_counter()
-        structure_features = self.structure.features_for_queries(queries)
+        structure_features = _features_from_tower(self.structure, queries)
         self._profile_elapsed["structure"] += perf_counter() - start
         start = perf_counter()
-        two_tower_features = self.two_tower.scores_for_queries(queries)
+        two_tower_features = _scores_from_tower(self.two_tower, queries)
         self._profile_elapsed["tower"] += perf_counter() - start
         start = perf_counter()
-        graph_features = self.graph.scores_for_queries(queries)
+        graph_features = _scores_from_tower(self.graph, queries)
         self._profile_elapsed["graph"] += perf_counter() - start
         start = perf_counter()
-        sequence_features = self.sequence.scores_for_queries(queries)
+        sequence_features = _scores_from_tower(self.sequence, queries)
         self._profile_elapsed["sequence"] += perf_counter() - start
         start = perf_counter()
         features = np.concatenate(
@@ -265,6 +326,31 @@ def _zero_scores(queries: TestQueryArray | list[TestQuery], feature_count: int) 
     return np.zeros((len(queries), candidate_count, feature_count), dtype=np.float32)
 
 
+def _zero_scores_for_array(queries: TestQueryArray, feature_count: int) -> np.ndarray:
+    return np.zeros((len(queries), queries.candidate_count, feature_count), dtype=np.float32)
+
+
+def _features_from_tower(tower: Any, queries: TestQueryArray) -> np.ndarray:
+    fast_path = getattr(tower, "features_for_query_array", None)
+    if callable(fast_path):
+        return fast_path(queries)
+    return tower.features_for_queries(list(queries))
+
+
+def _candidate_prior_features(tower: Any, queries: TestQueryArray, stat_features: np.ndarray) -> np.ndarray:
+    fast_path = getattr(tower, "features_for_query_array", None)
+    if callable(fast_path):
+        return fast_path(queries, stat_features)
+    return tower.features_for_queries(list(queries), stat_features)
+
+
+def _scores_from_tower(tower: Any, queries: TestQueryArray) -> np.ndarray:
+    fast_path = getattr(tower, "scores_for_query_array", None)
+    if callable(fast_path):
+        return fast_path(queries)
+    return tower.scores_for_queries(list(queries))
+
+
 class TemporalHybridRanker:
     """Aggressive GNN/sequence/statistics hybrid candidate reranker."""
 
@@ -300,7 +386,7 @@ class TemporalHybridRanker:
         training_config = self._apply_auto_strategy(interactions, training_config)
         log_memory("hybrid_fit_start", enabled=training_config.verbose)
         log(f"[hybrid-fit] start events={len(interactions)}", enabled=training_config.verbose)
-        fusion, fusion_result, report = self._learn_fusion(interactions, training_config)
+        fusion, fusion_result, report, encoder_cache, cache_config = self._learn_fusion(interactions, training_config)
         self.fusion = fusion
         self.fusion_result = fusion_result
 
@@ -309,6 +395,14 @@ class TemporalHybridRanker:
         final_future_only = self._can_use_future_only_final_encoder()
         if final_future_only:
             final_config = replace(final_config, structure_future_only_transition_cooccur=True)
+        cache = self._final_encoder_cache(
+            interactions=interactions,
+            final_config=final_config,
+            existing_cache=encoder_cache,
+            existing_config=cache_config,
+            verbose=training_config.verbose,
+        )
+        final_snapshot = cache.snapshot_for_prefix(len(interactions)) if cache is not None else None
         log_event(
             "[hybrid-fit] final_encoder "
             f"prior={final_config.candidate_prior_enabled} tower={final_config.two_tower_enabled} "
@@ -317,7 +411,16 @@ class TemporalHybridRanker:
             enabled=training_config.verbose,
         )
         log_memory("final_encoder_start", enabled=training_config.verbose)
-        self.encoder = self._fit_encoder(interactions, final_config, rng, verbose=training_config.verbose)
+        self.encoder = self._fit_encoder(
+            interactions,
+            final_config,
+            rng,
+            verbose=training_config.verbose,
+            deterministic_snapshot=final_snapshot,
+        )
+        if cache is not None:
+            cache.clear()
+        del final_snapshot
         if final_future_only:
             self.encoder.compact_for_future_queries()
         log_memory("final_encoder_done", enabled=training_config.verbose)
@@ -399,6 +502,8 @@ class TemporalHybridRanker:
         if self.encoder is None or self.fusion is None or self.fusion_result is None:
             raise RuntimeError("ranker is not fitted")
 
+        from .fusion import predict_logits
+
         features = self.encoder.features_for_queries(queries)
         if self.fusion_result.feature_indices:
             features = features[:, :, self.fusion_result.feature_indices]
@@ -412,7 +517,7 @@ class TemporalHybridRanker:
         self,
         interactions: InteractionTable,
         config: TrainingConfig,
-    ) -> tuple[FusionMLP, FusionResult, TrainingReport]:
+    ) -> tuple[FusionMLP, FusionResult, TrainingReport, HybridPrefixStateCache | None, TrainingConfig]:
         n_events = len(interactions)
         if n_events < 100 or config.num_negatives < 1 or config.epochs < 1:
             raise ValueError(
@@ -448,13 +553,19 @@ class TemporalHybridRanker:
         log_memory("split_done", enabled=config.verbose)
 
         supervised_encoder_config = replace(config, structure_future_only_transition_cooccur=True)
+        encoder_cache = self._encoder_state_cache(interactions, supervised_encoder_config, config.verbose)
+        train_snapshot = encoder_cache.snapshot_for_prefix(context_end) if encoder_cache is not None else None
         train_encoder = self._timed_fit_encoder(
             "train_context_encoder",
             context_events,
             supervised_encoder_config,
             rng,
             config.verbose,
+            deterministic_snapshot=train_snapshot,
         )
+        if encoder_cache is not None:
+            encoder_cache.release_except()
+        del train_snapshot
         feature_start = perf_counter()
         log_memory("train_features_start", enabled=config.verbose)
         train_features = _build_supervised_features(train_events, train_encoder, dst_pool, config, rng)
@@ -465,13 +576,18 @@ class TemporalHybridRanker:
         )
         log_memory("train_features_done", enabled=config.verbose)
 
+        val_snapshot = encoder_cache.snapshot_for_prefix(train_end) if encoder_cache is not None else None
         val_encoder = self._timed_fit_encoder(
             "val_context_encoder",
             val_context_events,
             supervised_encoder_config,
             rng,
             config.verbose,
+            deterministic_snapshot=val_snapshot,
         )
+        if encoder_cache is not None:
+            encoder_cache.release_except()
+        del val_snapshot
         feature_start = perf_counter()
         log_memory("val_features_start", enabled=config.verbose)
         val_features = _build_supervised_features(val_events, val_encoder, dst_pool, config, rng)
@@ -512,7 +628,7 @@ class TemporalHybridRanker:
                 "test_candidate_negative_ratio": config.test_candidate_negative_ratio,
             },
         )
-        return fusion, result, report
+        return fusion, result, report, encoder_cache, supervised_encoder_config
 
     def _fit_best_fusion(
         self,
@@ -522,6 +638,8 @@ class TemporalHybridRanker:
         rng: np.random.Generator,
         verbose: bool,
     ) -> tuple[FusionMLP, FusionResult]:
+        from .fusion import fit_fusion_mlp, fit_fusion_mlp_streaming
+
         masks = _feature_masks(train_features.shape[-1])
         best_model: FusionMLP | None = None
         best_result: FusionResult | None = None
@@ -569,6 +687,7 @@ class TemporalHybridRanker:
         config: TrainingConfig,
         rng: np.random.Generator,
         verbose: bool,
+        deterministic_snapshot: HybridDeterministicSnapshot | None = None,
     ) -> HybridFeatureEncoder:
         if self.id_map is None:
             raise RuntimeError("id map is not initialized")
@@ -582,7 +701,7 @@ class TemporalHybridRanker:
             sequence_config=config.sequence_config(),
             two_tower_config=config.two_tower_config(),
         )
-        encoder.fit(interactions, rng=rng, verbose=verbose)
+        encoder.fit(interactions, rng=rng, verbose=verbose, deterministic_snapshot=deterministic_snapshot)
         return encoder
 
     def _timed_fit_encoder(
@@ -592,6 +711,7 @@ class TemporalHybridRanker:
         config: TrainingConfig,
         rng: np.random.Generator,
         verbose: bool,
+        deterministic_snapshot: HybridDeterministicSnapshot | None = None,
     ) -> HybridFeatureEncoder:
         start = perf_counter()
         log_event(
@@ -602,10 +722,57 @@ class TemporalHybridRanker:
             enabled=verbose,
         )
         log_memory(f"{label}_start", enabled=verbose)
-        encoder = self._fit_encoder(interactions, config, rng, verbose=verbose)
+        encoder = self._fit_encoder(
+            interactions,
+            config,
+            rng,
+            verbose=verbose,
+            deterministic_snapshot=deterministic_snapshot,
+        )
         log_event(f"[hybrid-fit] {label} done elapsed={perf_counter() - start:.1f}s", enabled=verbose)
         log_memory(f"{label}_done", enabled=verbose)
         return encoder
+
+    def _encoder_state_cache(
+        self,
+        interactions: InteractionTable,
+        config: TrainingConfig,
+        verbose: bool,
+    ) -> HybridPrefixStateCache | None:
+        if not config.encoder_state_cache_enabled:
+            log_event("[encoder-cache] disabled", enabled=verbose)
+            return None
+        try:
+            test_counts = self.dataset_profile.test_candidate_counts if self.dataset_profile is not None else None
+            return HybridPrefixStateCache(
+                interactions,
+                recent_window=self.recent_window,
+                candidate_prior_config=config.candidate_prior_config(),
+                structure_config=config.structure_config(),
+                test_candidate_counts=test_counts,
+                verbose=verbose,
+            )
+        except Exception as exc:
+            log_event(f"[encoder-cache] fallback reason={type(exc).__name__}: {exc}", enabled=verbose)
+            return None
+
+    def _final_encoder_cache(
+        self,
+        *,
+        interactions: InteractionTable,
+        final_config: TrainingConfig,
+        existing_cache: HybridPrefixStateCache | None,
+        existing_config: TrainingConfig,
+        verbose: bool,
+    ) -> HybridPrefixStateCache | None:
+        if existing_cache is not None and _can_reuse_encoder_cache(existing_config, final_config):
+            log_event("[encoder-cache] reuse prefix builder for final_encoder", enabled=verbose)
+            return existing_cache
+
+        if existing_cache is not None:
+            existing_cache.clear()
+            log_event("[encoder-cache] final_encoder requires fresh deterministic state", enabled=verbose)
+        return self._encoder_state_cache(interactions, final_config, verbose)
 
 
 def _sample_events(
@@ -686,6 +853,24 @@ def _config_for_selected_features(config: TrainingConfig, feature_indices: tuple
     )
 
 
+def _can_reuse_encoder_cache(source_config: TrainingConfig, target_config: TrainingConfig) -> bool:
+    """Return True when a deterministic prefix cache can hydrate the target encoder exactly."""
+    if not source_config.encoder_state_cache_enabled or not target_config.encoder_state_cache_enabled:
+        return False
+    if not target_config.structure_enabled:
+        return True
+    if source_config.structure_future_only_transition_cooccur != target_config.structure_future_only_transition_cooccur:
+        return False
+    if target_config.structure_transition_enabled and not source_config.structure_transition_enabled:
+        return False
+    if target_config.structure_cooccur_enabled:
+        return (
+            source_config.structure_cooccur_enabled
+            and source_config.structure_cooccur_history_limit == target_config.structure_cooccur_history_limit
+        )
+    return True
+
+
 def _build_supervised_queries(
     positives: InteractionTable,
     encoder: HybridFeatureEncoder,
@@ -742,6 +927,112 @@ def _build_supervised_queries(
     return TestQueryArray(src=src, time=time, candidates=candidates)
 
 
+class SupervisedFeatureBuilder:
+    def __init__(
+        self,
+        *,
+        encoder: HybridFeatureEncoder,
+        dst_pool: np.ndarray,
+        config: TrainingConfig,
+    ) -> None:
+        self.encoder = encoder
+        self.dst_pool = dst_pool
+        self.config = config
+        self.test_values, self.test_weights = test_candidate_arrays(encoder.dataset_profile)
+        self.index = getattr(encoder.structure, "index", None)
+        self.candidate_pool = build_candidate_pool(dst_pool, self.test_values)
+        self.sample_elapsed = 0.0
+        self.encode_elapsed = 0.0
+        self.write_elapsed = 0.0
+        self.negative_checksum = 0
+
+    def batch_for_events(self, positives: InteractionTable, rng: np.random.Generator) -> TestQueryArray:
+        sample_start = perf_counter()
+        jobs = [
+            NegativeSamplingJob(src=int(src), positive_dst=int(dst), query_time=int(time))
+            for src, dst, time in zip(positives.src, positives.dst, positives.time)
+        ]
+        negatives_by_event = sample_mixed_negatives_batch(
+            jobs=jobs,
+            context=self._negative_sampling_context(positives),
+            dst_pool=self.dst_pool,
+            num_negatives=self.config.num_negatives,
+            rng=rng,
+            hard_negative_ratio=self.config.hard_negative_ratio,
+            popular_negative_ratio=self.config.popular_negative_ratio,
+            test_candidate_negative_ratio=self.config.test_candidate_negative_ratio,
+            candidate_pool=self.candidate_pool,
+            workers=self.config.negative_sampling_workers,
+            verbose=self.config.verbose,
+            label="fusion",
+        )
+        self.sample_elapsed += perf_counter() - sample_start
+        return _supervised_query_array_from_negatives(positives, negatives_by_event, self.config.num_negatives)
+
+    def _negative_sampling_context(self, positives: InteractionTable) -> NegativeSamplingContext:
+        index = self.index
+        if index is None:
+            index = TemporalInteractionIndex()
+            index.fit(
+                positives,
+                build_transitions=False,
+                build_cooccurs=False,
+            )
+        return NegativeSamplingContext(
+            index=index,
+            dst_values=self.encoder.id_map.dst_values,
+            test_candidate_values=self.test_values,
+            test_candidate_weights=self.test_weights,
+        )
+
+    def features_for_events(self, positives: InteractionTable, rng: np.random.Generator) -> tuple[np.ndarray, int]:
+        batch = self.batch_for_events(positives, rng)
+        self.negative_checksum += _candidate_tail_checksum(batch.candidates[:, 1:])
+        encode_start = perf_counter()
+        features = self.encoder.features_for_query_array(batch)
+        self.encode_elapsed += perf_counter() - encode_start
+        return features, _candidate_matrix_checksum(batch.candidates)
+
+
+def _supervised_query_array_from_negatives(
+    positives: InteractionTable,
+    negatives_by_event: list[tuple[int, ...]],
+    num_negatives: int,
+) -> TestQueryArray:
+    if len(positives) != len(negatives_by_event):
+        raise ValueError("positive events and negatives must have the same row count")
+    candidate_count = int(num_negatives) + 1
+    src = np.empty(len(positives), dtype=np.int32)
+    time = np.empty(len(positives), dtype=np.int32)
+    candidates = np.empty((len(positives), candidate_count), dtype=np.int32)
+    for row_idx, (event_src, event_dst, event_time, negatives) in enumerate(
+        zip(positives.src, positives.dst, positives.time, negatives_by_event)
+    ):
+        if len(negatives) != num_negatives:
+            raise ValueError("negative row length does not match num_negatives")
+        src[row_idx] = int(event_src)
+        time[row_idx] = int(event_time)
+        candidates[row_idx, 0] = int(event_dst)
+        candidates[row_idx, 1:] = np.asarray(negatives, dtype=np.int32)
+    return TestQueryArray(src=src, time=time, candidates=candidates)
+
+
+def _candidate_matrix_checksum(candidates: np.ndarray) -> int:
+    if candidates.size == 0:
+        return 0
+    values = candidates.astype(np.int64, copy=False)
+    weights = np.arange(1, values.shape[1] + 1, dtype=np.int64)
+    return int((values * weights).sum(dtype=np.int64))
+
+
+def _candidate_tail_checksum(candidates: np.ndarray) -> int:
+    if candidates.size == 0:
+        return 0
+    values = candidates.astype(np.int64, copy=False)
+    weights = np.arange(1, values.shape[1] + 1, dtype=np.int64)
+    return int((values * weights).sum(dtype=np.int64))
+
+
 def _build_supervised_features(
     positives: InteractionTable,
     encoder: HybridFeatureEncoder,
@@ -756,26 +1047,39 @@ def _build_supervised_features(
     candidate_count = int(config.num_negatives) + 1
     shape = (len(positives), candidate_count, encoder.feature_dim)
     features = _empty_feature_matrix(shape, config)
-    test_values, _ = test_candidate_arrays(encoder.dataset_profile)
-    candidate_pool = build_candidate_pool(dst_pool, test_values)
+    builder = SupervisedFeatureBuilder(encoder=encoder, dst_pool=dst_pool, config=config)
     start_time = perf_counter()
+    candidate_checksum = 0
     for start in range(0, len(positives), batch_size):
         end = min(start + batch_size, len(positives))
         batch_events = positives[start:end]
-        queries = _build_supervised_queries(batch_events, encoder, dst_pool, config, rng, candidate_pool=candidate_pool)
-        features[start:end] = encoder.features_for_queries(queries)
-        del queries
+        batch_features, batch_candidate_checksum = builder.features_for_events(batch_events, rng)
+        write_start = perf_counter()
+        features[start:end] = batch_features
+        builder.write_elapsed += perf_counter() - write_start
+        candidate_checksum += batch_candidate_checksum
+        del batch_features
         if isinstance(features, np.memmap) and (start // batch_size + 1) % FEATURE_MEMMAP_FLUSH_INTERVAL == 0:
             features.flush()
         release_memory()
         if config.verbose and (end == len(positives) or end % max(batch_size * 4, 1) == 0):
             log_event(
                 f"[hybrid-fit] supervised_features rows={end}/{len(positives)} "
-                f"batch={len(batch_events)} elapsed={perf_counter() - start_time:.1f}s",
+                f"batch={len(batch_events)} sample={builder.sample_elapsed:.1f}s "
+                f"encode={builder.encode_elapsed:.1f}s write={builder.write_elapsed:.1f}s "
+                f"elapsed={perf_counter() - start_time:.1f}s",
                 enabled=True,
             )
     if isinstance(features, np.memmap):
         features.flush()
+    if config.verbose:
+        log_event(
+            f"[hybrid-fit] supervised_features done rows={len(positives)} "
+            f"sample={builder.sample_elapsed:.1f}s encode={builder.encode_elapsed:.1f}s "
+            f"write={builder.write_elapsed:.1f}s elapsed={perf_counter() - start_time:.1f}s "
+            f"candidate_checksum={candidate_checksum} negative_checksum={builder.negative_checksum}",
+            enabled=True,
+        )
     return features
 
 
@@ -783,9 +1087,10 @@ def _empty_feature_matrix(shape: tuple[int, int, int], config: TrainingConfig) -
     if not config.supervised_feature_memmap:
         return np.empty(shape, dtype=np.float32)
 
-    temp = tempfile.NamedTemporaryFile(prefix="jgrec-supervised-features-", suffix=".dat", delete=True)
-    matrix = np.memmap(temp.name, mode="w+", dtype=np.float32, shape=shape)
-    _FEATURE_MEMMAP_TEMP_FILES.append(temp)
+    fd, path = tempfile.mkstemp(prefix="jgrec-supervised-features-", suffix=".dat")
+    os.close(fd)
+    matrix = np.memmap(path, mode="w+", dtype=np.float32, shape=shape)
+    _FEATURE_MEMMAP_TEMP_FILES.append(path)
     return matrix
 
 
@@ -793,7 +1098,10 @@ def _release_feature_memmaps() -> None:
     while _FEATURE_MEMMAP_TEMP_FILES:
         temp = _FEATURE_MEMMAP_TEMP_FILES.pop()
         try:
-            temp.close()
+            if isinstance(temp, str):
+                os.remove(temp)
+            else:
+                temp.close()
         except OSError:
             pass
 

@@ -123,6 +123,19 @@ def test_cli_config_passes_auto_strategy_and_candidate_prior_to_hybrid():
     assert config.test_candidate_negative_ratio == 0.4
 
 
+def test_encoder_state_cache_is_operational_and_does_not_change_run_name_digest():
+    CLIConfig, _build_run_name, _ranker_config = _cli_symbols()
+    enabled_args = CLIConfig()
+    disabled_args = CLIConfig(encoder_state_cache=False)
+
+    enabled_config = _ranker_config(enabled_args)
+    disabled_config = _ranker_config(disabled_args)
+
+    assert enabled_config.encoder_state_cache_enabled
+    assert not disabled_config.encoder_state_cache_enabled
+    assert _build_run_name(enabled_args, enabled_config) == _build_run_name(disabled_args, disabled_config)
+
+
 def test_operational_resume_options_do_not_change_run_name_digest():
     CLIConfig, _build_run_name, _ranker_config = _cli_symbols()
     base_args = CLIConfig()
