@@ -1,16 +1,36 @@
-*.pkl
-data/
-.venv/
+# === Python ===
 __pycache__/
 *.egg-info/
-result.json
-site/
-result/
-logs/
-result_perm_backup_*/
-*.zip
-.cache/
-.coverage*
+.venv/
+
+# === Python Tools & Testing ===
 .pytest_cache/
 .ruff_cache/
+.coverage*
 htmlcov/
+
+# === Data & Outputs ===
+data/
+*.pkl
+*.zip
+result.json
+
+# === Logs & Caches ===
+logs/
+.cache/
+site/
+
+# === Experiment Results ===
+result/
+result_perm_backup_*/
+
+# === LaTeX Build Artifacts ===
+docs/**/*.aux
+docs/**/*.bbl
+docs/**/*.blg
+docs/**/*.fdb_latexmk
+docs/**/*.fls
+docs/**/*.log
+docs/**/*.out
+docs/**/*.synctex.gz
+docs/**/*.toc

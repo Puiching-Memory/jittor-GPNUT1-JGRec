@@ -1,0 +1,1004 @@
+\documentclass[letterpaper,11pt,leqno]{article}
+\usepackage{paper}
+\usepackage{CJKutf8}
+\usepackage{array}
+\usepackage{float}
+\usepackage{pgfplots}
+\usepackage{forest}
+\usepackage{smartdiagram}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,calc,shadows}
+\pgfplotsset{compat=1.18}
+\bibliographystyle{paper}
+
+\hypersetup{pdftitle={Jittor GPNUT Dynamic Recommendation Research Progress Report}}
+\newcommand{\bib}{paper}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\begin{document}
+\begin{CJK*}{UTF8}{gbsn}
+
+\title{第六届计图人工智能挑战赛赛道一\\动态推荐项目研究进度报告}
+
+\author{jittor-GPNUT1-JGRec 项目组
+\thanks{本文基于仓库内研究、系统、实验和提交记录整理，报告日期为 2026 年 6 月 8 日。}}
+
+\date{2026 年 6 月}
+
+\begin{titlepage}
+\maketitle
+
+本报告总结第六届计图人工智能挑战赛赛道一动态推荐项目的当前研究进展。赛题要求在给定历史时序交互
+$(src,dst,time)$ 和每条测试查询 100 个候选目标的条件下，输出候选目标的交互概率分布。项目已从初始
+GNN 候选重排序实验演进为候选级混合重排序系统：以时间因果切分构造监督样本，融合统计记忆、测试候选先验、
+局部结构共现、Two-Tower 表示、XSimGCL/LightGCN 图协同过滤和序列偏好特征，并通过验证集选择特征组。
+截至本报告整理时，当前 A 榜最好反馈为 $1.2044$，较上一版 $1.1983$ 有小幅提升，并显著高于
+第一版完整 GNN 历史强基线 $1.1452$。下一阶段研究重点不是盲目增加复杂模型，而是围绕 dataset2 的新链接/冷启动困难、线上与本地验证
+偏差、谱图协同特征和负采样校准建立更可靠的提分闭环。
+
+\end{titlepage}
+
+\section{问题定义与研究判断}
+
+\paragraph{赛题形式}
+训练数据由时间排序交互三元组组成：
+\begin{equation}
+e_i=(s_i,d_i,t_i).
+\end{equation}
+测试阶段每一行给定源节点、查询时间和 100 个候选目标：
+\begin{equation}
+q_i=(s_i,t_i,c_{i,1},\ldots,c_{i,100}).
+\end{equation}
+模型输出为 $P_i\in[0,1]^{100}$，并在每行候选集合内形成概率分布。因此，本项目的核心任务不是全量节点召回，
+而是候选级重排序。这个判断决定了当前研究路线：所有 GNN、序列模型和统计特征最终都必须转化为候选内排序分数。
+图 \ref{f:candidate-graph-view} 将这一接口约束可视化：历史动态图提供证据，测试端给定候选集合，模型只在候选内部
+学习相对排序和概率归一化。
+
+\begin{figure}[H]
+\caption{候选级动态图重排序视角}
+\label{f:candidate-graph-view}
+\centering
+\begin{tikzpicture}[
+    x=1cm,
+    y=1cm,
+    >=Stealth,
+    panel/.style={draw=black!18, fill=gray!3, rounded corners=2pt},
+    title/.style={font=\scriptsize, text=black!72},
+    graphnode/.style={circle, draw=black!48, fill=white, minimum size=6.1mm, inner sep=0pt, font=\scriptsize},
+    source/.style={graphnode, draw=teal!70!black, fill=teal!12, line width=.8pt},
+    history/.style={graphnode, draw=black!45, fill=gray!8},
+    candidate/.style={circle, draw=blue!58!black, fill=blue!7, minimum size=5.8mm, inner sep=0pt, font=\scriptsize},
+    hotcandidate/.style={candidate, draw=orange!75!black, fill=orange!14, line width=.8pt},
+    feature/.style={draw=black!26, fill=white, rounded corners=2pt, align=center, minimum width=34mm, minimum height=5.1mm, font=\scriptsize},
+    chip/.style={draw=teal!45!black, fill=teal!6, rounded corners=2pt, align=center, inner xsep=5pt, inner ysep=3pt, font=\scriptsize},
+    scorebox/.style={draw=orange!55!black, fill=orange!7, rounded corners=2pt, align=center, inner xsep=5pt, inner ysep=3pt, font=\scriptsize},
+    edge/.style={draw=black!45, line width=.45pt},
+    flow/.style={->, draw=black!55, line width=.6pt},
+    lightflow/.style={->, draw=black!35, line width=.45pt},
+    bar/.style={draw=orange!70!black, fill=orange!70!black}
+]
+\draw[panel] (-.10,-1.55) rectangle (3.45,2.15);
+\node[title] at (1.68,1.88) {历史动态图 $G_{<t}$};
+\node[source] (src) at (1.65,.25) {$s$};
+\node[history] (h1) at (.55,1.02) {$d_1$};
+\node[history] (h2) at (.60,-.66) {$d_2$};
+\node[history] (h3) at (2.76,1.00) {$d_3$};
+\node[history] (h4) at (2.82,-.62) {$d_4$};
+\draw[edge] (src) -- node[font=\tiny, above, sloped, text=black!55] {$t_1$} (h1);
+\draw[edge] (src) -- node[font=\tiny, below, sloped, text=black!55] {$t_2$} (h2);
+\draw[edge] (src) -- node[font=\tiny, above, sloped, text=black!55] {$t_3$} (h3);
+\draw[edge] (src) -- node[font=\tiny, below, sloped, text=black!55] {$t_4$} (h4);
+\node[font=\scriptsize, text=teal!45!black] at (1.65,-1.18) {查询源节点 $s$};
+
+\node[chip] (query) at (5.85,1.86) {测试行 $q_i=(s,t,C_i)$};
+\draw[panel] (3.95,-1.55) rectangle (7.78,1.55);
+\node[title] at (5.86,1.27) {逐候选构造 $x_{i,k}$};
+\node[feature] (f1) at (5.86,.72) {统计记忆 / 测试候选先验};
+\node[feature] (f2) at (5.86,.12) {future-only 共现与结构特征};
+\node[feature] (f3) at (5.86,-.48) {LightGCN / XSimGCL 图分数};
+\node[feature] (f4) at (5.86,-1.08) {Two-Tower / 序列偏好匹配};
+
+\draw[panel] (8.30,-1.78) rectangle (13.25,2.15);
+\node[title] at (10.78,1.88) {给定候选集合 $C_i$，$|C_i|=100$};
+\node[candidate] (c1) at (9.25,1.17) {$c_1$};
+\node[candidate] (c2) at (10.15,1.17) {$c_2$};
+\node[font=\scriptsize, text=black!55] at (10.82,1.17) {$\cdots$};
+\node[hotcandidate] (cj) at (11.50,1.17) {$c_j$};
+\node[candidate] (c100) at (12.48,1.17) {$c_{100}$};
+
+\node[scorebox, minimum width=30mm] (score) at (10.78,.38) {候选打分 $f_\theta(x_{i,k})$};
+\node[font=\scriptsize, text=black!68] (zvec) at (10.78,-.10) {$z_i=[z_{i,1},\ldots,z_{i,100}]$};
+\node[scorebox, fill=orange!12, minimum width=24mm] (softmax) at (10.78,-.62) {row softmax};
+\node[font=\scriptsize, text=orange!62!black] at (10.78,-1.04) {输出概率 $P_i$};
+\draw[bar] (9.55,-1.55) rectangle +(0.18,.24);
+\draw[bar] (9.90,-1.55) rectangle +(0.18,.13);
+\draw[bar] (10.25,-1.55) rectangle +(0.18,.38);
+\draw[bar] (10.60,-1.55) rectangle +(0.18,.19);
+\draw[bar] (10.95,-1.55) rectangle +(0.18,.51);
+\draw[bar] (11.30,-1.55) rectangle +(0.18,.28);
+\node[font=\tiny, text=black!55, anchor=west] at (11.74,-1.34) {$\sum_k P_{i,k}=1$};
+
+\draw[flow] (3.45,.25) -- (3.95,.25);
+\draw[flow] (7.78,.25) -- (8.30,.25);
+\draw[lightflow] (query.south) -- (5.86,1.55);
+\draw[lightflow] (c1.south) -- (score.north);
+\draw[lightflow] (cj.south) -- (score.north);
+\draw[lightflow] (c100.south) -- (score.north);
+\draw[flow] (score.south) -- (zvec.north);
+\draw[flow] (zvec.south) -- (softmax.north);
+\draw[flow] (softmax.south) -- (10.78,-.90);
+\end{tikzpicture}
+\note{图中候选节点不是模型召回结果，而是测试接口已经给定的 100 个目标。系统对每个候选 $c_k$ 构造候选级证据 $x_{i,k}$，再得到分数 $z_{i,k}$ 并只在同一候选行内归一化。}
+\end{figure}
+
+\paragraph{当前研究结论}
+从已有调研和实验结果看，LightGCN 和 XSimGCL 仍是最稳的图协同过滤基线。LightGCN 说明推荐场景中的
+邻居传播可以去掉复杂非线性，保留高阶协同信号即可取得强效果 \citep{he2020lightgcn}；XSimGCL 则代表
+较新的极简图对比学习路线，避免复杂图增强带来的随机性 \citep{yu2022xsimgcl}。但本项目已经观察到本地
+MRR 与线上反馈存在明显落差，说明模型选择不能只依赖 sampled validation。相关研究也指出，采样候选上的
+推荐指标会引入偏差 \citep{krichene2020sampled}，复杂神经推荐方法在强基线和严谨复现下未必稳定优于简单方法
+\citep{dacrema2019progress}。
+
+\paragraph{路线取舍}
+近年推荐系统已经明显转向生成式检索、Semantic ID、LLM 推荐、扩散推荐和大规模序列基础模型。TIGER 将推荐改写为
+自回归生成目标物品标识的检索问题 \citep{rajput2023generative}，LLM 生成式推荐综述也强调用大模型直接生成推荐结果的
+统一框架 \citep{li2024llmgenrec}，LC-Rec 则尝试把协同语义对齐到 LLM 物品索引中 \citep{zheng2023lcrec}。这些方向很有
+研究价值，但本赛题已经给定 100 个候选目标，默认不应将主要资源投入重型召回式框架。后续非 GNN 或前沿模型只能作为
+隔离实验，且必须以当前线上最好提交作为冠军基线。
+
+\section{数据集画像}
+
+\paragraph{规模与结构差异}
+两个数据集都遵循同一候选重排序接口，但统计结构差异很大。dataset1 训练边数为 $690848$，测试查询数为
+$61051$，源目标节点空间高度重叠，重复事件占比达到 $72.60\%$。dataset2 训练边数为 $2261283$，测试查询数为
+$153420$，源目标节点空间严格分离，重复事件占比只有 $2.21\%$。这意味着 dataset1 更接近强记忆动态图，
+dataset2 更接近已知源节点到大目标集合的新链接预测。
+
+\begin{table}[H]
+\caption{数据集基础画像}
+\label{t:data-profile}
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}lrr}
+\toprule
+指标 & dataset1 & dataset2 \\
+\midrule
+训练边数 & 690848 & 2261283 \\
+测试查询数 & 61051 & 153420 \\
+唯一源节点 & 22093 & 12708 \\
+唯一目标节点 & 23012 & 50640 \\
+唯一源目标 pair & 189307 & 2211275 \\
+重复事件占比 & 72.60\% & 2.21\% \\
+holdout 历史 pair 命中 & 56.91\% & 0.002\% \\
+测试候选未见目标占比 & 3.49\% & 53.59\% \\
+源节点历史长度 p90 & 79 & 430 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\paragraph{显著画像特征}
+数据画像中最显著的差异不是规模，而是任务机制。图 \ref{f:data-identity} 显示，dataset1 的源节点与目标节点空间高度
+重叠，且重复 pair 覆盖了大部分事件；dataset2 的源目标空间完全分离，重复结构几乎消失。图 \ref{f:data-temporal}
+进一步说明，dataset1 在时间切分后仍有强 pair 记忆和近期重复信号，而 dataset2 长期处于已知节点新链接预测状态。
+图 \ref{f:data-candidates} 则说明测试候选分布本身也不同：dataset2 超过一半候选目标在训练中未出现，纯 ID embedding
+或历史 pair 记忆天然缺口更大。
+
+\begin{figure}[H]
+\caption{节点空间与重复结构差异}
+\label{f:data-identity}
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.82\linewidth,
+    height=0.32\linewidth,
+    ymin=0.5,
+    ymax=2.5,
+    xtick={1,2,3,4},
+    xticklabels={SrcOv,DstOv,Repeat,RepeatCov},
+    ytick={1,2},
+    yticklabels={dataset2,dataset1},
+    axis lines=box,
+    enlarge x limits=0.14,
+    x tick label style={font=\scriptsize, anchor=north, yshift=-4pt},
+    y tick label style={font=\scriptsize},
+    colorbar,
+    colorbar style={ylabel={比例（\%）}},
+    colormap={profilemap}{color=(gray!8); color=(teal!35); color=(orange!80!black)},
+    point meta min=0,
+    point meta max=100,
+    nodes near coords,
+    nodes near coords={\pgfmathprintnumber[fixed,precision=1]{\pgfplotspointmeta}},
+    nodes near coords style={font=\scriptsize, text=black},
+]
+\addplot[
+    scatter,
+    only marks,
+    mark=square*,
+    mark size=18pt,
+    point meta=explicit,
+    scatter src=explicit,
+    scatter/use mapped color={draw=mapped color, fill=mapped color},
+] coordinates {
+    (1,2) [96.20]
+    (2,2) [92.36]
+    (3,2) [72.60]
+    (4,2) [87.03]
+    (1,1) [0.00]
+    (2,1) [0.00]
+    (3,1) [2.21]
+    (4,1) [4.42]
+};
+\end{axis}
+\end{tikzpicture}
+\note{SrcOv、DstOv 为源/目标交叠率；RepeatCov 为重复 pair 训练覆盖率。}
+\end{figure}
+
+\begin{figure}[H]
+\caption{时间切分后的记忆与新链接信号}
+\label{f:data-temporal}
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.82\linewidth,
+    height=0.32\linewidth,
+    ymin=0.5,
+    ymax=2.5,
+    symbolic x coords={PairHit,KnownNew,Recent1,Recent32},
+    xtick={PairHit,KnownNew,Recent1,Recent32},
+    ytick={1,2},
+    yticklabels={dataset2,dataset1},
+    axis lines=box,
+    enlarge x limits=0.14,
+    x tick label style={font=\scriptsize, anchor=north, yshift=-4pt},
+    y tick label style={font=\scriptsize},
+    colorbar,
+    colorbar style={ylabel={比例（\%）}},
+    colormap={temporalmem}{color=(gray!8); color=(blue!35); color=(orange!80!black)},
+    point meta min=0,
+    point meta max=100,
+    nodes near coords,
+    nodes near coords={\pgfmathprintnumber[fixed,precision=3,zerofill=false]{\pgfplotspointmeta}},
+    nodes near coords style={font=\scriptsize, text=black},
+]
+\addplot[
+    scatter,
+    only marks,
+    mark=square*,
+    mark size=18pt,
+    point meta=explicit,
+    scatter src=explicit,
+    scatter/use mapped color={draw=mapped color, fill=mapped color},
+] coordinates {
+    (PairHit,2) [56.91]
+    (KnownNew,2) [36.88]
+    (Recent1,2) [17.60]
+    (Recent32,2) [51.80]
+    (PairHit,1) [0.002]
+    (KnownNew,1) [91.75]
+    (Recent1,1) [0.0006]
+    (Recent32,1) [0.002]
+};
+\end{axis}
+\end{tikzpicture}
+\note{PairHit 表示 holdout 中源目标 pair 已在历史出现；KnownNew 表示源与目标均已知但 pair 未见；Recent1/Recent32 表示命中同源最近窗口。}
+\end{figure}
+
+\begin{figure}[H]
+\caption{测试候选冷启动与候选命中差异}
+\label{f:data-candidates}
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.82\linewidth,
+    height=0.32\linewidth,
+    ymin=0.5,
+    ymax=2.5,
+    symbolic x coords={SeenDst,UnseenDst,AnyPair,AnyRecent32,Top1000},
+    xtick={SeenDst,UnseenDst,AnyPair,AnyRecent32,Top1000},
+    ytick={1,2},
+    yticklabels={dataset2,dataset1},
+    axis lines=box,
+    enlarge x limits=0.10,
+    x tick label style={font=\scriptsize, anchor=north, yshift=-4pt},
+    y tick label style={font=\scriptsize},
+    colorbar,
+    colorbar style={ylabel={比例（\%）}},
+    colormap={candidatemap}{color=(gray!8); color=(teal!35); color=(orange!80!black)},
+    point meta min=0,
+    point meta max=100,
+    nodes near coords,
+    nodes near coords={\pgfmathprintnumber[fixed,precision=2,zerofill=false]{\pgfplotspointmeta}},
+    nodes near coords style={font=\scriptsize, text=black},
+]
+\addplot[
+    scatter,
+    only marks,
+    mark=square*,
+    mark size=16pt,
+    point meta=explicit,
+    scatter src=explicit,
+    scatter/use mapped color={draw=mapped color, fill=mapped color},
+] coordinates {
+    (SeenDst,2) [96.51]
+    (UnseenDst,2) [3.49]
+    (AnyPair,2) [66.05]
+    (AnyRecent32,2) [59.75]
+    (Top1000,2) [4.36]
+    (SeenDst,1) [46.41]
+    (UnseenDst,1) [53.59]
+    (AnyPair,1) [56.54]
+    (AnyRecent32,1) [2.70]
+    (Top1000,1) [1.12]
+};
+\end{axis}
+\end{tikzpicture}
+\note{AnyPair/AnyRecent32 表示一行测试候选中至少有一个目标命中历史 pair 或同源 recent-32；Top1000 表示候选进入训练目标热度 top-1000 的比例。}
+\end{figure}
+
+\section{当前系统方案}
+
+\paragraph{三条模型路线}
+当前架构围绕同一候选级预测接口组织三条模型路线。第一条是 \code{hybrid}，也是当前提交主线：它把统计记忆、
+候选先验、结构共现、Two-Tower、图塔和序列塔统一成候选特征，再用融合器学习每行 100 个候选的排序。第二条是
+\code{temporal-graph}，即端到端时序图研究线：它使用节点历史、候选历史、时间编码和 CRAFT-style cross-attention，
+直接以候选集合 softmax/listwise 目标训练。第三条是 \code{craft}，即官方 CRAFT baseline 适配线：它保留官方时序邻居采样
+和 BPR 风格训练，用作架构回归、对照实验和官方基线复核。
+
+\begin{table}[t]
+\caption{当前架构中的三种模型路线}
+\label{t:model-routes}
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}>{\raggedright\arraybackslash}p{0.20\linewidth}>{\raggedright\arraybackslash}p{0.28\linewidth}>{\raggedright\arraybackslash}p{0.40\linewidth}}
+\toprule
+模型路线 & 定位 & 研究价值 \\
+\midrule
+\code{hybrid} & 当前冲分主线 & 用强统计和多塔表示做候选级融合，已取得当前最好线上反馈。 \\
+\code{temporal-graph} & 端到端研究线 & 检验列表式时序图模型能否替代手工特征融合，并服务于 Optuna 调参探索。 \\
+\code{craft} & 官方基线适配线 & 保持与官方 baseline 的可比性，验证统一训练、预测和提交管线。 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\begin{figure}[H]
+\caption{\code{hybrid} 候选级混合重排序架构}
+\label{f:arch-hybrid}
+\centering
+% 六塔说明 (tabular)
+\begin{tabular}{@{}c@{}}
+\begin{tabular}{|c|c|c|}
+\hline
+\multicolumn{3}{|c|}{\scriptsize\textbf{六塔候选特征工厂}} \\
+\hline
+\scriptsize StatsTower & \scriptsize TwoTower & \scriptsize SequenceTower \\
+\scriptsize pair/recent/hot & \scriptsize dot/cosine & \scriptsize GRU/SASRec \\
+\hline
+\scriptsize CandidatePrior & \scriptsize GraphTower & \\
+\scriptsize test 候选统计 & \scriptsize LightGCN/XSimGCL & \\
+\hline
+\scriptsize StructureTower & & \\
+\scriptsize 共现/Jaccard & & \\
+\hline
+\end{tabular}
+\end{tabular}
+
+\vspace{3mm}
+
+% 主流程 (smartdiagram)
+\smartdiagramset{
+  set color list={gray!15, teal!12, teal!12, orange!12, teal!15, orange!15},
+  arrow color=black!55,
+  border color=black!25,
+  text width=19mm,
+  module minimum height=9mm,
+  font=\scriptsize,
+}
+\resizebox{0.94\linewidth}{!}{%
+\smartdiagram[flow diagram:horizontal]{
+  输入证据栈,
+  六塔特征工厂,
+  候选特征矩阵,
+  验证选择,
+  融合排序器,
+  输出概率
+}}
+{\centering\scriptsize\color{black!50}
+\begin{tabular}{@{}c@{}}
+$G_{<t}$,\ $(s,t,C_i)$ $\to$ 统计/先验/结构/表示 \\
+图/序列 $\to$ $X_i\in\mathbb{R}^{100\times d}$ $\to$ 特征组开关 \\
+$z_{i,k}=f_\theta(x_{i,k})$ $\to$ row softmax $P_i$
+\end{tabular}\par}
+\note{\code{hybrid} 不把某个神经塔默认写死到最终提交，而是先把统计、候选先验、结构、表示、图和序列证据统一为候选级特征，再按验证表现选择特征组并由融合器输出行内排序分数。}
+\end{figure}
+
+\begin{figure}[H]
+\caption{\code{temporal-graph} 端到端时序图重排序架构}
+\label{f:arch-temporal-graph}
+\centering
+% 编码器说明 (tabular)
+\begin{tabular}{@{}c@{}}
+\begin{tabular}{|c|c|c|}
+\hline
+\multicolumn{3}{|c|}{\scriptsize\textbf{表示编码器}} \\
+\hline
+\scriptsize 源历史编码 $h_s(t)$ &
+\scriptsize 候选历史编码 $h_{c_k}(t)$ &
+\scriptsize 时间编码 $\Delta t$/recency \\
+\hline
+\end{tabular}
+\end{tabular}
+
+\vspace{3mm}
+
+\smartdiagramset{
+  set color list={gray!12, blue!10, teal!12, teal!15, orange!15},
+  arrow color=black!55,
+  border color=black!25,
+  text width=19mm,
+  module minimum height=9mm,
+  font=\scriptsize,
+}
+\smartdiagram[flow diagram:horizontal]{
+  时序输入,
+  表示编码器,
+  cross-attention,
+  listwise scorer,
+  输出与监督
+}
+{\centering\scriptsize\color{black!50}
+事件流/候选行/因果切分 \quad$\to$\quad
+源/候选/时间编码 \quad$\to$\quad
+候选集合上下文 \quad$\to$\quad
+$z_{i,1:100}$ \quad$\to$\quad
+$P_i$ / listwise-CE\par}
+\note{\code{temporal-graph} 将源节点历史、候选目标历史和时间间隔放入同一时序图模型中，通过候选集合级 cross-attention 直接输出 100 个候选的 listwise 分数，用来检验端到端动态图模型能否替代手工特征融合。}
+\end{figure}
+
+\begin{figure}[H]
+\caption{\code{craft} 官方基线适配架构}
+\label{f:arch-craft}
+\centering
+% --- 训练链路 (smartdiagram) ---
+\smartdiagramset{
+  set color list={gray!15, teal!20, teal!20, teal!20, orange!20},
+  arrow color=black!60,
+  border color=black!30,
+  text width=22mm,
+  module minimum height=9mm,
+  font=\scriptsize,
+}
+\smartdiagram[flow diagram:horizontal]{
+  官方事件流,
+  时序邻居采样,
+  局部时序子图,
+  CRAFT encoder,
+  BPR 训练
+}
+
+\vspace{3mm}
+
+% --- 预测链路 (smartdiagram) ---
+\smartdiagramset{
+  set color list={gray!15, blue!12, teal!20, orange!20},
+}
+\smartdiagram[flow diagram:horizontal]{
+  提交候选行,
+  统一预测适配,
+  pair scorer,
+  行内归一化
+}
+
+\vspace{2mm}
+{\centering\scriptsize\color{black!50}
+训练：$(s,d,t)\to$ sampler $\to$ subgraph $\to$ encoder $\to$ BPR ($s,d^+$ vs $s,d^-$)\par
+预测：$(s,t,C_i)\to$ 遍历 100 候选 $\to f(s,c_k,t)\to P_i$\par
+作用：官方可比性、训练/预测管线回归、baseline 复核\par}
+\note{\code{craft} 的重点不是当前最高分，而是保留官方 baseline 的时序邻居采样和 BPR 训练方式，并把它适配到本项目统一的 100 候选预测与提交管线中，便于做对照实验和回归检查。}
+\end{figure}
+
+\paragraph{hybrid 主线结构}
+\code{hybrid} 的固定特征顺序为：
+\begin{equation}
+\text{stats}+\text{candidate\_prior}+\text{structure}+\text{two\_tower}+\text{graph}+\text{sequence}.
+\end{equation}
+训练时会在“统计”“统计+候选先验”“统计+候选先验+结构”“加入表示塔”“加入图塔”“加入序列塔”等层级之间做
+验证选择。这样可以保留复杂模型的潜在收益，同时避免某个塔在特定数据集上退化时被强行写入最终提交。
+
+\paragraph{时间因果切分}
+训练阶段先按时间排序，再切出 context events、supervised train events 和 validation events。特征塔在
+对应历史上下文中拟合，融合器用正样本加负候选训练。正式预测前，final encoder 使用完整可用训练历史重建。
+这种安排兼顾了时间因果性和正式提交时的历史利用率。
+
+\paragraph{自动数据画像}
+项目不按数据集名称硬编码策略，而是通过 holdout pair hit rate、new pair rate、候选未见目标比例、源节点历史
+长度和测试候选分布集中度等统计量，将数据画像为 \code{repeat\_memory}、\code{balanced} 或
+\code{new\_link\_cold}。当前线上最好提交中，dataset1 被自动画像为 \code{repeat\_memory}，dataset2 被画像为
+\code{new\_link\_cold}。这与实验观察一致：dataset1 更依赖历史重复记忆，dataset2 更需要候选先验、结构和表示特征。
+
+\begin{table}[t]
+\caption{当前混合重排序系统的主要特征塔}
+\label{t:towers}
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}>{\raggedright\arraybackslash}p{0.22\linewidth}>{\raggedright\arraybackslash}p{0.66\linewidth}}
+\toprule
+模块 & 作用 \\
+\midrule
+StatsTower & 历史 pair 记忆、近期命中、目标热度、源活跃度和时间近因，是 repeat-memory 场景的强基线。 \\
+CandidatePriorTower & 只使用无标签 test 候选集合统计，补足训练未见目标节点的非零信号。 \\
+StructureTower & 建模共同邻居、Jaccard、反向交互、共现和转移等局部图结构关系。 \\
+TwoTower & 用 Jittor 训练轻量 ID 表示，输出候选 dot 和 cosine 特征。 \\
+GraphTower & 使用 XSimGCL/LightGCN 输出多窗口图协同过滤分数。 \\
+SequenceTower & 使用 SASRec/GRU 风格序列偏好塔，当前只在验证选择通过时进入最终特征组。 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\section{模型优化进展}
+
+\paragraph{当前冠军基线}
+截至 2026 年 6 月 8 日，当前最好 A 榜反馈为 $1.2044$。该版本使用 \code{hybrid} 主线，
+同时覆盖 dataset1 和 dataset2 的完整测试查询。相同主线配置的上一版线上反馈为 $1.1983$。当前版本在保持
+提交格式约束的前提下完成特征组选择与全量重跑，线上反馈获得小幅提升。
+
+\begin{figure}[H]
+\caption{主要线上反馈得分增长趋势}
+\label{f:score-trend}
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.92\linewidth,
+    height=0.42\linewidth,
+    ymin=0.85,
+    ymax=1.25,
+    ylabel={A 榜反馈},
+    yticklabel={\pgfmathprintnumber[fixed,precision=4]{\tick}},
+    symbolic x coords={TG, GNN-v1, Hybrid-v1, Hybrid-v2},
+    xtick=data,
+    x tick label style={anchor=north, yshift=-6pt},
+    ymajorgrids=true,
+    grid style={gray!20},
+    mark size=2.5pt,
+    point meta=y,
+    nodes near coords,
+    nodes near coords={\pgfmathprintnumber[fixed,precision=4]{\pgfplotspointmeta}},
+    nodes near coords style={font=\scriptsize, yshift=5pt},
+]
+\addplot+[very thick, mark=*, draw=teal!70!black, fill=none, mark options={draw=teal!70!black, fill=white}] coordinates {(TG,0.9406) (GNN-v1,1.1452) (Hybrid-v1,1.1983) (Hybrid-v2,1.2044)};
+\end{axis}
+\end{tikzpicture}
+\note{TG 表示历史 temporal-graph 基线；GNN-v1 表示第一版完整 GNN；Hybrid-v1 和 Hybrid-v2 分别表示上一版与当前混合重排序主线。}
+\end{figure}
+
+\begin{table}[H]
+\caption{当前最好提交的本地验证与线上反馈}
+\label{t:best}
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}lrrll}
+\toprule
+数据集 & AP & MRR & 选择层级 & 自动画像 \\
+\midrule
+dataset1 & 0.7551 & 0.7736 & 统计+先验+结构+表示 & \code{repeat\_memory} \\
+dataset2 & 0.3269 & 0.5525 & 统计+先验+结构+表示+图 & \code{new\_link\_cold} \\
+\bottomrule
+\end{tabular*}
+\note{线上总分为 $1.2044$。}
+\end{table}
+
+\paragraph{历史强基线}
+第一版完整 GNN 提交使用随机负采样、XSimGCL 三窗口图塔和可选 SASRec 序列塔，线上得分为 $1.1452$。该版本
+在本地的 dataset1/dataset2 MRR 分别为 $0.8029$ 和 $0.5177$，本地加和高于线上反馈，说明时间切分验证偏乐观。
+因此，第一版 GNN 只作为历史强基线，当前默认对照已经切换到线上最好提交。
+
+\section{工程优化进展}
+
+\paragraph{优化原则}
+工程优化不是为了牺牲模型质量换速度，而是为了缩短完整实验闭环，并让复杂特征在可接受时间内全量运行。当前所有
+保留改动都遵循三条原则：第一，固定数据、固定 batch size 和固定候选数做前后对照；第二，涉及特征或提交格式的改动
+必须做输出一致性或 CSV/ZIP 校验；第三，没有完整链路收益或收益不稳定的原型只记录为实验结论，不进入默认链路。
+
+\paragraph{数据通道与映射}
+训练交互读取已经从逐行对象构造切换为数组化读取，测试查询也从逐行对象切换为批量数组切片。这个改动带来的收益不只
+是 IO 加速，还包括排序、unique、tail slice、训练事件采样和预测 batch 构造的整体降本。进一步地，节点 ID 映射从
+逐元素字典访问改为批量二分映射，避免数组化之后又在下游退回 Python 循环。图 \ref{f:engineering-io} 展示了数据通道
+中最关键的加速比。
+
+\begin{figure}[t]
+\caption{数据通道主要加速比}
+\label{f:engineering-io}
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.90\linewidth,
+    height=0.44\linewidth,
+    ybar,
+    bar width=14pt,
+    ymin=0,
+    ymax=90,
+    ytick={0,20,40,60,80},
+    ylabel={加速比},
+    symbolic x coords={TrainIO,TestIO,IDMap,PredBatch},
+    xtick=data,
+    x tick label style={font=\scriptsize, anchor=north, yshift=-4pt},
+    enlarge x limits=0.16,
+    legend style={at={(0.5,1.06)},anchor=south,legend columns=2,draw=none},
+    ymajorgrids=true,
+    grid style={gray!20},
+    nodes near coords,
+    nodes near coords={\pgfmathprintnumber[fixed,precision=1]{\pgfplotspointmeta}},
+    point meta=y,
+    nodes near coords style={font=\scriptsize, yshift=5pt},
+]
+\addplot+[draw=teal!70!black, fill=teal!35] coordinates {(TrainIO,79.78) (TestIO,33.68) (IDMap,6.71) (PredBatch,6.50)};
+\addplot+[draw=orange!80!black, fill=orange!35] coordinates {(TrainIO,72.52) (TestIO,34.15) (IDMap,6.84) (PredBatch,5.46)};
+\legend{dataset1,dataset2}
+\end{axis}
+\end{tikzpicture}
+\note{TrainIO/TestIO 表示训练交互与测试查询读取；IDMap 表示全量训练事件 ID 映射；PredBatch 表示 2048 行预测 batch 构造。}
+\end{figure}
+
+\begin{table}[H]
+\caption{数据读取内存峰值变化}
+\label{t:engineering-memory}
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}lrrr}
+\toprule
+阶段 & 旧版峰值 & 新版峰值 & 降幅 \\
+\midrule
+dataset1 训练读取 & 127.7 MiB & 13.0 MiB & 89.8\% \\
+dataset2 训练读取 & 419.0 MiB & 31.3 MiB & 92.5\% \\
+dataset1 测试读取 & 223.6 MiB & 30.8 MiB & 86.2\% \\
+dataset2 测试读取 & 559.7 MiB & 69.4 MiB & 87.6\% \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\paragraph{训练 batch 构造}
+早期 profiling 显示，完整训练 batch 构造的主要瓶颈不是负采样，而是候选侧 recent 邻居采样。负采样向量化虽然能让
+局部负采样快约四分之一，但完整 batch 构造几乎没有收益，因此没有进入默认链路。真正有效的改动是把 recent 邻居
+采样改为 CSR 扁平索引与向量化二分查找：候选邻居采样获得约 $5.6$--$6.1$ 倍加速，完整训练 batch 构造获得约
+$3.9$--$4.1$ 倍加速。图 \ref{f:engineering-batch} 展示了这组收益。
+
+\begin{figure}[t]
+\caption{训练 batch 构造加速比}
+\label{f:engineering-batch}
+\begin{tikzpicture}
+\begin{axis}[
+    width=\linewidth,
+    height=0.42\linewidth,
+    ybar,
+    bar width=18pt,
+    ymin=0,
+    ymax=7,
+    ylabel={加速比},
+    symbolic x coords={CandNbr,BatchBuild,TestLike,JittorCast,SubmitCheck},
+    xtick=data,
+    x tick label style={font=\scriptsize, anchor=north, yshift=-4pt},
+    enlarge x limits=0.12,
+    ymajorgrids=true,
+    grid style={gray!20},
+    nodes near coords,
+    nodes near coords={\pgfmathprintnumber[fixed,precision=2]{\pgfplotspointmeta}},
+    point meta=y,
+    nodes near coords style={font=\scriptsize},
+    every axis plot/.append style={draw=blue!65!black, fill=blue!30},
+]
+\addplot coordinates {(CandNbr,6.07) (BatchBuild,3.89) (TestLike,1.60) (JittorCast,1.90) (SubmitCheck,2.56)};
+\end{axis}
+\end{tikzpicture}
+\note{CandNbr 表示候选 recent 邻居采样；BatchBuild 表示完整训练 batch 构造；TestLike 表示 test-like 验证候选快路径；JittorCast 表示模型边界类型转换；SubmitCheck 表示提交 CSV 校验。}
+\end{figure}
+
+\paragraph{候选特征与推理链路}
+候选级特征构造是本项目推理成本最高的工程面之一。当前已保留的优化包括：按源节点组织 pair 统计索引，降低全局
+二元组查询开销；目标热度和最近交互时间转为 dense array 查询；目标节点特征在 batch 维度一次性填充，减少逐 query
+重复构造候选数组和掩码。图 \ref{f:engineering-feature} 汇总了这些候选特征优化的局部收益。
+
+\begin{figure}[H]
+\caption{候选特征构造加速比}
+\label{f:engineering-feature}
+\begin{tikzpicture}
+\begin{axis}[
+    width=\linewidth,
+    height=0.42\linewidth,
+    ybar,
+    bar width=14pt,
+    ymin=0,
+    ymax=3.5,
+    ylabel={加速比},
+    symbolic x coords={CSVWrite,PairFeat,PairFit,DenseDst,BatchDstCold,BatchDstWarm},
+    xtick=data,
+    x tick label style={font=\scriptsize, anchor=north, yshift=-4pt},
+    enlarge x limits=0.08,
+    ymajorgrids=true,
+    grid style={gray!20},
+    nodes near coords,
+    nodes near coords={\pgfmathprintnumber[fixed,precision=2]{\pgfplotspointmeta}},
+    point meta=y,
+    nodes near coords style={font=\scriptsize, yshift=5pt},
+    every axis plot/.append style={draw=purple!60!black, fill=purple!25},
+]
+\addplot coordinates {(CSVWrite,3.09) (PairFeat,1.36) (PairFit,1.77) (DenseDst,1.55) (BatchDstCold,2.59) (BatchDstWarm,2.83)};
+\end{axis}
+\end{tikzpicture}
+\note{PairFeat 表示候选打分阶段 per-source pair 索引收益；PairFit 表示统计索引构建收益；BatchDstCold/Warm 表示批量目标节点特征填充在 cold/warm 口径下的收益。}
+\end{figure}
+
+\paragraph{dataset2 推理瓶颈治理}
+dataset2 的候选规模更大、长尾目标更多，结构特征容易成为推理阶段的主要瓶颈。一次速度诊断显示，主要耗时集中在
+结构特征而非神经网络训练。当前版本通过 future-only 共现预聚合降低重复计算，并为大历史源节点缓存候选共现计数，
+避免在推理阶段退回候选数乘源节点历史长度的暴力查询。该修复是等价加速：不改变特征定义、不减少训练事件、不关闭
+模型塔。
+
+\paragraph{全量提交闭环}
+工程优化最终服务于可复现实验闭环。最近一次全量冠军版本运行耗时约 $55$ 分 $57$ 秒，dataset1 输出 $61051$ 行，
+dataset2 输出 $153420$ 行，CSV 行列数、概率范围、每行概率和与压缩包结构均可检查。当前系统还保留阶段级内存日志和
+特征耗时画像，用于区分模型收益、数据通道收益和推理瓶颈治理收益。
+
+\section{文献调研到实现路线的映射}
+
+\paragraph{近年前沿方向}
+2023 年以来的推荐研究为后续扩展提供了更多候选路线，但与本项目的契合度不同。生成式检索和 Semantic ID 适合大规模
+召回，能启发候选目标的离散语义编码；扩散推荐把用户偏好建模为去噪生成过程，适合探索分布式偏好建模
+\citep{wang2023diffrec}，但提交接口仍要求对给定 100 个候选打分。2025 年以后，这条线进一步向工程化和基础模型化
+发展：GRID 系统化梳理了 Semantic ID 生成式推荐的组件与消融 \citep{ju2025grid}，联合搜索和推荐的 Semantic ID
+工作说明同一套离散物品标识可以服务多任务生成框架 \citep{penha2025semanticids}，2026 年可变长 Semantic ID
+预印本则尝试让热门和长尾物品使用不同长度的离散描述 \citep{khrylchenko2026semanticids}。与此同时，RecGPT 把顺序推荐
+推向文本驱动的基础模型和跨域零样本方向 \citep{jiang2025recgpt}，LLM-agent 推荐综述则把大模型从静态排序器扩展到
+规划、记忆和交互式推荐代理 \citep{peng2025llmagents}。这些工作说明前沿趋势正在从单一协同过滤走向生成式、语义 ID、
+长序列和基础模型，但在本项目中更适合作为“候选级特征塔或隔离实验”的灵感来源，而不是直接替换当前主线。
+图 \ref{f:literature-timeline} 将这一脉络按时间展开：早期工作提供排序目标和图推荐基础，近年工作更多转向生成式、
+语义 ID、长序列和基础模型；本项目的落点仍是把这些思想压缩成可验证的候选级特征，而不是改变赛题给定候选的接口。
+
+\begin{figure}[!htbp]
+\caption{推荐研究脉络与本项目落点}
+\label{f:literature-timeline}
+\centering
+\begin{tikzpicture}[
+    x=1cm,
+    y=1cm,
+    timeline axis/.style={draw=black!55, line width=.45pt},
+    timeline tick/.style={draw=black!55, line width=.35pt},
+    phase line/.style={line width=3pt, line cap=round},
+    phase label/.style={font=\scriptsize, align=center, inner sep=1pt},
+    year label/.style={font=\scriptsize, text=black!65, inner sep=1pt}
+]
+\def\TimelineW{13.2}
+\def\TimelineX#1{(#1-2008)/19*\TimelineW}
+
+\draw[timeline axis] (0,0) -- (\TimelineW,0);
+\foreach \yr in {2008,2012,2016,2020,2024,2027} {
+    \draw[timeline tick] ({\TimelineX{\yr}},-.07) -- ({\TimelineX{\yr}},.07);
+    \node[year label] at ({\TimelineX{\yr}},-.25) {\yr};
+}
+
+\draw[phase line, draw=teal!55!black] ({\TimelineX{2009}},.55) -- ({\TimelineX{2017}},.55);
+\node[phase label, text=teal!45!black] at ({\TimelineX{2013}},.98) {2009--2017\\排序目标 / 图推荐基础};
+
+\draw[phase line, draw=blue!58!black] ({\TimelineX{2018}},-.55) -- ({\TimelineX{2022}},-.55);
+\node[phase label, text=blue!45!black] at ({\TimelineX{2020}},-.98) {2018--2022\\轻量图协同 / 谱图信号};
+
+\draw[phase line, draw=orange!72!black] ({\TimelineX{2023}},.55) -- ({\TimelineX{2026}},.55);
+\node[phase label, text=orange!55!black] at ({\TimelineX{2024.5}},.98) {2023--2026\\生成式检索 / 语义 ID / 基础模型};
+
+\draw[red!68!black, line width=.55pt] ({\TimelineX{2026}},0) -- ({\TimelineX{2026}},-1.28);
+\fill[red!68!black] ({\TimelineX{2026}},0) circle (2pt);
+\node[phase label, text=red!62!black] at ({\TimelineX{2026}},-1.62) {2026\\本项目落点\\候选级重排序};
+\end{tikzpicture}
+\note{时间线按研究路线而非论文清单组织：早期解决排序目标和图推荐基础，中期转向轻量图协同与谱图信号，近年扩展到生成式检索、语义 ID 和基础模型。本项目落点仍是给定 100 个候选做重排序，前沿方向优先转化为候选特征塔、谱图分数、轻量序列塔或隔离实验。}
+\end{figure}
+
+\begin{table}[!tbp]
+\caption{近年推荐研究方向与本项目适配判断}
+\label{t:recent-literature}
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}>{\raggedright\arraybackslash}p{0.24\linewidth}>{\raggedright\arraybackslash}p{0.28\linewidth}>{\raggedright\arraybackslash}p{0.36\linewidth}}
+\toprule
+方向 & 代表工作 & 对本项目的启发 \\
+\midrule
+生成式检索与 Semantic ID & TIGER, GRID, Joint SID, Variable-length SID & 可借鉴目标离散语义编码；不直接替代给定候选重排序。 \\
+LLM/Agent 推荐 & LLM4GenRec, LC-Rec, LLM Agents & 可借鉴协同语义对齐和交互式规划；当前缺少文本语义，工程跨度较大。 \\
+扩散推荐 & DiffRec & 可作为偏好分布建模参考；短期不进入默认提交链路。 \\
+大规模序列基础模型 & HSTU, Mamba4Rec, RecGPT & 可借鉴长序列建模、跨域泛化和高效推理；先以轻量序列塔或统计窗口验证收益。 \\
+动态图 Transformer & DyGFormer & 可借鉴时间编码和邻居共现编码；需控制推理成本和线上稳定性。 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\paragraph{GNN 主线}
+LightGCN、XSimGCL、SGL、LightGCL、SVD-GCN、ChebyCF 和 GSPRec 构成当前 GNN 调研的主线。其共同趋势是从
+堆叠复杂 message passing 转向更轻量、更可解释的图过滤和谱信号。LightGCL 使用 SVD 构造全局协同视图
+\citep{cai2023lightgcl}，SVD-GCN 将 LightGCN 与低秩矩阵分解联系起来 \citep{peng2022svdgcn}，这与本项目
+低成本增加谱图候选分数的方向高度贴合。
+
+\paragraph{负采样与验证}
+GNN 推荐常用 BPR 或 sampled softmax。BPR 提供了隐式反馈 pairwise 排序的基本目标 \citep{rendle2009bpr}；
+MixGCF 和 PinSage 类工作则强调 hard negatives 对 GNN 推荐的重要性 \citep{huang2021mixgcf,ying2018pinsage}。
+但本项目已有 hard-negative 本地高分、线上低分的反例，因此负采样调整必须记录来源比例，并与线上锚点绑定。
+
+\paragraph{序列、知识追踪与动态图方向}
+团队讨论中提出，可以把本赛题中的重复边与时间间隔类比到知识追踪中的“学生重复练习同一道题”和“相邻练习间隔”。
+Deep Knowledge Tracing 使用 RNN 跟踪学生知识状态 \citep{piech2015dkt}，GRU4Rec 则说明 GRU 可以直接用于会话序列推荐
+\citep{hidasi2016gru4rec}；SASRec 和 TiSASRec 进一步把自注意力和时间间隔引入序列推荐
+\citep{kang2018sasrec,li2020tisasrec}。这类思路适合转化为本项目的候选级时序塔：先用 GRU 或 Transformer 编码源节点
+历史目标序列、重复交互次数和时间间隔，再对给定 100 个候选分别输出匹配分数。需要强调的是，比赛候选集合是固定的，
+因此时序模型不应做全量 next-item 生成，而应作为候选重排序特征进入融合器。该方向尚未完成实验，适合在 dataset1 的
+重复边场景上先做小规模验证，再观察是否能迁移到 dataset2 的长序列新链接场景。
+
+JODIE、TGAT、TGN、DyGFormer、SR-GNN 和 TAGNN 与动态推荐题面也相近，但完整事件流模型的工程跨度较大
+\citep{kumar2019jodie,rossi2020tgn,wu2019srgnn,yu2023dygformer}。当前更稳的做法是先把时间信息表达为多窗口图、
+时间衰减边权、候选行内 rank 和结构交叉项；只有这些轻量特征稳定有效后，再考虑重型动态图模型。
+
+\section{风险分析}
+
+\paragraph{本地指标偏差}
+当前最大风险是本地 AP/MRR 对线上反馈的解释力不足。第一版 GNN 的本地 MRR 加和为 $1.3206$，线上却只有 $1.1452$；
+当前冠军包本地 dataset1/dataset2 MRR 加和为 $1.3261$，线上为 $1.2044$。这不意味着本地验证无用，而是说明本地验证
+只能作为排序诊断和回归信号，不能替代线上反馈。图 \ref{f:risk-local-online} 显示，两次主要提交中本地 MRR 加和都
+明显高于线上反馈，且本地高分并不自动对应线上高分。
+
+\begin{figure}[H]
+\caption{本地 MRR 加和与线上反馈偏差}
+\label{f:risk-local-online}
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}
+\begin{axis}[
+    width=\linewidth,
+    height=0.42\linewidth,
+    xmin=0.90,
+    xmax=1.36,
+    xlabel={分数},
+    symbolic y coords={TG,GNN-v1,Hybrid-v1,Hybrid-v2},
+    ytick=data,
+    y tick label style={font=\scriptsize},
+    enlarge y limits=0.18,
+    xmajorgrids=true,
+    grid style={gray!20},
+    legend style={at={(0.5,1.08)},anchor=south,legend columns=2,draw=none},
+]
+\addplot+[thick, no marks, draw=gray!55, forget plot] coordinates {(0.9406,TG) (1.1782,TG)};
+\addplot+[thick, no marks, draw=gray!55, forget plot] coordinates {(1.1452,GNN-v1) (1.3206,GNN-v1)};
+\addplot+[thick, no marks, draw=gray!55, forget plot] coordinates {(1.1983,Hybrid-v1) (1.3227,Hybrid-v1)};
+\addplot+[thick, no marks, draw=gray!55, forget plot] coordinates {(1.2044,Hybrid-v2) (1.3261,Hybrid-v2)};
+\addplot+[only marks, mark=*, mark size=2.8pt, draw=teal!70!black, fill=teal!35, point meta=x,
+    nodes near coords,
+    nodes near coords={\pgfmathprintnumber[fixed,precision=4]{\pgfplotspointmeta}},
+    nodes near coords style={font=\scriptsize, anchor=west, xshift=4pt}]
+    coordinates {(1.1782,TG) (1.3206,GNN-v1) (1.3227,Hybrid-v1) (1.3261,Hybrid-v2)};
+\addplot+[only marks, mark=square*, mark size=2.8pt, draw=red!65!black, fill=red!25, point meta=x,
+    nodes near coords,
+    nodes near coords={\pgfmathprintnumber[fixed,precision=4]{\pgfplotspointmeta}},
+    nodes near coords style={font=\scriptsize, anchor=east, xshift=-4pt}]
+    coordinates {(0.9406,TG) (1.1452,GNN-v1) (1.1983,Hybrid-v1) (1.2044,Hybrid-v2)};
+\legend{本地 MRR 加和,线上反馈}
+\end{axis}
+\end{tikzpicture}}
+\note{灰线连接同一提交的线上反馈与本地 MRR 加和；线段越长，本地指标高估越明显。}
+\end{figure}
+
+\begin{table}[H]
+\caption{主要提交的本地--线上偏差}
+\label{t:risk-local-online}
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}lrrrr}
+\toprule
+版本 & dataset1 MRR & dataset2 MRR & 本地加和 & 线上反馈 \\
+\midrule
+TG & 0.7327 & 0.4455 & 1.1782 & 0.9406 \\
+GNN-v1 & 0.8029 & 0.5177 & 1.3206 & 1.1452 \\
+Hybrid-v1 & 0.7747 & 0.5481 & 1.3227 & 1.1983 \\
+Hybrid-v2 & 0.7736 & 0.5525 & 1.3261 & 1.2044 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\paragraph{数据分布与冷启动风险}
+dataset2 的新链接和冷启动风险显著高于 dataset1。holdout 中 dataset2 已知节点新 pair 占 $91.75\%$，历史 pair 命中
+只有 $0.002\%$；测试候选中未见目标占比达到 $53.59\%$，而且未见候选与训练源节点空间完全不重叠。这意味着纯历史 pair、
+纯 ID embedding 或只记忆最近目标的序列模型都可能在 dataset2 上出现系统性盲区。表 \ref{t:risk-data} 汇总了这一风险。
+
+\begin{table}[H]
+\caption{数据分布风险指标}
+\label{t:risk-data}
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}lrrl}
+\toprule
+风险指标 & dataset1 & dataset2 & 影响 \\
+\midrule
+holdout 历史 pair 命中 & 56.91\% & 0.002\% & pair 记忆在 dataset2 失效。 \\
+holdout 已知节点新 pair & 36.88\% & 91.75\% & dataset2 更像新链接预测。 \\
+测试候选未见目标 & 3.49\% & 53.59\% & dataset2 需要候选先验和兜底分数。 \\
+候选 recent-32 query 命中 & 59.75\% & 2.70\% & dataset2 近期重复信号很弱。 \\
+源节点历史长度 p90 & 79 & 430 & dataset2 序列长、推理成本更高。 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\paragraph{复杂模型风险}
+复杂模型容易带来三类问题：第一，seed 敏感导致线上结果不稳定；第二，负采样分布与测试候选分布不一致导致本地虚高；
+第三，推理阶段结构或序列特征在 dataset2 上成为长尾瓶颈。已有实验已经出现过这些风险：Semantic ID 聚类塔在
+dataset2 局部样本中对单一 seed 有提升，但另一 seed 不复现；item-transition 图分支本地表现较高，线上反馈只有
+$0.4079$；recent-popular hard negatives 让 dataset1 MRR 从 $0.7312$ 降到 $0.7253$，并使候选构造耗时约为 baseline
+的 $2.7$ 倍。表 \ref{t:risk-failed} 将这些失败案例作为后续方案设计的反例。
+
+\begin{table}[H]
+\caption{已观察到的模型风险案例}
+\label{t:risk-failed}
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}>{\raggedright\arraybackslash}p{0.28\linewidth}>{\raggedright\arraybackslash}p{0.28\linewidth}>{\raggedright\arraybackslash}p{0.34\linewidth}}
+\toprule
+风险类型 & 观测数据 & 含义 \\
+\midrule
+线上--本地反转 & item-transition 线上 $0.4079$，低于 GNN-v1 $1.1452$ & 本地高分不能直接作为提交依据。 \\
+seed 不稳定 & Semantic ID 聚类塔 seed 42 局部提升，seed 7 不复现 & 前沿模型需多 seed 验证。 \\
+负采样偏移 & recent-popular 使 dataset1 MRR $0.7312\rightarrow0.7253$ & hard negative 可能改变学习目标。 \\
+运行成本上升 & recent-popular 候选构造耗时约 $2.7$ 倍 & 复杂训练协议可能拖慢实验闭环。 \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\paragraph{工程与可复现风险}
+当前冠军版本全量运行约 $55$ 分 $57$ 秒，已经可以接受，但 dataset2 仍是工程风险集中区。一次速度诊断中，dataset2
+结构特征在 $150016$ 行上耗时 $11346.1$ 秒，说明只要结构特征退回暴力共现查询，完整提交闭环就会被单一模块拖垮。
+因此工程风险不只是“跑得慢”，还会影响模型迭代节奏、线上 A/B 频率和失败实验回收成本。
+
+\begin{figure}[H]
+\caption{关键风险指标强度}
+\label{f:risk-summary}
+\resizebox{0.96\linewidth}{!}{%
+\begin{tikzpicture}
+\begin{axis}[
+    width=\linewidth,
+    height=0.44\linewidth,
+    xbar,
+    xmin=0,
+    xmax=195,
+    xlabel={风险指标（\%）},
+    symbolic y coords={RuntimeOverhead,RecentMiss,KnownNew,UnseenDst,LocalGap},
+    ytick=data,
+    y tick label style={font=\scriptsize},
+    enlarge y limits=0.14,
+    xmajorgrids=true,
+    grid style={gray!20},
+    point meta=x,
+    nodes near coords,
+    nodes near coords={\pgfmathprintnumber[fixed,precision=1]{\pgfplotspointmeta}},
+    nodes near coords style={font=\scriptsize, xshift=7pt},
+    every axis plot/.append style={draw=orange!80!black, fill=orange!35},
+]
+\addplot coordinates {(10.1,LocalGap) (53.59,UnseenDst) (91.75,KnownNew) (97.30,RecentMiss) (170.0,RuntimeOverhead)};
+\end{axis}
+\end{tikzpicture}}
+\note{LocalGap 表示 Hybrid-v2 本地 MRR 加和相对线上反馈的高估比例。\par
+RecentMiss 表示 dataset2 测试查询中没有候选 recent-32 命中的比例。\par
+RuntimeOverhead 表示 recent-popular 负采样相对 baseline 的额外耗时比例。}
+\end{figure}
+
+\section{下一阶段计划}
+
+\paragraph{P0：固定可复现冠军基线}
+保留当前 $1.2044$ 线上反馈版本作为冠军基线，记录模型路线、关键参数、CSV 行数和线上反馈。
+任何新实验先单跑 dataset2，小规模确认后再决定是否与稳定 dataset1 结果组合提交。
+
+\paragraph{P1：dataset2 调参闭环}
+dataset2 是当前主要增量空间。优先对融合训练事件数、验证事件数、MRR 选择口径和测试候选负采样比例做小输出对比。
+若本地趋势稳定，再跑全量，并用稳定 dataset1 结果组合提交。
+
+\paragraph{P2：谱图协同特征隔离实验}
+下一条模型研究线应从谱图候选分数开始，而不是直接上更复杂动态图网络。建议实现全量、近期、短期三个窗口的 SVD 或
+Chebyshev 图过滤分数，并增加候选行内 rank/percentile 特征。该实验默认关闭，只通过验证选择层进入
+图塔相关层级或后续扩展层级。
+
+\paragraph{P3：负采样校准}
+在当前随机负采样与测试候选分布负采样混合的基础上，尝试热门、近期、历史和图难负例的可控比例。
+每次调整都必须写入实验记录，并优先观察线上锚点是否随本地 MRR 同向变化。
+
+\paragraph{P4：时序/知识追踪启发实验}
+将 GRU 或轻量 Transformer 作为隔离序列塔，输入源节点历史目标、重复命中、时间间隔 bucket 和候选目标，输出每个候选的
+匹配分数。该实验优先在 dataset1 上验证“重复边+时间间隔”是否能带来线上一致收益；若只提升本地 MRR 或只在单 seed
+有效，则不进入默认融合层。
+
+\paragraph{P5：时间图增强}
+若谱图、负采样和轻量时序塔稳定，再考虑时间衰减 user-item 图、source recent item 到候选 item 的转移分数、
+GSPRec 风格双过滤以及更完整的 TGN/DyGFormer 事件流模型。item-transition 图已有离线高分但线上失败记录，重新尝试
+必须隔离重测。
+
+\paragraph{P6：模型级混合与投票}
+在没有强实时性约束的前提下，可以把当前 \code{hybrid}、时序塔、谱图分数和稳定统计模型作为多个候选级打分器，
+研究 rank average、概率平均、按数据画像加权和 stacking 融合。该方向的目标不是增加单模型复杂度，而是提高提交稳定性；
+任何 ensemble 方案都必须保留单模型输出、融合权重和线上反馈，避免无法解释的拼包收益。
+
+\section{结论}
+
+当前项目已经完成从 ``GNN 候选重排序'' 到 ``候选级混合重排序'' 的路线收敛：统计、候选先验和结构特征保证强基线，
+Two-Tower、XSimGCL/LightGCN 和序列塔提供可选择的表示信号，融合器负责在时间因果验证下选择特征组。线上最好结果
+$1.2044$ 证明该路线已经优于第一版完整 GNN 历史强基线。后续研究的关键不是增加模型名，而是建立更可靠的
+验证闭环：以当前冠军包为锚点，优先攻 dataset2，隔离验证谱图协同特征和负采样协议，只有通过线上或校准代理验证的改动
+才进入默认提交流程。
+
+\bibliography{\bib}
+
+\end{CJK*}
+\end{document}
