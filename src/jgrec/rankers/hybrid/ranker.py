@@ -293,30 +293,66 @@ class HybridFeatureEncoder:
     def features_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
         if not queries:
             return np.empty((0, 0, self.feature_dim), dtype=np.float32)
+        detail_profile = self.verbose and self._profile_rows == 0
+        rows = len(queries)
+        if detail_profile:
+            log_event(f"[feature-profile] first_batch rows={rows} stats_start", enabled=True)
         start = perf_counter()
         stat_features = _features_from_tower(self.stats, queries)
-        self._profile_elapsed["stats"] += perf_counter() - start
+        elapsed = perf_counter() - start
+        self._profile_elapsed["stats"] += elapsed
+        if detail_profile:
+            log_event(f"[feature-profile] first_batch rows={rows} stats_done elapsed={elapsed:.1f}s", enabled=True)
+            log_event(f"[feature-profile] first_batch rows={rows} prior_start", enabled=True)
         start = perf_counter()
         candidate_prior_features = _candidate_prior_features(self.candidate_prior, queries, stat_features)
-        self._profile_elapsed["prior"] += perf_counter() - start
+        elapsed = perf_counter() - start
+        self._profile_elapsed["prior"] += elapsed
+        if detail_profile:
+            log_event(f"[feature-profile] first_batch rows={rows} prior_done elapsed={elapsed:.1f}s", enabled=True)
+            log_event(f"[feature-profile] first_batch rows={rows} target_start", enabled=True)
         start = perf_counter()
         target_window_features = _features_from_tower(self.target_window, queries)
-        self._profile_elapsed["target"] += perf_counter() - start
+        elapsed = perf_counter() - start
+        self._profile_elapsed["target"] += elapsed
+        if detail_profile:
+            log_event(f"[feature-profile] first_batch rows={rows} target_done elapsed={elapsed:.1f}s", enabled=True)
+            log_event(f"[feature-profile] first_batch rows={rows} structure_start", enabled=True)
         start = perf_counter()
         structure_features = _features_from_tower(self.structure, queries)
-        self._profile_elapsed["structure"] += perf_counter() - start
+        elapsed = perf_counter() - start
+        self._profile_elapsed["structure"] += elapsed
+        if detail_profile:
+            log_event(f"[feature-profile] first_batch rows={rows} structure_done elapsed={elapsed:.1f}s", enabled=True)
+            log_event(f"[feature-profile] first_batch rows={rows} profile_start", enabled=True)
         start = perf_counter()
         source_profile_features = _scores_from_tower(self.source_profile, queries)
-        self._profile_elapsed["profile"] += perf_counter() - start
+        elapsed = perf_counter() - start
+        self._profile_elapsed["profile"] += elapsed
+        if detail_profile:
+            log_event(f"[feature-profile] first_batch rows={rows} profile_done elapsed={elapsed:.1f}s", enabled=True)
+            log_event(f"[feature-profile] first_batch rows={rows} tower_start", enabled=True)
         start = perf_counter()
         two_tower_features = _scores_from_tower(self.two_tower, queries)
-        self._profile_elapsed["tower"] += perf_counter() - start
+        elapsed = perf_counter() - start
+        self._profile_elapsed["tower"] += elapsed
+        if detail_profile:
+            log_event(f"[feature-profile] first_batch rows={rows} tower_done elapsed={elapsed:.1f}s", enabled=True)
+            log_event(f"[feature-profile] first_batch rows={rows} graph_start", enabled=True)
         start = perf_counter()
         graph_features = _scores_from_tower(self.graph, queries)
-        self._profile_elapsed["graph"] += perf_counter() - start
+        elapsed = perf_counter() - start
+        self._profile_elapsed["graph"] += elapsed
+        if detail_profile:
+            log_event(f"[feature-profile] first_batch rows={rows} graph_done elapsed={elapsed:.1f}s", enabled=True)
+            log_event(f"[feature-profile] first_batch rows={rows} sequence_start", enabled=True)
         start = perf_counter()
         sequence_features = _scores_from_tower(self.sequence, queries)
-        self._profile_elapsed["sequence"] += perf_counter() - start
+        elapsed = perf_counter() - start
+        self._profile_elapsed["sequence"] += elapsed
+        if detail_profile:
+            log_event(f"[feature-profile] first_batch rows={rows} sequence_done elapsed={elapsed:.1f}s", enabled=True)
+            log_event(f"[feature-profile] first_batch rows={rows} concat_start", enabled=True)
         start = perf_counter()
         features = np.concatenate(
             [
@@ -331,8 +367,11 @@ class HybridFeatureEncoder:
             ],
             axis=2,
         ).astype(np.float32, copy=False)
-        self._profile_elapsed["concat"] += perf_counter() - start
-        self._log_feature_profile(len(queries))
+        elapsed = perf_counter() - start
+        self._profile_elapsed["concat"] += elapsed
+        if detail_profile:
+            log_event(f"[feature-profile] first_batch rows={rows} concat_done elapsed={elapsed:.1f}s", enabled=True)
+        self._log_feature_profile(rows)
         return features
 
     def _log_feature_profile(self, rows: int) -> None:
@@ -663,7 +702,14 @@ class TemporalHybridRanker:
         del train_snapshot
         feature_start = perf_counter()
         log_memory("train_features_start", enabled=config.verbose)
-        train_features = _build_supervised_features(train_events, train_encoder, dst_pool, config, rng)
+        train_features = _build_supervised_features(
+            train_events,
+            train_encoder,
+            dst_pool,
+            config,
+            rng,
+            label="train_features",
+        )
         del train_encoder
         log_event(
             f"[hybrid-fit] train_features shape={train_features.shape} elapsed={perf_counter() - feature_start:.1f}s",
@@ -685,7 +731,14 @@ class TemporalHybridRanker:
         del val_snapshot
         feature_start = perf_counter()
         log_memory("val_features_start", enabled=config.verbose)
-        val_features = _build_supervised_features(val_events, val_encoder, dst_pool, config, rng)
+        val_features = _build_supervised_features(
+            val_events,
+            val_encoder,
+            dst_pool,
+            config,
+            rng,
+            label="val_features",
+        )
         del val_encoder
         log_event(
             f"[hybrid-fit] val_features shape={val_features.shape} elapsed={perf_counter() - feature_start:.1f}s",
@@ -1067,10 +1120,12 @@ class SupervisedFeatureBuilder:
         encoder: HybridFeatureEncoder,
         dst_pool: np.ndarray,
         config: TrainingConfig,
+        label: str = "supervised_features",
     ) -> None:
         self.encoder = encoder
         self.dst_pool = dst_pool
         self.config = config
+        self.label = label
         self.test_values, self.test_weights = test_candidate_arrays(encoder.dataset_profile)
         self.index = getattr(encoder.structure, "index", None)
         self.candidate_pool = build_candidate_pool(dst_pool, self.test_values)
@@ -1118,12 +1173,50 @@ class SupervisedFeatureBuilder:
             test_candidate_weights=self.test_weights,
         )
 
-    def features_for_events(self, positives: InteractionTable, rng: np.random.Generator) -> tuple[np.ndarray, int]:
+    def features_for_events(
+        self,
+        positives: InteractionTable,
+        rng: np.random.Generator,
+        *,
+        batch_id: int | None = None,
+        total_batches: int | None = None,
+        row_start: int = 0,
+        row_end: int | None = None,
+        total_rows: int | None = None,
+    ) -> tuple[np.ndarray, int]:
+        row_end = len(positives) if row_end is None else row_end
+        total_rows = row_end if total_rows is None else total_rows
+        progress = _supervised_progress_label(
+            self.label,
+            batch_id=batch_id,
+            total_batches=total_batches,
+            row_start=row_start,
+            row_end=row_end,
+            total_rows=total_rows,
+        )
+        if self.config.verbose:
+            log_event(f"[hybrid-fit] {progress} sample_start", enabled=True)
+        sample_before = self.sample_elapsed
         batch = self.batch_for_events(positives, rng)
+        if self.config.verbose:
+            log_event(
+                f"[hybrid-fit] {progress} sample_done elapsed={self.sample_elapsed - sample_before:.1f}s "
+                f"sample_total={self.sample_elapsed:.1f}s",
+                enabled=True,
+            )
         self.negative_checksum += _candidate_tail_checksum(batch.candidates[:, 1:])
+        if self.config.verbose:
+            log_event(f"[hybrid-fit] {progress} encode_start", enabled=True)
         encode_start = perf_counter()
         features = self.encoder.features_for_query_array(batch)
-        self.encode_elapsed += perf_counter() - encode_start
+        encode_elapsed = perf_counter() - encode_start
+        self.encode_elapsed += encode_elapsed
+        if self.config.verbose:
+            log_event(
+                f"[hybrid-fit] {progress} encode_done elapsed={encode_elapsed:.1f}s "
+                f"encode_total={self.encode_elapsed:.1f}s",
+                enabled=True,
+            )
         return features, _candidate_matrix_checksum(batch.candidates)
 
 
@@ -1166,12 +1259,30 @@ def _candidate_tail_checksum(candidates: np.ndarray) -> int:
     return int((values * weights).sum(dtype=np.int64))
 
 
+def _supervised_progress_label(
+    label: str,
+    *,
+    batch_id: int | None,
+    total_batches: int | None,
+    row_start: int,
+    row_end: int,
+    total_rows: int,
+) -> str:
+    batch_text = ""
+    if batch_id is not None:
+        batch_text = f" batch={batch_id}"
+        if total_batches is not None:
+            batch_text += f"/{total_batches}"
+    return f"{label}{batch_text} rows={row_start}-{row_end}/{total_rows}"
+
+
 def _build_supervised_features(
     positives: InteractionTable,
     encoder: HybridFeatureEncoder,
     dst_pool: np.ndarray,
     config: TrainingConfig,
     rng: np.random.Generator,
+    label: str = "supervised_features",
 ) -> np.ndarray:
     if len(positives) == 0:
         return np.empty((0, 0, encoder.feature_dim), dtype=np.float32)
@@ -1180,16 +1291,43 @@ def _build_supervised_features(
     candidate_count = int(config.num_negatives) + 1
     shape = (len(positives), candidate_count, encoder.feature_dim)
     features = _empty_feature_matrix(shape, config)
-    builder = SupervisedFeatureBuilder(encoder=encoder, dst_pool=dst_pool, config=config)
+    builder = SupervisedFeatureBuilder(encoder=encoder, dst_pool=dst_pool, config=config, label=label)
     start_time = perf_counter()
     candidate_checksum = 0
+    total_batches = (len(positives) + batch_size - 1) // batch_size
     for start in range(0, len(positives), batch_size):
         end = min(start + batch_size, len(positives))
         batch_events = positives[start:end]
-        batch_features, batch_candidate_checksum = builder.features_for_events(batch_events, rng)
+        batch_id = start // batch_size + 1
+        batch_features, batch_candidate_checksum = builder.features_for_events(
+            batch_events,
+            rng,
+            batch_id=batch_id,
+            total_batches=total_batches,
+            row_start=start,
+            row_end=end,
+            total_rows=len(positives),
+        )
+        progress = _supervised_progress_label(
+            label,
+            batch_id=batch_id,
+            total_batches=total_batches,
+            row_start=start,
+            row_end=end,
+            total_rows=len(positives),
+        )
+        if config.verbose:
+            log_event(f"[hybrid-fit] {progress} write_start", enabled=True)
         write_start = perf_counter()
         features[start:end] = batch_features
-        builder.write_elapsed += perf_counter() - write_start
+        write_elapsed = perf_counter() - write_start
+        builder.write_elapsed += write_elapsed
+        if config.verbose:
+            log_event(
+                f"[hybrid-fit] {progress} write_done elapsed={write_elapsed:.1f}s "
+                f"write_total={builder.write_elapsed:.1f}s",
+                enabled=True,
+            )
         candidate_checksum += batch_candidate_checksum
         del batch_features
         if isinstance(features, np.memmap) and (start // batch_size + 1) % FEATURE_MEMMAP_FLUSH_INTERVAL == 0:
@@ -1197,7 +1335,7 @@ def _build_supervised_features(
         release_memory()
         if config.verbose and (end == len(positives) or end % max(batch_size * 4, 1) == 0):
             log_event(
-                f"[hybrid-fit] supervised_features rows={end}/{len(positives)} "
+                f"[hybrid-fit] {label} rows={end}/{len(positives)} "
                 f"batch={len(batch_events)} sample={builder.sample_elapsed:.1f}s "
                 f"encode={builder.encode_elapsed:.1f}s write={builder.write_elapsed:.1f}s "
                 f"elapsed={perf_counter() - start_time:.1f}s",
@@ -1207,7 +1345,7 @@ def _build_supervised_features(
         features.flush()
     if config.verbose:
         log_event(
-            f"[hybrid-fit] supervised_features done rows={len(positives)} "
+            f"[hybrid-fit] {label} done rows={len(positives)} "
             f"sample={builder.sample_elapsed:.1f}s encode={builder.encode_elapsed:.1f}s "
             f"write={builder.write_elapsed:.1f}s elapsed={perf_counter() - start_time:.1f}s "
             f"candidate_checksum={candidate_checksum} negative_checksum={builder.negative_checksum}",

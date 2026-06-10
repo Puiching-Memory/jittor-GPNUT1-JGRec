@@ -3,12 +3,16 @@ from __future__ import annotations
 import contextlib
 import gc
 import os
-import resource
 import sys
 from datetime import datetime
 from pathlib import Path
 
 from jgrec.logging import log
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - Windows fallback.
+    resource = None
 
 _MEMORY_LOG_PATH: Path | None = None
 
@@ -82,6 +86,9 @@ def _rss_mb() -> float | None:
                     return float(line.split()[1]) / 1024
     except OSError:
         pass
+
+    if resource is None:
+        return None
 
     try:
         return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024

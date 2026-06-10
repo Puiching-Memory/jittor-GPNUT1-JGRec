@@ -6,8 +6,6 @@ from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Literal
 
-import jittor as jt
-import tyro
 from rich.panel import Panel
 from rich.table import Table
 
@@ -116,8 +114,10 @@ class CLIConfig:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import tyro  # noqa: PLC0415
+
     args = tyro.cli(CLIConfig, args=argv)
-    jt.flags.use_cuda = 0 if args.cpu else 1
+    _configure_jittor_device(args.cpu)
 
     ranker_config = _ranker_config(args)
     run_name = args.run_name or _build_run_name(args, ranker_config)
@@ -261,6 +261,12 @@ def _ranker_config(args: CLIConfig):
         popular_negative_ratio=args.popular_negative_ratio,
         negative_sampling_workers=args.negative_sampling_workers,
     )
+
+
+def _configure_jittor_device(cpu: bool) -> None:
+    import jittor as jt  # noqa: PLC0415
+
+    jt.flags.use_cuda = 0 if cpu else 1
 
 
 def _build_run_name(args: CLIConfig, config) -> str:
