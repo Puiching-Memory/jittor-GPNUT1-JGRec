@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 import jittor as jt
@@ -63,6 +64,7 @@ def fit_fusion_mlp(
 
     if feature_indices is None:
         feature_indices = tuple(range(train_features.shape[-1]))
+    _set_jittor_seed_from_rng(rng)
     input_dim = len(feature_indices)
     mean, std = _feature_normalizer(train_features, feature_indices)
     selection_metric = config.selection_metric.lower()
@@ -145,6 +147,7 @@ def fit_fusion_mlp_streaming(
 
     if feature_indices is None:
         feature_indices = tuple(range(train_features.shape[-1]))
+    _set_jittor_seed_from_rng(rng)
     input_dim = len(feature_indices)
     mean, std = _feature_normalizer_streaming(train_features, feature_indices, config.batch_size)
     selection_metric = config.selection_metric.lower()
@@ -354,6 +357,13 @@ def _selected_metric(ap: float, mrr: float, metric: str) -> float:
     if metric == "mrr":
         return mrr
     raise ValueError(f"unsupported fusion selection metric: {metric}")
+
+
+def _set_jittor_seed_from_rng(rng: np.random.Generator) -> None:
+    jt.sync_all()
+    state_bytes = repr(rng.bit_generator.state).encode("utf-8")
+    seed = int.from_bytes(hashlib.blake2b(state_bytes, digest_size=4).digest(), "little")
+    jt.set_seed(seed % (2**31 - 1))
 
 
 def _snapshot_state(model: FusionMLP) -> dict[str, np.ndarray]:

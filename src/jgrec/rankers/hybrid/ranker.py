@@ -252,17 +252,6 @@ class HybridFeatureEncoder:
             self.structure.fit(interactions, rng=rng, verbose=verbose)
             elapsed["structure"] = perf_counter() - start
             cache_status = "build"
-        source_profile_fit = getattr(self.source_profile, "fit", None)
-        start = perf_counter()
-        if callable(source_profile_fit):
-            source_profile_fit(
-                interactions,
-                rng=_copy_rng(rng),
-                verbose=verbose,
-                shared_index=getattr(self.structure, "index", None),
-                deterministic_ready=deterministic_snapshot is not None,
-            )
-        elapsed["profile"] = perf_counter() - start
         two_tower_fit = getattr(self.two_tower, "fit", None)
         start = perf_counter()
         if callable(two_tower_fit):
@@ -279,6 +268,17 @@ class HybridFeatureEncoder:
         start = perf_counter()
         self.sequence.fit(interactions, rng=rng, verbose=verbose)
         elapsed["sequence"] = perf_counter() - start
+        source_profile_fit = getattr(self.source_profile, "fit", None)
+        start = perf_counter()
+        if callable(source_profile_fit):
+            source_profile_fit(
+                interactions,
+                rng=_copy_rng(rng),
+                verbose=verbose,
+                shared_index=getattr(self.structure, "index", None),
+                deterministic_ready=deterministic_snapshot is not None,
+            )
+        elapsed["profile"] = perf_counter() - start
         total = perf_counter() - start_total
         pieces = " ".join(f"{name}={seconds:.1f}s" for name, seconds in elapsed.items())
         log_event(f"[encoder-fit] cache={cache_status} {pieces} total={total:.1f}s", enabled=verbose)
@@ -788,7 +788,7 @@ class TemporalHybridRanker:
     ) -> tuple[FusionMLP, FusionResult]:
         from .fusion import fit_fusion_mlp, fit_fusion_mlp_streaming  # noqa: PLC0415
 
-        masks = _feature_masks(train_features.shape[-1])
+        masks = _feature_masks(train_features.shape[-1], config=config)
         best_model: FusionMLP | None = None
         best_result: FusionResult | None = None
         for name, indices in masks:
@@ -940,7 +940,7 @@ def _sample_events(
     return events.take(indices)
 
 
-def _feature_masks(feature_count: int) -> list[tuple[str, tuple[int, ...]]]:
+def _feature_masks(feature_count: int, config: TrainingConfig | None = None) -> list[tuple[str, tuple[int, ...]]]:
     stats_end = len(STAT_FEATURE_NAMES)
     prior_end = stats_end + len(CANDIDATE_PRIOR_FEATURE_NAMES)
     target_end = prior_end + len(TARGET_WINDOW_FEATURE_NAMES)
@@ -948,54 +948,59 @@ def _feature_masks(feature_count: int) -> list[tuple[str, tuple[int, ...]]]:
     profile_end = structure_end + len(SOURCE_PROFILE_FEATURE_NAMES)
     tower_end = profile_end + len(TWO_TOWER_FEATURE_NAMES)
     graph_end = tower_end + len(GRAPH_WINDOW_NAMES)
-    stats = _feature_range(0, stats_end, feature_count)
-    prior = _feature_range(stats_end, prior_end, feature_count)
-    target = _feature_range(prior_end, target_end, feature_count)
-    structure = _feature_range(target_end, structure_end, feature_count)
-    profile = _feature_range(structure_end, profile_end, feature_count)
-    tower = _feature_range(profile_end, tower_end, feature_count)
-    graph = _feature_range(tower_end, graph_end, feature_count)
-    sequence = _feature_range(graph_end, feature_count, feature_count)
+    ranges = {
+        "stats": _feature_range(0, stats_end, feature_count),
+        "prior": _feature_range(stats_end, prior_end, feature_count),
+        "target": _feature_range(prior_end, target_end, feature_count),
+        "structure": _feature_range(target_end, structure_end, feature_count),
+        "profile": _feature_range(structure_end, profile_end, feature_count),
+        "tower": _feature_range(profile_end, tower_end, feature_count),
+        "gnn": _feature_range(tower_end, graph_end, feature_count),
+        "seq": _feature_range(graph_end, feature_count, feature_count),
+    }
+    enabled = {
+        "stats": True,
+        "prior": config is None or config.candidate_prior_enabled,
+        "target": config is None or config.target_window_enabled,
+        "structure": config is None or config.structure_enabled,
+        "profile": config is None or config.source_profile_enabled,
+        "tower": config is None or config.two_tower_enabled,
+        "gnn": config is None or config.gnn_enabled,
+        "seq": config is None or config.seq_enabled,
+    }
 
-    masks = [("stats", stats)]
-    if feature_count > stats_end:
-        masks.append(("stats_prior", stats + prior))
-    if feature_count > target_end:
-        masks.append(("stats_prior_structure", stats + prior + structure))
-    if feature_count > profile_end:
-        masks.append(("stats_prior_structure_tower", stats + prior + structure + tower))
-    if feature_count > tower_end:
-        masks.append(("stats_prior_structure_tower_gnn", stats + prior + structure + tower + graph))
-    if feature_count > graph_end:
-        masks.append(("stats_prior_structure_tower_gnn_seq", stats + prior + structure + tower + graph + sequence))
+    def build_mask(groups: tuple[str, ...]) -> tuple[str, tuple[int, ...]] | None:
+        name_parts = ["stats"]
+        indices = ranges["stats"]
+        for group in groups:
+            group_range = ranges[group]
+            if not group_range:
+                return None
+            if not enabled[group]:
+                continue
+            name_parts.append(group)
+            indices += group_range
+        if indices == ranges["stats"]:
+            return None
+        return "_".join(name_parts), indices
 
-    if feature_count > prior_end:
-        masks.append(("stats_prior_target", stats + prior + target))
-    if feature_count > target_end:
-        masks.append(("stats_prior_target_structure", stats + prior + target + structure))
-    if feature_count > structure_end:
-        masks.append(("stats_prior_target_structure_profile", stats + prior + target + structure + profile))
-    if feature_count > profile_end:
-        masks.append(
-            (
-                "stats_prior_target_structure_profile_tower",
-                stats + prior + target + structure + profile + tower,
-            )
-        )
-    if feature_count > tower_end:
-        masks.append(
-            (
-                "stats_prior_target_structure_profile_tower_gnn",
-                stats + prior + target + structure + profile + tower + graph,
-            )
-        )
-    if feature_count > graph_end:
-        masks.append(
-            (
-                "stats_prior_target_structure_profile_tower_gnn_seq",
-                stats + prior + target + structure + profile + tower + graph + sequence,
-            )
-        )
+    masks: list[tuple[str, tuple[int, ...]]] = [("stats", ranges["stats"])]
+    for groups in (
+        ("prior",),
+        ("prior", "structure"),
+        ("prior", "structure", "tower"),
+        ("prior", "structure", "tower", "gnn"),
+        ("prior", "structure", "tower", "gnn", "seq"),
+        ("prior", "target"),
+        ("prior", "target", "structure"),
+        ("prior", "target", "structure", "profile"),
+        ("prior", "target", "structure", "profile", "tower"),
+        ("prior", "target", "structure", "profile", "tower", "gnn"),
+        ("prior", "target", "structure", "profile", "tower", "gnn", "seq"),
+    ):
+        mask = build_mask(groups)
+        if mask is not None:
+            masks.append(mask)
 
     unique: list[tuple[str, tuple[int, ...]]] = []
     seen: set[tuple[int, ...]] = set()

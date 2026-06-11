@@ -1,3 +1,4 @@
+import jittor as jt
 import numpy as np
 
 from jgrec.rankers.hybrid.fusion import (
@@ -6,6 +7,7 @@ from jgrec.rankers.hybrid.fusion import (
     _feature_normalizer_streaming,
     _metrics_from_model,
     _metrics_from_model_streaming,
+    _set_jittor_seed_from_rng,
     fit_fusion_mlp,
     fit_fusion_mlp_streaming,
 )
@@ -86,3 +88,45 @@ def test_streaming_fusion_keeps_contract_for_memmap_inputs(tmp_path):
     assert np.isfinite(result.best_val_ap)
     assert np.isfinite(result.best_val_mrr)
     assert model is not None
+
+
+def test_fusion_initialization_is_isolated_from_prior_jittor_rng_consumption():
+    train, val = _features()
+    config = FusionConfig(epochs=0, batch_size=4, hidden_dim=8)
+
+    model_a, result_a = fit_fusion_mlp(
+        train_features=train,
+        val_features=val,
+        config=config,
+        rng=np.random.default_rng(123),
+        verbose=False,
+        feature_indices=(0, 1, 2, 3),
+        candidate_name="seed-a",
+    )
+    _ = jt.rand((128,))
+    model_b, result_b = fit_fusion_mlp(
+        train_features=train,
+        val_features=val,
+        config=config,
+        rng=np.random.default_rng(123),
+        verbose=False,
+        feature_indices=(0, 1, 2, 3),
+        candidate_name="seed-b",
+    )
+
+    assert result_a.best_val_ap == result_b.best_val_ap
+    assert result_a.best_val_mrr == result_b.best_val_mrr
+    for left, right in zip(model_a.parameters(), model_b.parameters(), strict=True):
+        np.testing.assert_allclose(np.asarray(left.numpy()), np.asarray(right.numpy()))
+
+
+def test_jittor_seed_derivation_does_not_advance_numpy_rng():
+    rng = np.random.default_rng(321)
+    expected = np.random.default_rng(321)
+
+    _set_jittor_seed_from_rng(rng)
+
+    np.testing.assert_array_equal(
+        rng.integers(0, 1_000_000, size=8),
+        expected.integers(0, 1_000_000, size=8),
+    )

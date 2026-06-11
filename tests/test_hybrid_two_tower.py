@@ -289,3 +289,30 @@ def test_champion_structure_tower_gnn_mask_excludes_experimental_towers():
     assert selected_config.two_tower_enabled
     assert selected_config.gnn_enabled
     assert not selected_config.seq_enabled
+
+
+def test_feature_masks_respect_disabled_experimental_towers():
+    feature_count = (
+        len(STAT_FEATURE_NAMES)
+        + len(CANDIDATE_PRIOR_FEATURE_NAMES)
+        + len(TARGET_WINDOW_FEATURE_NAMES)
+        + len(STRUCTURE_FEATURE_NAMES)
+        + len(SOURCE_PROFILE_FEATURE_NAMES)
+        + len(TWO_TOWER_FEATURE_NAMES)
+        + len(GRAPH_WINDOW_NAMES)
+        + len(SEQUENCE_FEATURE_NAMES)
+    )
+
+    masks = _feature_masks(
+        feature_count,
+        config=TrainingConfig(target_window_enabled=False, source_profile_enabled=False),
+    )
+
+    assert [name for name, _ in masks] == [
+        "stats",
+        "stats_prior",
+        "stats_prior_structure",
+        "stats_prior_structure_tower",
+        "stats_prior_structure_tower_gnn",
+        "stats_prior_structure_tower_gnn_seq",
+    ]
