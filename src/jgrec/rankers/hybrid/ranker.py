@@ -257,7 +257,7 @@ class HybridFeatureEncoder:
         if callable(source_profile_fit):
             source_profile_fit(
                 interactions,
-                rng=rng,
+                rng=_copy_rng(rng),
                 verbose=verbose,
                 shared_index=getattr(self.structure, "index", None),
                 deterministic_ready=deterministic_snapshot is not None,
@@ -948,21 +948,54 @@ def _feature_masks(feature_count: int) -> list[tuple[str, tuple[int, ...]]]:
     profile_end = structure_end + len(SOURCE_PROFILE_FEATURE_NAMES)
     tower_end = profile_end + len(TWO_TOWER_FEATURE_NAMES)
     graph_end = tower_end + len(GRAPH_WINDOW_NAMES)
-    masks = [("stats", tuple(range(min(stats_end, feature_count))))]
+    stats = _feature_range(0, stats_end, feature_count)
+    prior = _feature_range(stats_end, prior_end, feature_count)
+    target = _feature_range(prior_end, target_end, feature_count)
+    structure = _feature_range(target_end, structure_end, feature_count)
+    profile = _feature_range(structure_end, profile_end, feature_count)
+    tower = _feature_range(profile_end, tower_end, feature_count)
+    graph = _feature_range(tower_end, graph_end, feature_count)
+    sequence = _feature_range(graph_end, feature_count, feature_count)
+
+    masks = [("stats", stats)]
     if feature_count > stats_end:
-        masks.append(("stats_prior", tuple(range(min(prior_end, feature_count)))))
-    if feature_count > prior_end:
-        masks.append(("stats_prior_target", tuple(range(min(target_end, feature_count)))))
+        masks.append(("stats_prior", stats + prior))
     if feature_count > target_end:
-        masks.append(("stats_prior_target_structure", tuple(range(min(structure_end, feature_count)))))
-    if feature_count > structure_end:
-        masks.append(("stats_prior_target_structure_profile", tuple(range(min(profile_end, feature_count)))))
+        masks.append(("stats_prior_structure", stats + prior + structure))
     if feature_count > profile_end:
-        masks.append(("stats_prior_target_structure_profile_tower", tuple(range(min(tower_end, feature_count)))))
+        masks.append(("stats_prior_structure_tower", stats + prior + structure + tower))
     if feature_count > tower_end:
-        masks.append(("stats_prior_target_structure_profile_tower_gnn", tuple(range(min(graph_end, feature_count)))))
+        masks.append(("stats_prior_structure_tower_gnn", stats + prior + structure + tower + graph))
     if feature_count > graph_end:
-        masks.append(("stats_prior_target_structure_profile_tower_gnn_seq", tuple(range(feature_count))))
+        masks.append(("stats_prior_structure_tower_gnn_seq", stats + prior + structure + tower + graph + sequence))
+
+    if feature_count > prior_end:
+        masks.append(("stats_prior_target", stats + prior + target))
+    if feature_count > target_end:
+        masks.append(("stats_prior_target_structure", stats + prior + target + structure))
+    if feature_count > structure_end:
+        masks.append(("stats_prior_target_structure_profile", stats + prior + target + structure + profile))
+    if feature_count > profile_end:
+        masks.append(
+            (
+                "stats_prior_target_structure_profile_tower",
+                stats + prior + target + structure + profile + tower,
+            )
+        )
+    if feature_count > tower_end:
+        masks.append(
+            (
+                "stats_prior_target_structure_profile_tower_gnn",
+                stats + prior + target + structure + profile + tower + graph,
+            )
+        )
+    if feature_count > graph_end:
+        masks.append(
+            (
+                "stats_prior_target_structure_profile_tower_gnn_seq",
+                stats + prior + target + structure + profile + tower + graph + sequence,
+            )
+        )
 
     unique: list[tuple[str, tuple[int, ...]]] = []
     seen: set[tuple[int, ...]] = set()
@@ -972,6 +1005,20 @@ def _feature_masks(feature_count: int) -> list[tuple[str, tuple[int, ...]]]:
         seen.add(indices)
         unique.append((name, indices))
     return unique
+
+
+def _copy_rng(rng: np.random.Generator) -> np.random.Generator:
+    copied = np.random.default_rng()
+    copied.bit_generator.state = rng.bit_generator.state
+    return copied
+
+
+def _feature_range(start: int, end: int, feature_count: int) -> tuple[int, ...]:
+    start = min(max(start, 0), feature_count)
+    end = min(max(end, 0), feature_count)
+    if end <= start:
+        return ()
+    return tuple(range(start, end))
 
 
 def _selected_report_metric(result: FusionResult, metric: str) -> float:

@@ -263,9 +263,15 @@ def test_feature_masks_and_selected_config_include_source_profile():
     )
     masks = _feature_masks(feature_count)
 
-    assert [name for name, _ in masks] == [
+    names = [name for name, _ in masks]
+
+    assert names == [
         "stats",
         "stats_prior",
+        "stats_prior_structure",
+        "stats_prior_structure_tower",
+        "stats_prior_structure_tower_gnn",
+        "stats_prior_structure_tower_gnn_seq",
         "stats_prior_target",
         "stats_prior_target_structure",
         "stats_prior_target_structure_profile",
@@ -273,6 +279,7 @@ def test_feature_masks_and_selected_config_include_source_profile():
         "stats_prior_target_structure_profile_tower_gnn",
         "stats_prior_target_structure_profile_tower_gnn_seq",
     ]
+    assert "stats_prior_structure_tower" in names
 
     stats_end = len(STAT_FEATURE_NAMES)
     prior_end = stats_end + len(CANDIDATE_PRIOR_FEATURE_NAMES)
@@ -283,11 +290,14 @@ def test_feature_masks_and_selected_config_include_source_profile():
 
     structure_config = _config_for_selected_features(config, tuple(range(structure_end)))
     profile_config = _config_for_selected_features(config, tuple(range(profile_end)))
+    tower_no_profile_config = _config_for_selected_features(config, dict(masks)["stats_prior_structure_tower"])
 
     assert not structure_config.source_profile_enabled
     assert not structure_config.two_tower_enabled
     assert profile_config.source_profile_enabled
     assert not profile_config.two_tower_enabled
+    assert not tower_no_profile_config.source_profile_enabled
+    assert tower_no_profile_config.two_tower_enabled
 
 
 def test_source_profile_query_array_fast_path_matches_list_path():

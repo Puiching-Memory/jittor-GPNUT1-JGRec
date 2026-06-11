@@ -4,7 +4,6 @@ import math
 from collections import defaultdict
 from typing import Any
 
-import jittor as jt
 import numpy as np
 
 from jgrec.core.memory import release_memory
@@ -19,6 +18,12 @@ SOURCE_PROFILE_FEATURE_DIM = len(SOURCE_PROFILE_FEATURE_NAMES)
 DETERMINISTIC_FEATURE_DIM = 6
 ITEM2VEC_FEATURE_DIM = 4
 EPSILON = 1e-8
+
+
+def _jt():
+    import jittor as jt  # noqa: PLC0415
+
+    return jt
 
 
 class SourceProfileTower:
@@ -137,6 +142,7 @@ class SourceProfileTower:
             return
 
         centers, positives, negatives = samples
+        jt = _jt()
         model = _Item2VecModel(num_items=self.id_map.num_dst, embedding_dim=self.config.embedding_dim)
         optimizer = jt.nn.Adam(model.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay)
         train_size = int(centers.shape[0])
@@ -234,6 +240,8 @@ class SourceProfileTower:
 
 class _Item2VecModel:
     def __new__(cls, num_items: int, embedding_dim: int):
+        jt = _jt()
+
         class Item2VecModel(jt.nn.Module):
             def __init__(self) -> None:
                 super().__init__()

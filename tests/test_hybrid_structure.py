@@ -250,9 +250,15 @@ def test_hybrid_feature_masks_include_structure_groups():
 
     masks = _feature_masks(feature_count)
 
-    assert [name for name, _ in masks] == [
+    names = [name for name, _ in masks]
+
+    assert names == [
         "stats",
         "stats_prior",
+        "stats_prior_structure",
+        "stats_prior_structure_tower",
+        "stats_prior_structure_tower_gnn",
+        "stats_prior_structure_tower_gnn_seq",
         "stats_prior_target",
         "stats_prior_target_structure",
         "stats_prior_target_structure_profile",
@@ -260,7 +266,15 @@ def test_hybrid_feature_masks_include_structure_groups():
         "stats_prior_target_structure_profile_tower_gnn",
         "stats_prior_target_structure_profile_tower_gnn_seq",
     ]
-    assert len(masks[3][1]) == (
+    assert "stats_prior_structure_tower" in names
+    assert "stats_prior_structure_tower_gnn" in names
+    by_name = dict(masks)
+    assert len(by_name["stats_prior_structure"]) == (
+        len(STAT_FEATURE_NAMES)
+        + len(CANDIDATE_PRIOR_FEATURE_NAMES)
+        + len(STRUCTURE_FEATURE_NAMES)
+    )
+    assert len(by_name["stats_prior_target_structure"]) == (
         len(STAT_FEATURE_NAMES)
         + len(CANDIDATE_PRIOR_FEATURE_NAMES)
         + len(TARGET_WINDOW_FEATURE_NAMES)

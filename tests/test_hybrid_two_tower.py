@@ -207,6 +207,10 @@ def test_hybrid_feature_masks_include_two_tower_groups():
     assert [name for name, _ in masks] == [
         "stats",
         "stats_prior",
+        "stats_prior_structure",
+        "stats_prior_structure_tower",
+        "stats_prior_structure_tower_gnn",
+        "stats_prior_structure_tower_gnn_seq",
         "stats_prior_target",
         "stats_prior_target_structure",
         "stats_prior_target_structure_profile",
@@ -223,11 +227,16 @@ def test_selected_feature_config_disables_unused_two_tower():
     structure_end = target_end + len(STRUCTURE_FEATURE_NAMES)
     profile_end = structure_end + len(SOURCE_PROFILE_FEATURE_NAMES)
     tower_end = profile_end + len(TWO_TOWER_FEATURE_NAMES)
+    feature_count = tower_end + len(GRAPH_WINDOW_NAMES) + len(SEQUENCE_FEATURE_NAMES)
     config = TrainingConfig(two_tower_enabled=True, gnn_enabled=True, seq_enabled=True)
 
     stats_config = _config_for_selected_features(config, tuple(range(stats_end)))
     prior_config = _config_for_selected_features(config, tuple(range(prior_end)))
     tower_config = _config_for_selected_features(config, tuple(range(tower_end)))
+    tower_no_profile_config = _config_for_selected_features(
+        config,
+        dict(_feature_masks(feature_count))["stats_prior_structure_tower"],
+    )
 
     assert not stats_config.candidate_prior_enabled
     assert not stats_config.target_window_enabled
@@ -243,3 +252,40 @@ def test_selected_feature_config_disables_unused_two_tower():
     assert tower_config.two_tower_enabled
     assert not tower_config.gnn_enabled
     assert not tower_config.seq_enabled
+    assert not tower_no_profile_config.target_window_enabled
+    assert not tower_no_profile_config.source_profile_enabled
+    assert tower_no_profile_config.structure_enabled
+    assert tower_no_profile_config.two_tower_enabled
+
+
+def test_champion_structure_tower_gnn_mask_excludes_experimental_towers():
+    feature_count = (
+        len(STAT_FEATURE_NAMES)
+        + len(CANDIDATE_PRIOR_FEATURE_NAMES)
+        + len(TARGET_WINDOW_FEATURE_NAMES)
+        + len(STRUCTURE_FEATURE_NAMES)
+        + len(SOURCE_PROFILE_FEATURE_NAMES)
+        + len(TWO_TOWER_FEATURE_NAMES)
+        + len(GRAPH_WINDOW_NAMES)
+        + len(SEQUENCE_FEATURE_NAMES)
+    )
+    selected = dict(_feature_masks(feature_count))["stats_prior_structure_tower_gnn"]
+
+    selected_config = _config_for_selected_features(
+        TrainingConfig(
+            target_window_enabled=True,
+            source_profile_enabled=True,
+            structure_enabled=True,
+            two_tower_enabled=True,
+            gnn_enabled=True,
+            seq_enabled=True,
+        ),
+        selected,
+    )
+
+    assert not selected_config.target_window_enabled
+    assert not selected_config.source_profile_enabled
+    assert selected_config.structure_enabled
+    assert selected_config.two_tower_enabled
+    assert selected_config.gnn_enabled
+    assert not selected_config.seq_enabled

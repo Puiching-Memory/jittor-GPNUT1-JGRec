@@ -181,9 +181,15 @@ def test_feature_masks_and_selected_config_include_target_window():
     )
     masks = _feature_masks(feature_count)
 
-    assert [name for name, _ in masks] == [
+    names = [name for name, _ in masks]
+
+    assert names == [
         "stats",
         "stats_prior",
+        "stats_prior_structure",
+        "stats_prior_structure_tower",
+        "stats_prior_structure_tower_gnn",
+        "stats_prior_structure_tower_gnn_seq",
         "stats_prior_target",
         "stats_prior_target_structure",
         "stats_prior_target_structure_profile",
@@ -191,6 +197,8 @@ def test_feature_masks_and_selected_config_include_target_window():
         "stats_prior_target_structure_profile_tower_gnn",
         "stats_prior_target_structure_profile_tower_gnn_seq",
     ]
+    assert "stats_prior_structure_tower" in names
+    assert "stats_prior_structure_tower_gnn" in names
 
     stats_end = len(STAT_FEATURE_NAMES)
     prior_end = stats_end + len(CANDIDATE_PRIOR_FEATURE_NAMES)
@@ -201,6 +209,10 @@ def test_feature_masks_and_selected_config_include_target_window():
     prior_config = _config_for_selected_features(config, tuple(range(prior_end)))
     target_config = _config_for_selected_features(config, tuple(range(target_end)))
     structure_config = _config_for_selected_features(config, tuple(range(structure_end)))
+    structure_no_target_config = _config_for_selected_features(
+        config,
+        dict(masks)["stats_prior_structure"],
+    )
 
     assert not prior_config.target_window_enabled
     assert not prior_config.structure_enabled
@@ -208,3 +220,5 @@ def test_feature_masks_and_selected_config_include_target_window():
     assert not target_config.structure_enabled
     assert structure_config.target_window_enabled
     assert structure_config.structure_enabled
+    assert not structure_no_target_config.target_window_enabled
+    assert structure_no_target_config.structure_enabled
