@@ -168,6 +168,29 @@ def test_target_window_query_array_fast_path_matches_list_path():
     )
 
 
+def test_target_window_future_query_array_uses_dense_cache_not_scalar_dst_lookup(monkeypatch):
+    interactions = _interactions()
+    queries = TestQueryArray.from_queries([
+        TestQuery(src=1, time=90, candidates=(10, 20, 40, 999)),
+        TestQuery(src=2, time=91, candidates=(40, 30, 20, 10)),
+    ])
+    reference = TargetWindowTower(TargetWindowConfig(window_fractions=(0.1, 0.3, 0.6, 1.0)))
+    reference.fit(interactions)
+    expected = reference.features_for_query_array(queries)
+
+    tower = TargetWindowTower(TargetWindowConfig(window_fractions=(0.1, 0.3, 0.6, 1.0)))
+    tower.fit(interactions)
+
+    def fail_scalar_lookup(dst: int):  # noqa: ARG001
+        raise AssertionError("future target-window queries should use dense batch lookup")
+
+    monkeypatch.setattr(tower, "_dst_times", fail_scalar_lookup)
+
+    actual = tower.features_for_query_array(queries)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+
+
 def test_feature_masks_and_selected_config_include_target_window():
     feature_count = (
         len(STAT_FEATURE_NAMES)

@@ -31,11 +31,8 @@ def main() -> int:
         )
 
     def objective(trial: optuna.Trial) -> float:
-        import jittor as jt  # noqa: PLC0415
+        from jgrec.rankers.temporal_graph.ranker import TemporalGraphRanker  # noqa: PLC0415
 
-        from jgrec.rankers.temporal_graph import TemporalGraphRanker  # noqa: PLC0415
-
-        jt.flags.use_cuda = 0 if args.cpu else 1
         config = _suggest_config(trial, args)
         started = time.perf_counter()
         total = 0.0
@@ -109,7 +106,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu-id", type=int, default=None)
     parser.add_argument("--worker-id", type=int, default=None)
     parser.add_argument("--sampler-seed", type=int, default=None)
-    parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--cpu", action="store_true", help="Rejected for temporal-graph; CUDA is required.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--objective-metric", choices=["mrr", "ap", "sum"], default="mrr")
     parser.add_argument("--max-fit-events", type=int, default=0)
@@ -117,6 +114,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-val-events", type=int, default=5_000)
     parser.add_argument("--num-negatives", type=int, default=99)
     parser.add_argument("--validation-candidates", choices=["random", "test_like"], default="test_like")
+    parser.add_argument(
+        "--candidate-recent-feature-group",
+        choices=["none", "recency_rank"],
+        default="recency_rank",
+    )
     parser.add_argument("--epochs-max", type=int, default=6)
     parser.add_argument("--sqlite-timeout", type=float, default=120.0)
     parser.add_argument("--quiet", action="store_true")
@@ -125,7 +127,7 @@ def _parse_args() -> argparse.Namespace:
 
 def _configure_device(args: argparse.Namespace) -> str:
     if args.cpu:
-        return "cpu"
+        raise ValueError("temporal-graph tuning requires CUDA; do not pass --cpu")
     if args.gpu_id is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
         return f"cuda:{args.gpu_id}"
@@ -182,7 +184,7 @@ def _discover_selected_datasets(data_dir: Path, names: list[str]) -> list[Datase
 
 
 def _suggest_config(trial: optuna.Trial, args: argparse.Namespace):
-    from jgrec.rankers.temporal_graph import TemporalGraphTrainingConfig  # noqa: PLC0415
+    from jgrec.rankers.temporal_graph.config import TemporalGraphTrainingConfig  # noqa: PLC0415
 
     hidden_size = trial.suggest_categorical("hidden_size", [64, 96, 128, 192])
     possible_heads = [head for head in [2, 3, 4, 6, 8] if hidden_size % head == 0]
@@ -208,6 +210,7 @@ def _suggest_config(trial: optuna.Trial, args: argparse.Namespace):
         heads=heads,
         dropout=trial.suggest_float("dropout", 0.05, 0.45),
         validation_candidates=args.validation_candidates,
+        candidate_recent_feature_group=args.candidate_recent_feature_group,
         refit_full=False,
     )
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from typing import Any
 
 import numpy as np
@@ -123,13 +123,29 @@ class StructureFeatureTower:
             return np.empty((0, 0, STRUCTURE_FEATURE_DIM), dtype=np.float32)
 
         features = np.zeros((len(queries), queries.candidate_count, STRUCTURE_FEATURE_DIM), dtype=np.float32)
+        full_history_src_counts = Counter(
+            int(queries.src[row_idx])
+            for row_idx in range(len(queries))
+            if int(queries.time[row_idx]) > self.max_time
+        )
         for row_idx, query in enumerate(queries):
-            self._fill_query_features(query, features[row_idx])
+            force_full_preaggregate = full_history_src_counts[int(query.src)] > 1
+            self._fill_query_features(query, features[row_idx], force_full_preaggregate=force_full_preaggregate)
         return features
 
-    def _fill_query_features(self, query: TestQuery, output: np.ndarray) -> None:
+    def _fill_query_features(
+        self,
+        query: TestQuery,
+        output: np.ndarray,
+        *,
+        force_full_preaggregate: bool = False,
+    ) -> None:
         if query.time > self.max_time:
-            self._fill_full_history_query_features(query, output)
+            self._fill_full_history_query_features(
+                query,
+                output,
+                force_cooccur_preaggregate=force_full_preaggregate,
+            )
             return
 
         src_view = self.index.source_view(query.src, query.time)
@@ -174,7 +190,13 @@ class StructureFeatureTower:
                 if transition:
                     output[idx, 10] = math.log1p(transition)
 
-    def _fill_full_history_query_features(self, query: TestQuery, output: np.ndarray) -> None:
+    def _fill_full_history_query_features(
+        self,
+        query: TestQuery,
+        output: np.ndarray,
+        *,
+        force_cooccur_preaggregate: bool = False,
+    ) -> None:
         src_neighbors = self._full_src_neighbors(query.src)
         src_neighbor_count = len(src_neighbors)
         src_dsts = self.index.src_dsts.get(query.src)
@@ -182,7 +204,12 @@ class StructureFeatureTower:
         candidate_ids = tuple(int(dst) for dst in query.candidates)
         common_counts = self._full_src_common_neighbors(query.src, src_neighbors) if src_neighbor_count else {}
         cooccur_counts = (
-            self._full_cooccur_counts(query.src, src_neighbors, candidate_ids)
+            self._full_cooccur_counts(
+                query.src,
+                src_neighbors,
+                candidate_ids,
+                force_preaggregate=force_cooccur_preaggregate,
+            )
             if self.config.cooccur_enabled
             else np.zeros(len(candidate_ids), dtype=np.int32)
         )
@@ -274,6 +301,8 @@ class StructureFeatureTower:
         src: int,
         src_neighbors: set[int],
         candidate_ids: tuple[int, ...],
+        *,
+        force_preaggregate: bool = False,
     ) -> np.ndarray:
         counts = np.zeros(len(candidate_ids), dtype=np.int32)
         if not src_neighbors or not candidate_ids:
@@ -284,7 +313,9 @@ class StructureFeatureTower:
             if self.index.future_only
             else bool(self.index.cooccurs_by_left)
         )
-        if len(src_neighbors) <= FULL_COOCCUR_PREAGGREGATE_NEIGHBOR_THRESHOLD or not has_grouped_cooccurs:
+        if force_preaggregate and has_grouped_cooccurs:
+            candidate_counts = self._full_src_cooccurs(src, src_neighbors)
+        elif len(src_neighbors) <= FULL_COOCCUR_PREAGGREGATE_NEIGHBOR_THRESHOLD or not has_grouped_cooccurs:
             unique_candidates = tuple(dict.fromkeys(candidate_ids))
             candidate_counts: dict[int, int] = {}
             for candidate in unique_candidates:

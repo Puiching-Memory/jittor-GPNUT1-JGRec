@@ -25,6 +25,7 @@ class TargetWindowTower:
         self.min_time = 0
         self.graph_span = 1
         self.dst_event_times_dense: list[np.ndarray] | None = None
+        self._future_window_cache: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
 
     @property
     def feature_names(self) -> tuple[str, ...]:
@@ -46,6 +47,7 @@ class TargetWindowTower:
             for dst, times in dst_times.items()
         }
         self._build_dense_dst_times()
+        self._future_window_cache = None
 
     def fit_from_grouped(
         self,
@@ -66,6 +68,7 @@ class TargetWindowTower:
             for dst, times in dst_event_times.items()
         }
         self._build_dense_dst_times()
+        self._future_window_cache = None
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -86,6 +89,7 @@ class TargetWindowTower:
         self.min_time = int(snapshot["min_time"])
         self.graph_span = int(snapshot["graph_span"])
         self.dst_event_times_dense = snapshot.get("dst_event_times_dense")
+        self._future_window_cache = None
 
     def compact_for_future_queries(self) -> None:
         return
@@ -104,36 +108,106 @@ class TargetWindowTower:
         if not self.config.enabled:
             return features
 
-        for row_idx in range(len(queries)):
-            query_time = int(queries.time[row_idx])
-            candidate_ids = queries.candidates[row_idx].astype(np.int64, copy=False)
-            for window_idx, fraction in enumerate(self.window_fractions):
-                offset = window_idx * FEATURES_PER_WINDOW
-                width = max(math.ceil(float(fraction) * self.graph_span), 1)
-                cutoff_time = min(query_time, self.max_time + 1)
-                start_time = self.min_time if fraction >= 1.0 else cutoff_time - width
-                window_total = _count_in_window(self.event_times, start_time, cutoff_time)
-                denominator = math.log1p(max(window_total, 1))
-                counts = np.zeros(candidate_ids.shape[0], dtype=np.float32)
-                recency = np.zeros(candidate_ids.shape[0], dtype=np.float32)
-                for col_idx, candidate in enumerate(candidate_ids):
-                    times = self._dst_times(int(candidate))
-                    if times.size == 0:
-                        continue
-                    left = int(np.searchsorted(times, start_time, side="left"))
-                    right = int(np.searchsorted(times, cutoff_time, side="left"))
-                    count = right - left
-                    if count <= 0:
-                        continue
-                    counts[col_idx] = float(count)
-                    last_time = int(times[right - 1])
-                    recency[col_idx] = math.exp(-max(cutoff_time - last_time, 0) / max(float(width), 1.0))
-                pop = np.log1p(counts) / denominator
-                features[row_idx, :, offset] = pop.astype(np.float32, copy=False)
-                features[row_idx, :, offset + 1] = (counts / max(float(window_total), 1.0)).astype(np.float32, copy=False)
-                features[row_idx, :, offset + 2] = recency
-                features[row_idx, :, offset + 3] = _row_rank_feature(pop)
+        future_rows = np.asarray(queries.time > self.max_time, dtype=bool)
+        future_cache = self._future_window_features() if np.any(future_rows) else None
+        if future_cache is not None:
+            self._fill_future_query_features(queries, future_rows, future_cache, features)
+            scalar_rows = np.flatnonzero(~future_rows)
+        else:
+            scalar_rows = range(len(queries))
+
+        for row_idx in scalar_rows:
+            self._fill_scalar_query_features(
+                query_time=int(queries.time[row_idx]),
+                candidate_ids=queries.candidates[row_idx].astype(np.int64, copy=False),
+                output=features[row_idx],
+            )
         return features
+
+    def _fill_scalar_query_features(self, query_time: int, candidate_ids: np.ndarray, output: np.ndarray) -> None:
+        for window_idx, fraction in enumerate(self.window_fractions):
+            offset = window_idx * FEATURES_PER_WINDOW
+            width = max(math.ceil(float(fraction) * self.graph_span), 1)
+            cutoff_time = min(query_time, self.max_time + 1)
+            start_time = self.min_time if fraction >= 1.0 else cutoff_time - width
+            window_total = _count_in_window(self.event_times, start_time, cutoff_time)
+            denominator = math.log1p(max(window_total, 1))
+            counts = np.zeros(candidate_ids.shape[0], dtype=np.float32)
+            recency = np.zeros(candidate_ids.shape[0], dtype=np.float32)
+            for col_idx, candidate in enumerate(candidate_ids):
+                times = self._dst_times(int(candidate))
+                if times.size == 0:
+                    continue
+                left = int(np.searchsorted(times, start_time, side="left"))
+                right = int(np.searchsorted(times, cutoff_time, side="left"))
+                count = right - left
+                if count <= 0:
+                    continue
+                counts[col_idx] = float(count)
+                last_time = int(times[right - 1])
+                recency[col_idx] = math.exp(-max(cutoff_time - last_time, 0) / max(float(width), 1.0))
+            pop = np.log1p(counts) / denominator
+            output[:, offset] = pop.astype(np.float32, copy=False)
+            output[:, offset + 1] = (counts / max(float(window_total), 1.0)).astype(np.float32, copy=False)
+            output[:, offset + 2] = recency
+            output[:, offset + 3] = _row_rank_feature(pop)
+
+    def _fill_future_query_features(
+        self,
+        queries: TestQueryArray,
+        future_rows: np.ndarray,
+        future_cache: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+        output: np.ndarray,
+    ) -> None:
+        counts_by_window, recency_by_window, window_totals, denominators = future_cache
+        row_indices = np.flatnonzero(future_rows)
+        candidate_ids = queries.candidates[row_indices].astype(np.int64, copy=False)
+        valid = (candidate_ids >= 0) & (candidate_ids < counts_by_window.shape[1])
+        safe_candidate_ids = np.where(valid, candidate_ids, 0)
+        for window_idx in range(len(self.window_fractions)):
+            offset = window_idx * FEATURES_PER_WINDOW
+            counts = counts_by_window[window_idx, safe_candidate_ids]
+            recency = recency_by_window[window_idx, safe_candidate_ids]
+            counts = np.where(valid, counts, 0.0).astype(np.float32, copy=False)
+            recency = np.where(valid, recency, 0.0).astype(np.float32, copy=False)
+            pop = np.log1p(counts) / denominators[window_idx]
+            output[row_indices, :, offset] = pop.astype(np.float32, copy=False)
+            output[row_indices, :, offset + 1] = (counts / window_totals[window_idx]).astype(np.float32, copy=False)
+            output[row_indices, :, offset + 2] = recency
+            output[row_indices, :, offset + 3] = _row_rank_feature_matrix(pop)
+
+    def _future_window_features(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+        if self._future_window_cache is not None:
+            return self._future_window_cache
+        if self.dst_event_times_dense is None:
+            return None
+
+        node_count = len(self.dst_event_times_dense)
+        window_count = len(self.window_fractions)
+        counts_by_window = np.zeros((window_count, node_count), dtype=np.float32)
+        recency_by_window = np.zeros((window_count, node_count), dtype=np.float32)
+        window_totals = np.ones(window_count, dtype=np.float32)
+        denominators = np.ones(window_count, dtype=np.float32)
+        cutoff_time = self.max_time + 1
+        for window_idx, fraction in enumerate(self.window_fractions):
+            width = max(math.ceil(float(fraction) * self.graph_span), 1)
+            start_time = self.min_time if fraction >= 1.0 else cutoff_time - width
+            window_total = _count_in_window(self.event_times, start_time, cutoff_time)
+            window_totals[window_idx] = np.float32(max(float(window_total), 1.0))
+            denominators[window_idx] = np.float32(math.log1p(max(window_total, 1)))
+            for dst, times in self.dst_event_times.items():
+                left = int(np.searchsorted(times, start_time, side="left"))
+                right = int(np.searchsorted(times, cutoff_time, side="left"))
+                count = right - left
+                if count <= 0:
+                    continue
+                counts_by_window[window_idx, int(dst)] = np.float32(count)
+                last_time = int(times[right - 1])
+                recency_by_window[window_idx, int(dst)] = np.float32(
+                    math.exp(-max(cutoff_time - last_time, 0) / max(float(width), 1.0))
+                )
+        self._future_window_cache = (counts_by_window, recency_by_window, window_totals, denominators)
+        return self._future_window_cache
 
     def _dst_times(self, dst: int) -> np.ndarray:
         if self.dst_event_times_dense is not None and 0 <= dst < len(self.dst_event_times_dense):
@@ -142,6 +216,7 @@ class TargetWindowTower:
 
     def _build_dense_dst_times(self) -> None:
         self.dst_event_times_dense = None
+        self._future_window_cache = None
         if not self.dst_event_times:
             return
         max_id = max(self.dst_event_times)
@@ -178,6 +253,16 @@ def _row_rank_feature(values: np.ndarray) -> np.ndarray:
     order = np.argsort(-values, kind="mergesort")
     ranks = np.empty(values.shape[0], dtype=np.float32)
     ranks[order] = np.arange(1, values.shape[0] + 1, dtype=np.float32)
+    return (1.0 / ranks).astype(np.float32)
+
+
+def _row_rank_feature_matrix(values: np.ndarray) -> np.ndarray:
+    if values.size == 0:
+        return np.empty(values.shape, dtype=np.float32)
+    order = np.argsort(-values, axis=1, kind="mergesort")
+    ranks = np.empty(values.shape, dtype=np.float32)
+    row_indices = np.arange(values.shape[0])[:, None]
+    ranks[row_indices, order] = np.arange(1, values.shape[1] + 1, dtype=np.float32)
     return (1.0 / ranks).astype(np.float32)
 
 

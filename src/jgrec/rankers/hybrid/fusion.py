@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass
 
 import jittor as jt
@@ -72,6 +73,7 @@ def fit_fusion_mlp(
         raise ValueError(f"unsupported fusion selection metric: {config.selection_metric}")
 
     model = FusionMLP(input_dim=input_dim, hidden_dim=config.hidden_dim)
+    _initialize_fusion_mlp_from_rng(model, rng)
     optimizer = jt.nn.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
 
     best_ap, best_mrr = _metrics_from_model(model, val_features, mean, std, config.batch_size, feature_indices)
@@ -155,6 +157,7 @@ def fit_fusion_mlp_streaming(
         raise ValueError(f"unsupported fusion selection metric: {config.selection_metric}")
 
     model = FusionMLP(input_dim=input_dim, hidden_dim=config.hidden_dim)
+    _initialize_fusion_mlp_from_rng(model, rng)
     optimizer = jt.nn.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
 
     best_ap, best_mrr = _metrics_from_model_streaming(model, val_features, mean, std, config.batch_size, feature_indices)
@@ -361,9 +364,35 @@ def _selected_metric(ap: float, mrr: float, metric: str) -> float:
 
 def _set_jittor_seed_from_rng(rng: np.random.Generator) -> None:
     jt.sync_all()
-    state_bytes = repr(rng.bit_generator.state).encode("utf-8")
-    seed = int.from_bytes(hashlib.blake2b(state_bytes, digest_size=4).digest(), "little")
+    seed = _seed_from_rng_state(rng, salt="jittor")
     jt.set_seed(seed % (2**31 - 1))
+
+
+def _initialize_fusion_mlp_from_rng(model: FusionMLP, rng: np.random.Generator) -> None:
+    init_rng = np.random.default_rng(_seed_from_rng_state(rng, salt="fusion-init"))
+    state: dict[str, np.ndarray] = {}
+    weight_shapes: dict[str, tuple[int, ...]] = {}
+    for key, value in model.state_dict().items():
+        shape = tuple(int(dim) for dim in value.shape)
+        if key.endswith(".weight") and len(shape) >= 2:
+            fan_in = int(shape[1] * np.prod(shape[2:], dtype=np.int64))
+            bound = math.sqrt(1.0 / max(fan_in, 1))
+            state[key] = init_rng.uniform(-bound, bound, size=shape).astype(np.float32)
+            weight_shapes[key] = shape
+        elif key.endswith(".bias"):
+            weight_key = f"{key.removesuffix('.bias')}.weight"
+            weight_shape = weight_shapes.get(weight_key)
+            fan_in = int(weight_shape[1] * np.prod(weight_shape[2:], dtype=np.int64)) if weight_shape else 1
+            bound = math.sqrt(1.0 / max(fan_in, 1))
+            state[key] = init_rng.uniform(-bound, bound, size=shape).astype(np.float32)
+        else:
+            state[key] = np.asarray(value.numpy(), dtype=np.float32).copy()
+    _load_state(model, state)
+
+
+def _seed_from_rng_state(rng: np.random.Generator, *, salt: str) -> int:
+    state_bytes = f"{salt}:{rng.bit_generator.state!r}".encode("utf-8")
+    return int.from_bytes(hashlib.blake2b(state_bytes, digest_size=4).digest(), "little")
 
 
 def _snapshot_state(model: FusionMLP) -> dict[str, np.ndarray]:

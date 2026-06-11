@@ -319,3 +319,43 @@ def test_source_profile_query_array_fast_path_matches_list_path():
         rtol=1e-6,
         atol=1e-6,
     )
+
+
+def test_source_profile_repeated_long_histories_use_cache_without_changing_scores():
+    events: list[Interaction] = []
+    time = 1
+    history_items = tuple(1000 + idx for idx in range(40))
+    for dst in history_items:
+        events.append(Interaction(src=1, dst=dst, time=time))
+        time += 1
+    for idx, dst in enumerate(history_items):
+        helper_src = 100 + idx
+        events.append(Interaction(src=helper_src, dst=dst, time=time))
+        time += 1
+        events.append(Interaction(src=helper_src, dst=5000, time=time))
+        time += 1
+        events.append(Interaction(src=helper_src, dst=5001, time=time))
+        time += 1
+
+    interactions = InteractionTable.from_events(events)
+    cached = SourceProfileTower(
+        id_map=NodeIdMap.from_interactions(interactions),
+        config=SourceProfileConfig(item2vec_enabled=False, window_size=4, recent_k=3, score_batch_size=8),
+    )
+    direct = SourceProfileTower(
+        id_map=NodeIdMap.from_interactions(interactions),
+        config=SourceProfileConfig(item2vec_enabled=False, window_size=4, recent_k=3, score_batch_size=1),
+    )
+    cached.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    direct.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    queries = [
+        TestQuery(src=1, time=time + row_idx, candidates=(5000, 5001, 9999))
+        for row_idx in range(3)
+    ]
+
+    cached_scores = cached.scores_for_queries(queries)
+    direct_scores = direct.scores_for_queries(queries)
+
+    assert cached._deterministic_cache
+    assert not direct._deterministic_cache
+    np.testing.assert_allclose(cached_scores, direct_scores, rtol=1e-6, atol=1e-6)

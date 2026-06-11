@@ -5,10 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import jittor as jt
-import jittor_geometric
 import numpy as np
-from jittor_geometric.data import TemporalData
 
 from jgrec.core.io import read_test_queries
 from jgrec.core.types import InteractionTable
@@ -17,6 +14,8 @@ PAD_NODE_ID = 0
 
 
 def temporal_loader_api() -> tuple[type, Any]:
+    import jittor_geometric  # noqa: PLC0415
+
     root = Path(jittor_geometric.__file__).resolve().parent
     module_path = root / "dataloader" / "temporal_dataloader.py"
     spec = importlib.util.spec_from_file_location("_jgrec_temporal_dataloader", module_path)
@@ -218,7 +217,10 @@ class TemporalNodeMap:
         return _map_sorted_ids(raw_ids, self.dst_raw_ids, self.dst_compact_ids)
 
 
-def temporal_data_from_interactions(interactions: InteractionTable, node_map: TemporalNodeMap) -> TemporalData:
+def temporal_data_from_interactions(interactions: InteractionTable, node_map: TemporalNodeMap):
+    import jittor as jt  # noqa: PLC0415
+    from jittor_geometric.data import TemporalData  # noqa: PLC0415
+
     src = node_map.src_ids(interactions.src)
     dst = node_map.dst_ids(interactions.dst)
     times = interactions.time.astype(np.int32, copy=False)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import jittor as jt
 from jittor import nn
@@ -18,6 +18,42 @@ class TemporalGraphModelConfig:
     heads: int = 4
     dropout: float = 0.15
     time_span: int = 1
+    candidate_feature_dim: int = 6
+
+
+@dataclass
+class DiagnosisTrace:
+    """Intermediate states captured during a diagnostic forward pass."""
+
+    # memory gate diagnostics
+    src_gate_values: jt.Var = None          # [batch, hidden] sigmoid gate for src
+    candidate_gate_values: jt.Var = None    # [batch*cand, hidden] sigmoid gate for candidates
+
+    # attention diagnostics (manually recomputed)
+    attention_weights: jt.Var = None        # [batch*cand, heads, 1, key_len] softmax weights
+    attention_key_mask: jt.Var = None       # [batch*cand, key_len] bool mask
+
+    # scorer input signal strengths (L2 norms per signal block)
+    signal_norms: dict = field(default_factory=dict)
+    # keys: "attended", "src_state", "candidate_state", "interaction", "stats_state"
+    # values: [batch, candidate_count] L2 norm per sample
+
+    # time encoding diagnostics
+    time_deltas_src: jt.Var = None          # [batch, history_len] raw time deltas
+    time_encodings_src: jt.Var = None       # [batch, history_len, hidden] time embeddings
+    time_deltas_candidate: jt.Var = None    # [batch*cand, candidate_history_len]
+    time_encodings_candidate: jt.Var = None # [batch*cand, candidate_history_len, hidden]
+
+    # raw stats before projection
+    pair_stats_raw: jt.Var = None           # [batch, candidate_count, 7+cand_feat_dim]
+
+    # logits
+    logits: jt.Var = None                   # [batch, candidate_count]
+
+
+# Time projection is kept as Linear(1, hidden) because experiments show
+# that more complex encodings (sinusoidal, bucket, MLP) don't improve AP/MRR
+# on this task, suggesting fine-grained time info is not the bottleneck.
 
 
 class EndToEndTemporalGraphModel(jt.nn.Module):
@@ -36,8 +72,11 @@ class EndToEndTemporalGraphModel(jt.nn.Module):
         self.time_projection = nn.Linear(1, config.hidden_size)
         self.memory_gate = nn.Linear(config.hidden_size * 2, config.hidden_size)
         self.memory_candidate = nn.Linear(config.hidden_size * 2, config.hidden_size)
+        # Initialize gate bias to -2 so initial gate ≈ sigmoid(-2) ≈ 0.12
+        # This makes the model initially trust base embedding over history
+        jt.init.constant_(self.memory_gate.bias, -2.0)
         self.query_projection = nn.Linear(config.hidden_size * 3, config.hidden_size)
-        self.stats_projection = nn.Linear(7, config.hidden_size)
+        self.stats_projection = nn.Linear(7 + config.candidate_feature_dim, config.hidden_size)
         self.cross_attention = CrossAttention(
             n_layers=config.layers,
             n_heads=config.heads,
@@ -58,6 +97,7 @@ class EndToEndTemporalGraphModel(jt.nn.Module):
             nn.Linear(config.hidden_size, 1),
         )
         self.layer_norm = nn.LayerNorm(config.hidden_size, eps=1e-12)
+        self.scorer_input_norm = nn.ModuleList([nn.LayerNorm(config.hidden_size, eps=1e-12) for _ in range(5)])
         self.dropout = nn.Dropout(config.dropout)
 
     def execute(
@@ -69,6 +109,7 @@ class EndToEndTemporalGraphModel(jt.nn.Module):
         src_neighbor_times: jt.Var,
         candidate_neighbor_ids: jt.Var,
         candidate_neighbor_times: jt.Var,
+        candidate_features: jt.Var,
     ) -> jt.Var:
         batch_size, candidate_count = candidate_ids.shape
         src_tokens, src_mask = self._history_tokens(
@@ -139,19 +180,18 @@ class EndToEndTemporalGraphModel(jt.nn.Module):
             src_mask=src_mask,
             candidate_mask=candidate_mask,
         )
+        if self.config.candidate_feature_dim > 0:
+            stats = jt.concat([stats, candidate_features.float()], dim=-1)
         stats_state = self.stats_projection(stats.reshape((batch_size * candidate_count, -1))).reshape(
             (batch_size, candidate_count, self.hidden_size)
         )
-        scorer_input = jt.concat(
-            [
-                attended,
-                src_state_expanded,
-                candidate_state,
-                src_state_expanded * candidate_state,
-                stats_state,
-            ],
-            dim=-1,
-        )
+        interaction = src_state_expanded * candidate_state
+        
+        # Normalize each signal block before concatenation to equalize magnitudes
+        signals = [attended, src_state_expanded, candidate_state, interaction, stats_state]
+        normed_signals = [norm(sig) for norm, sig in zip(self.scorer_input_norm, signals)]
+        
+        scorer_input = jt.concat(normed_signals, dim=-1)
         logits = self.scorer(scorer_input.reshape((batch_size * candidate_count, -1))).reshape(
             (batch_size, candidate_count)
         )
@@ -178,7 +218,29 @@ class EndToEndTemporalGraphModel(jt.nn.Module):
         x = jt.concat([base, history], dim=-1)
         gate = jt.sigmoid(self.memory_gate(x))
         candidate = jt.tanh(self.memory_candidate(x))
+        # Store gate values for regularization (accumulate across src + candidate)
+        if not hasattr(self, '_gate_buffer'):
+            self._gate_buffer = []
+        self._gate_buffer.append(gate)
         return self.layer_norm(base + gate * candidate)
+
+    def gate_regularization_loss(self, lam: float = 0.1) -> jt.Var:
+        """Penalize gate values near 0.5 to encourage 0/1 decisions.
+
+        loss = lambda * mean(gate * (1 - gate))
+        gate*(1-gate) is maximized at 0.5 and minimized at 0 or 1.
+        """
+        if not hasattr(self, '_gate_buffer') or not self._gate_buffer:
+            return jt.array(0.0)
+        total = jt.array(0.0)
+        for gate in self._gate_buffer:
+            total = total + (gate * (1.0 - gate)).mean()
+        avg = total / len(self._gate_buffer)
+        return lam * avg
+
+    def clear_gate_buffer(self) -> None:
+        """Clear accumulated gate values. Call before each forward pass."""
+        self._gate_buffer = []
 
     def _pair_keys(
         self,
@@ -271,6 +333,193 @@ class EndToEndTemporalGraphModel(jt.nn.Module):
             ],
             dim=-1,
         )
+
+    def diagnose_forward(
+        self,
+        src_ids: jt.Var,
+        candidate_ids: jt.Var,
+        cur_times: jt.Var,
+        src_neighbor_ids: jt.Var,
+        src_neighbor_times: jt.Var,
+        candidate_neighbor_ids: jt.Var,
+        candidate_neighbor_times: jt.Var,
+        candidate_features: jt.Var,
+    ) -> DiagnosisTrace:
+        """Run a forward pass while capturing intermediate diagnostic states.
+
+        Returns a DiagnosisTrace with gate values, attention weights,
+        signal strengths, time encodings, and raw stats.
+        """
+        trace = DiagnosisTrace()
+        batch_size, candidate_count = candidate_ids.shape
+
+        # --- src history ---
+        src_tokens, src_mask, src_time_deltas, src_time_embs = self._history_tokens_diagnose(
+            node_ids=src_neighbor_ids,
+            neighbor_times=src_neighbor_times,
+            cur_times=cur_times,
+            role_id=1,
+        )
+        trace.time_deltas_src = src_time_deltas
+        trace.time_encodings_src = src_time_embs
+
+        src_base = self.node_embedding(src_ids)
+        src_hist = _masked_mean(src_tokens, src_mask, dim=1)
+        src_state, src_gate = self._memory_update_diagnose(src_base, src_hist)
+        trace.src_gate_values = src_gate
+
+        # --- candidate history ---
+        flat_candidate_ids = candidate_ids.reshape((-1,))
+        flat_times = cur_times.unsqueeze(1).expand(batch_size, candidate_count).reshape((-1,))
+        flat_candidate_neighbors = candidate_neighbor_ids.reshape((batch_size * candidate_count, -1))
+        flat_candidate_neighbor_times = candidate_neighbor_times.reshape((batch_size * candidate_count, -1))
+        candidate_tokens, candidate_mask, cand_time_deltas, cand_time_embs = self._history_tokens_diagnose(
+            node_ids=flat_candidate_neighbors,
+            neighbor_times=flat_candidate_neighbor_times,
+            cur_times=flat_times,
+            role_id=2,
+        )
+        trace.time_deltas_candidate = cand_time_deltas
+        trace.time_encodings_candidate = cand_time_embs
+
+        candidate_base = self.node_embedding(flat_candidate_ids)
+        candidate_hist = _masked_mean(candidate_tokens, candidate_mask, dim=1)
+        candidate_state_flat, cand_gate = self._memory_update_diagnose(candidate_base, candidate_hist)
+        trace.candidate_gate_values = cand_gate
+        candidate_state = candidate_state_flat.reshape(
+            (batch_size, candidate_count, self.hidden_size)
+        )
+        candidate_tokens = candidate_tokens.reshape(
+            (batch_size, candidate_count, self.config.candidate_history_len, self.hidden_size)
+        )
+        candidate_mask = candidate_mask.reshape((batch_size, candidate_count, self.config.candidate_history_len))
+
+        # --- query / key / attention ---
+        src_state_expanded = src_state.unsqueeze(1).expand(batch_size, candidate_count, self.hidden_size)
+        query = self.query_projection(
+            jt.concat(
+                [src_state_expanded, candidate_state, src_state_expanded * candidate_state],
+                dim=-1,
+            ).reshape((batch_size * candidate_count, -1))
+        ).reshape((batch_size * candidate_count, 1, self.hidden_size))
+
+        key, key_mask = self._pair_keys(
+            src_state=src_state,
+            candidate_state=candidate_state,
+            src_tokens=src_tokens,
+            src_mask=src_mask,
+            candidate_tokens=candidate_tokens,
+            candidate_mask=candidate_mask,
+            candidate_count=candidate_count,
+        )
+        trace.attention_key_mask = key_mask
+
+        attention_mask = (1.0 - key_mask.float().unsqueeze(1).unsqueeze(1)) * -10000.0
+        trace.attention_weights = self._extract_attention_weights(query, key, attention_mask)
+
+        attended = self.cross_attention(
+            query,
+            attention_mask,
+            key,
+            output_all_encoded_layers=False,
+        )[-1].reshape((batch_size, candidate_count, self.hidden_size))
+
+        # --- stats ---
+        stats = self._pair_stats(
+            cur_times=cur_times,
+            src_neighbor_ids=src_neighbor_ids,
+            src_neighbor_times=src_neighbor_times,
+            candidate_ids=candidate_ids,
+            candidate_neighbor_times=candidate_neighbor_times,
+            src_mask=src_mask,
+            candidate_mask=candidate_mask,
+        )
+        if self.config.candidate_feature_dim > 0:
+            stats = jt.concat([stats, candidate_features.float()], dim=-1)
+        trace.pair_stats_raw = stats
+
+        stats_state = self.stats_projection(stats.reshape((batch_size * candidate_count, -1))).reshape(
+            (batch_size, candidate_count, self.hidden_size)
+        )
+
+        # --- scorer input signal norms ---
+        interaction = src_state_expanded * candidate_state
+        trace.signal_norms = {
+            "attended": jt.norm(attended, p=2, dim=-1),
+            "src_state": jt.norm(src_state_expanded, p=2, dim=-1),
+            "candidate_state": jt.norm(candidate_state, p=2, dim=-1),
+            "interaction": jt.norm(interaction, p=2, dim=-1),
+            "stats_state": jt.norm(stats_state, p=2, dim=-1),
+        }
+
+        # Normalize each signal block before concatenation to equalize magnitudes
+        signals = [attended, src_state_expanded, candidate_state, interaction, stats_state]
+        normed_signals = [norm(sig) for norm, sig in zip(self.scorer_input_norm, signals)]
+
+        scorer_input = jt.concat(normed_signals, dim=-1)
+        logits = self.scorer(scorer_input.reshape((batch_size * candidate_count, -1))).reshape(
+            (batch_size, candidate_count)
+        )
+        trace.logits = logits
+        return trace
+
+    def _history_tokens_diagnose(
+        self,
+        node_ids: jt.Var,
+        neighbor_times: jt.Var,
+        cur_times: jt.Var,
+        role_id: int,
+    ) -> tuple[jt.Var, jt.Var, jt.Var, jt.Var]:
+        """Like _history_tokens but also returns raw time deltas and time embeddings."""
+        mask = node_ids != 0
+        node_emb = self.node_embedding(node_ids)
+        delta = cur_times.unsqueeze(-1) - neighbor_times
+        delta = jt.maximum(delta.float(), jt.zeros_like(delta).float())
+        time_input = (jt.log(delta + 1.0) / self.time_norm).reshape((-1, 1))
+        time_emb = self.time_projection(time_input).reshape(node_emb.shape)
+        role = self.role_embedding(jt.array([role_id], dtype=jt.int32)).reshape((1, 1, self.hidden_size))
+        tokens = self.layer_norm(node_emb + time_emb + role)
+        tokens = self.dropout(tokens)
+        return tokens, mask, delta, time_emb
+
+    def _memory_update_diagnose(self, base: jt.Var, history: jt.Var) -> tuple[jt.Var, jt.Var]:
+        """Like _memory_update but also returns the gate values."""
+        x = jt.concat([base, history], dim=-1)
+        gate = jt.sigmoid(self.memory_gate(x))
+        candidate = jt.tanh(self.memory_candidate(x))
+        return self.layer_norm(base + gate * candidate), gate
+
+    def _extract_attention_weights(
+        self,
+        query: jt.Var,
+        key: jt.Var,
+        attention_mask: jt.Var,
+    ) -> jt.Var:
+        """Manually recompute attention weights from the first CrossAttention layer.
+
+        Returns: [batch*cand, heads, 1, key_len]
+        """
+        first_layer = self.cross_attention.layer[0]
+        attn_module = first_layer.multi_head_attention
+        n_heads = attn_module.num_attention_heads
+        head_size = attn_module.attention_head_size
+        sqrt_head = attn_module.sqrt_attention_head_size
+
+        q = attn_module.query(query)
+        k = attn_module.key(key)
+
+        q_shape = q.shape[:-1] + (n_heads, head_size)
+        q = q.view(*q_shape)
+        k_shape = k.shape[:-1] + (n_heads, head_size)
+        k = k.view(*k_shape)
+
+        q = q.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 3, 1)
+
+        scores = jt.matmul(q, k) / sqrt_head
+        scores = scores + attention_mask
+        probs = nn.Softmax(dim=-1)(scores)
+        return probs
 
 
 def _masked_mean(values: jt.Var, mask: jt.Var, dim: int) -> jt.Var:

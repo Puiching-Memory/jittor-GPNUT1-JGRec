@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +14,30 @@ from jgrec.logging import log, track
 from .index import TemporalNodeMap
 from .model import EndToEndTemporalGraphModel
 
+CANDIDATE_RECENT_WINDOW_LABELS = ("005", "020")
+CANDIDATE_RECENT_WINDOW_FRACTIONS = (0.05, 0.20)
+CANDIDATE_BASE_FEATURE_DIM = 6
+CANDIDATE_FEATURES_PER_RECENT_WINDOW = 4
+CANDIDATE_PRIOR_FEATURE_NAMES = (
+    "candidate_train_seen",
+    "candidate_test_freq",
+    "candidate_unseen_test_freq",
+    "candidate_test_freq_row_rank",
+    "candidate_train_freq",
+    "candidate_train_freq_row_rank",
+    *(
+        f"candidate_train_recent_{name}_w{label}"
+        for label in CANDIDATE_RECENT_WINDOW_LABELS
+        for name in (
+            "pop",
+            "share",
+            "recency",
+            "rank",
+        )
+    ),
+)
+CANDIDATE_PRIOR_FEATURE_DIM = len(CANDIDATE_PRIOR_FEATURE_NAMES)
+
 
 @dataclass(frozen=True)
 class TemporalTrainingBatch:
@@ -23,6 +48,7 @@ class TemporalTrainingBatch:
     src_neighbor_times: np.ndarray
     candidate_neighbor_ids: np.ndarray
     candidate_neighbor_times: np.ndarray
+    candidate_features: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -58,6 +84,69 @@ class TestCandidateIndex:
         return cls(by_src=by_src, global_candidates=global_candidates.astype(np.int32, copy=False))
 
 
+@dataclass(frozen=True)
+class CandidatePriorIndex:
+    train_dst_ids: frozenset[int]
+    train_dst_counts: dict[int, int]
+    train_dst_total: int
+    test_candidate_counts: dict[int, int]
+    test_candidate_total: int
+    recent_train_features: dict[int, tuple[float, ...]]
+    recent_feature_mask: tuple[bool, ...]
+
+    @classmethod
+    def from_test_candidates(
+        cls,
+        candidate_index: TestCandidateIndex,
+        train_dst_ids: np.ndarray,
+        train_times: np.ndarray | None = None,
+        recent_feature_group: str = "none",
+    ) -> CandidatePriorIndex:
+        if candidate_index.global_candidates.size:
+            candidate_values = candidate_index.global_candidates
+        else:
+            rows = [row for source_rows in candidate_index.by_src.values() for row in source_rows]
+            candidate_values = np.concatenate(rows) if rows else np.empty(0, dtype=np.int32)
+        if candidate_values.size:
+            values, counts = np.unique(candidate_values[candidate_values > 0], return_counts=True)
+            test_counts = {
+                int(value): int(count)
+                for value, count in zip(values, counts, strict=True)
+            }
+            total = int(counts.sum())
+        else:
+            test_counts = {}
+            total = 0
+        raw_train_values = np.asarray(train_dst_ids, dtype=np.int32)
+        train_mask = raw_train_values > 0
+        train_values = raw_train_values[train_mask]
+        aligned_train_times = None
+        if train_times is not None:
+            raw_train_times = np.asarray(train_times, dtype=np.int64)
+            if raw_train_times.shape[0] != raw_train_values.shape[0]:
+                raise ValueError("train_times must align with train_dst_ids")
+            aligned_train_times = raw_train_times[train_mask]
+        if train_values.size:
+            train_unique, train_counts_array = np.unique(train_values, return_counts=True)
+            train_counts = {
+                int(value): int(count)
+                for value, count in zip(train_unique, train_counts_array, strict=True)
+            }
+            train_total = int(train_counts_array.sum())
+        else:
+            train_counts = {}
+            train_total = 0
+        return cls(
+            train_dst_ids=frozenset(train_counts),
+            train_dst_counts=train_counts,
+            train_dst_total=train_total,
+            test_candidate_counts=test_counts,
+            test_candidate_total=total,
+            recent_train_features=_recent_train_feature_map(train_values, aligned_train_times),
+            recent_feature_mask=_recent_feature_mask(recent_feature_group),
+        )
+
+
 def train_listwise(
     model: EndToEndTemporalGraphModel,
     train_events: InteractionTable,
@@ -75,7 +164,9 @@ def train_listwise(
     max_train_events: int,
     max_val_events: int,
     selection_metric: str,
+    train_candidate_index: TestCandidateIndex | None,
     validation_candidate_index: TestCandidateIndex | None,
+    candidate_prior_index: CandidatePriorIndex | None,
     rng: np.random.Generator,
     verbose: bool,
 ) -> TemporalTrainingResult:
@@ -93,6 +184,7 @@ def train_listwise(
         batch_size=batch_size,
         num_negatives=num_negatives,
         candidate_index=validation_candidate_index,
+        candidate_prior_index=candidate_prior_index,
         rng=np.random.default_rng(int(rng.integers(0, 2**31 - 1))),
     )
     best_score = _select_metric(best_ap, best_mrr, selection_metric)
@@ -113,9 +205,13 @@ def train_listwise(
                 rng=rng,
                 history_len=model.config.history_len,
                 candidate_history_len=model.config.candidate_history_len,
+                candidate_index=train_candidate_index,
+                candidate_prior_index=candidate_prior_index,
             )
+            model.clear_gate_buffer()
             logits = model(*_batch_to_jittor(batch))
             loss = _candidate_softmax_loss(logits)
+            loss = loss + model.gate_regularization_loss(lam=0.05)
             optimizer.step(loss)
             jt.sync_all()
             losses.append(float(loss.item()))
@@ -129,6 +225,7 @@ def train_listwise(
             batch_size=batch_size,
             num_negatives=num_negatives,
             candidate_index=validation_candidate_index,
+            candidate_prior_index=candidate_prior_index,
             rng=np.random.default_rng(int(rng.integers(0, 2**31 - 1))),
         )
         val_score = _select_metric(val_ap, val_mrr, selection_metric)
@@ -173,6 +270,8 @@ def fit_full_epochs(
     lr: float,
     weight_decay: float,
     max_train_events: int,
+    train_candidate_index: TestCandidateIndex | None,
+    candidate_prior_index: CandidatePriorIndex | None,
     rng: np.random.Generator,
     verbose: bool,
 ) -> None:
@@ -191,6 +290,8 @@ def fit_full_epochs(
                 rng=rng,
                 history_len=model.config.history_len,
                 candidate_history_len=model.config.candidate_history_len,
+                candidate_index=train_candidate_index,
+                candidate_prior_index=candidate_prior_index,
             )
             logits = model(*_batch_to_jittor(batch))
             loss = _candidate_softmax_loss(logits)
@@ -213,6 +314,7 @@ def evaluate_listwise(
     batch_size: int,
     num_negatives: int,
     candidate_index: TestCandidateIndex | None = None,
+    candidate_prior_index: CandidatePriorIndex | None = None,
     rng: np.random.Generator,
 ) -> tuple[float, float]:
     if len(events) == 0:
@@ -227,6 +329,7 @@ def evaluate_listwise(
             dst_pool=dst_pool,
             num_negatives=num_negatives,
             candidate_index=candidate_index,
+            candidate_prior_index=candidate_prior_index,
             rng=rng,
             history_len=model.config.history_len,
             candidate_history_len=model.config.candidate_history_len,
@@ -245,6 +348,7 @@ def build_evaluation_batch(
     dst_pool: np.ndarray,
     num_negatives: int,
     candidate_index: TestCandidateIndex | None,
+    candidate_prior_index: CandidatePriorIndex | None,
     rng: np.random.Generator,
     history_len: int,
     candidate_history_len: int,
@@ -259,6 +363,7 @@ def build_evaluation_batch(
             rng=rng,
             history_len=history_len,
             candidate_history_len=candidate_history_len,
+            candidate_prior_index=candidate_prior_index,
         )
 
     src_ids = node_map.src_ids(events.src)
@@ -286,6 +391,7 @@ def build_evaluation_batch(
         candidate_history_len=candidate_history_len,
         src_neighbor_ids=np.asarray(src_neighbor_ids, dtype=np.int32),
         src_neighbor_times=np.asarray(src_neighbor_times, dtype=np.int32),
+        candidate_prior_index=candidate_prior_index,
     )
 
 
@@ -298,6 +404,8 @@ def build_training_batch(
     rng: np.random.Generator,
     history_len: int,
     candidate_history_len: int,
+    candidate_index: TestCandidateIndex | None = None,
+    candidate_prior_index: CandidatePriorIndex | None = None,
 ) -> TemporalTrainingBatch:
     src_ids = node_map.src_ids(events.src)
     times = events.time.astype(np.int32, copy=False)
@@ -307,13 +415,23 @@ def build_training_batch(
         node_interact_times=times,
         num_neighbors=history_len,
     )
-    candidates = _sample_candidate_ids(
-        positives=positives,
-        dst_pool=dst_pool,
-        num_negatives=num_negatives,
-        rng=rng,
-        forbidden=src_neighbor_ids,
-    )
+    if candidate_index is None:
+        candidates = _sample_candidate_ids(
+            positives=positives,
+            dst_pool=dst_pool,
+            num_negatives=num_negatives,
+            rng=rng,
+            forbidden=src_neighbor_ids,
+        )
+    else:
+        candidates = _sample_test_like_candidate_ids(
+            events=events,
+            positives=positives,
+            candidate_index=candidate_index,
+            dst_pool=dst_pool,
+            num_negatives=num_negatives,
+            rng=rng,
+        )
     return build_prediction_batch(
         src_ids=src_ids,
         times=times,
@@ -323,6 +441,7 @@ def build_training_batch(
         candidate_history_len=candidate_history_len,
         src_neighbor_ids=np.asarray(src_neighbor_ids, dtype=np.int32),
         src_neighbor_times=np.asarray(src_neighbor_times, dtype=np.int32),
+        candidate_prior_index=candidate_prior_index,
     )
 
 
@@ -335,6 +454,7 @@ def build_prediction_batch(
     candidate_history_len: int,
     src_neighbor_ids: np.ndarray | None = None,
     src_neighbor_times: np.ndarray | None = None,
+    candidate_prior_index: CandidatePriorIndex | None = None,
 ) -> TemporalTrainingBatch:
     if src_neighbor_ids is None or src_neighbor_times is None:
         src_neighbor_ids, _, src_neighbor_times = neighbor_sampler.get_historical_neighbors_left(
@@ -365,6 +485,10 @@ def build_prediction_batch(
             candidates.shape[1],
             candidate_history_len,
         ),
+        candidate_features=build_candidate_prior_features(
+            candidates,
+            candidate_prior_index,
+        ),
     )
 
 
@@ -374,6 +498,7 @@ def queries_to_prediction_batch(
     neighbor_sampler: Any,
     history_len: int,
     candidate_history_len: int,
+    candidate_prior_index: CandidatePriorIndex | None = None,
 ) -> TemporalTrainingBatch:
     src_ids = node_map.src_ids(queries.src)
     times = queries.time.astype(np.int32, copy=False)
@@ -385,6 +510,7 @@ def queries_to_prediction_batch(
         neighbor_sampler=neighbor_sampler,
         history_len=history_len,
         candidate_history_len=candidate_history_len,
+        candidate_prior_index=candidate_prior_index,
     )
 
 
@@ -415,11 +541,153 @@ def _batch_to_jittor(batch: TemporalTrainingBatch) -> tuple[jt.Var, ...]:
         _int32_var(batch.src_neighbor_times),
         _int32_var(batch.candidate_neighbor_ids),
         _int32_var(batch.candidate_neighbor_times),
+        _float32_var(batch.candidate_features),
     )
 
 
 def _int32_var(array: np.ndarray) -> jt.Var:
     return jt.Var(array.astype(np.int32, copy=False))
+
+
+def _float32_var(array: np.ndarray) -> jt.Var:
+    return jt.Var(array.astype(np.float32, copy=False))
+
+
+def build_candidate_prior_features(
+    candidates: np.ndarray,
+    candidate_prior_index: CandidatePriorIndex | None,
+) -> np.ndarray:
+    features = np.zeros((*candidates.shape, CANDIDATE_PRIOR_FEATURE_DIM), dtype=np.float32)
+    if candidate_prior_index is None:
+        return features
+
+    flat_candidates = candidates.reshape(-1)
+    train_seen = np.fromiter(
+        (int(candidate) in candidate_prior_index.train_dst_ids for candidate in flat_candidates),
+        dtype=bool,
+        count=flat_candidates.size,
+    ).reshape(candidates.shape)
+    test_freq = np.fromiter(
+        (
+            candidate_prior_index.test_candidate_counts.get(int(candidate), 0)
+            / max(float(candidate_prior_index.test_candidate_total), 1.0)
+            for candidate in flat_candidates
+        ),
+        dtype=np.float32,
+        count=flat_candidates.size,
+    ).reshape(candidates.shape)
+    train_freq = np.fromiter(
+        (
+            candidate_prior_index.train_dst_counts.get(int(candidate), 0)
+            / max(float(candidate_prior_index.train_dst_total), 1.0)
+            for candidate in flat_candidates
+        ),
+        dtype=np.float32,
+        count=flat_candidates.size,
+    ).reshape(candidates.shape)
+    valid = candidates > 0
+
+    features[:, :, 0] = train_seen.astype(np.float32, copy=False)
+    features[:, :, 1] = test_freq
+    features[:, :, 2] = np.where(train_seen, 0.0, test_freq).astype(np.float32, copy=False)
+    features[:, :, 3] = _row_rank_features(test_freq)
+    features[:, :, 4] = train_freq
+    features[:, :, 5] = _row_rank_features(train_freq)
+    _fill_recent_train_features(features, candidates, candidate_prior_index)
+    features[~valid] = 0.0
+    return features
+
+
+def _fill_recent_train_features(
+    features: np.ndarray,
+    candidates: np.ndarray,
+    candidate_prior_index: CandidatePriorIndex,
+) -> None:
+    if not candidate_prior_index.recent_train_features:
+        return
+    recent = np.zeros((candidates.shape[0], candidates.shape[1], CANDIDATE_PRIOR_FEATURE_DIM - CANDIDATE_BASE_FEATURE_DIM), dtype=np.float32)
+    flat_candidates = candidates.reshape(-1)
+    flat_recent = recent.reshape((flat_candidates.shape[0], -1))
+    for row_idx, candidate in enumerate(flat_candidates):
+        values = candidate_prior_index.recent_train_features.get(int(candidate))
+        if values is None:
+            continue
+        flat_recent[row_idx] = np.asarray(values, dtype=np.float32)
+
+    for window_idx, _ in enumerate(CANDIDATE_RECENT_WINDOW_LABELS):
+        local_start = window_idx * CANDIDATE_FEATURES_PER_RECENT_WINDOW
+        pop = recent[:, :, local_start]
+        recent[:, :, local_start + 3] = _row_rank_features(pop)
+    if candidate_prior_index.recent_feature_mask:
+        mask = np.asarray(candidate_prior_index.recent_feature_mask, dtype=np.float32).reshape((1, 1, -1))
+        recent *= mask
+    features[:, :, CANDIDATE_BASE_FEATURE_DIM:] = recent
+
+
+def _recent_feature_mask(group: str) -> tuple[bool, ...]:
+    normalized = group.lower()
+    feature_names = tuple(
+        name
+        for _label in CANDIDATE_RECENT_WINDOW_LABELS
+        for name in ("pop", "share", "recency", "rank")
+    )
+    if normalized == "none":
+        enabled: set[str] = set()
+    elif normalized == "recency_rank":
+        enabled = {"recency", "rank"}
+    else:
+        raise ValueError(f"unsupported candidate recent feature group: {group}")
+    return tuple(name in enabled for name in feature_names)
+
+
+def _recent_train_feature_map(
+    train_dst_ids: np.ndarray,
+    train_times: np.ndarray | None,
+) -> dict[int, tuple[float, ...]]:
+    if train_times is None or train_dst_ids.size == 0:
+        return {}
+    if train_dst_ids.shape[0] != train_times.shape[0]:
+        raise ValueError("train_times must align with train_dst_ids")
+    min_time = int(train_times.min())
+    max_time = int(train_times.max())
+    graph_span = max(max_time - min_time, 1)
+    feature_values: dict[int, list[float]] = {int(dst): [] for dst in np.unique(train_dst_ids)}
+    for fraction in CANDIDATE_RECENT_WINDOW_FRACTIONS:
+        width = max(math.ceil(float(fraction) * graph_span), 1)
+        start_time = max_time + 1 - width
+        in_window = train_times >= start_time
+        window_dst_ids = train_dst_ids[in_window]
+        window_times = train_times[in_window]
+        window_total = int(window_dst_ids.shape[0])
+        denominator = math.log1p(max(window_total, 1))
+        if window_total:
+            values, counts = np.unique(window_dst_ids, return_counts=True)
+            last_times = {
+                int(dst): int(window_times[window_dst_ids == dst].max())
+                for dst in values
+            }
+            count_map = {
+                int(dst): int(count)
+                for dst, count in zip(values, counts, strict=True)
+            }
+        else:
+            count_map = {}
+            last_times = {}
+        for dst in feature_values:
+            count = count_map.get(dst, 0)
+            if count > 0:
+                pop = math.log1p(count) / denominator
+                share = count / max(float(window_total), 1.0)
+                recency = math.exp(-max((max_time + 1) - last_times[dst], 0) / max(float(width), 1.0))
+            else:
+                pop = 0.0
+                share = 0.0
+                recency = 0.0
+            feature_values[dst].extend([pop, share, recency, 0.0])
+    return {
+        dst: tuple(float(value) for value in values)
+        for dst, values in feature_values.items()
+    }
 
 
 def _sample_candidate_ids(
@@ -432,6 +700,9 @@ def _sample_candidate_ids(
     candidate_count = num_negatives + 1
     candidates = np.empty((positives.shape[0], candidate_count), dtype=np.int32)
     candidates[:, 0] = positives
+    if dst_pool.size == 0:
+        candidates[:, 1:] = positives[:, np.newaxis]
+        return candidates
     replace = dst_pool.shape[0] < max(num_negatives * 2, 1)
     for row_idx, positive in enumerate(positives):
         used = {int(positive)}
@@ -442,7 +713,8 @@ def _sample_candidate_ids(
         while len(negatives) < num_negatives and attempts < 25:
             attempts += 1
             draw_size = max((num_negatives - len(negatives)) * 2, 16)
-            sampled = rng.choice(dst_pool, size=draw_size, replace=replace)
+            draw_replace = replace or dst_pool.shape[0] < draw_size
+            sampled = rng.choice(dst_pool, size=draw_size, replace=draw_replace)
             for value in sampled:
                 item = int(value)
                 if item in used:
@@ -569,3 +841,13 @@ def _select_metric(ap: float, mrr: float, metric: str) -> float:
     if normalized == "mrr":
         return mrr
     raise ValueError(f"unsupported selection metric: {metric}")
+
+
+def _row_rank_features(values: np.ndarray) -> np.ndarray:
+    if values.size == 0:
+        return np.empty(values.shape, dtype=np.float32)
+    order = np.argsort(-values, axis=1, kind="mergesort")
+    ranks = np.empty(values.shape, dtype=np.float32)
+    row_indices = np.arange(values.shape[0])[:, None]
+    ranks[row_indices, order] = np.arange(1, values.shape[1] + 1, dtype=np.float32)
+    return (1.0 / ranks).astype(np.float32, copy=False)

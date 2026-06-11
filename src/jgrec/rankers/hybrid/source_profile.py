@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from typing import Any
 
 import numpy as np
@@ -18,6 +18,13 @@ SOURCE_PROFILE_FEATURE_DIM = len(SOURCE_PROFILE_FEATURE_NAMES)
 DETERMINISTIC_FEATURE_DIM = 6
 ITEM2VEC_FEATURE_DIM = 4
 EPSILON = 1e-8
+SOURCE_PROFILE_CACHE_LIMIT = 4096
+SOURCE_PROFILE_CACHE_MIN_HISTORY = 32
+
+DeterministicSummary = tuple[
+    dict[int, tuple[float, float, float, float]],
+    dict[int, tuple[float, float]],
+]
 
 
 def _jt():
@@ -34,6 +41,8 @@ class SourceProfileTower:
         self.item_pair_counts: dict[int, dict[int, int]] = {}
         self.item_degrees: dict[int, int] = {}
         self.embeddings: np.ndarray | None = None
+        self._deterministic_cache: OrderedDict[tuple[int, int], DeterministicSummary] = OrderedDict()
+        self._embedding_profile_cache: OrderedDict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = OrderedDict()
 
     @property
     def feature_names(self) -> tuple[str, ...]:
@@ -68,6 +77,7 @@ class SourceProfileTower:
             self._fit_item2vec(interactions, rng=rng, verbose=verbose)
         else:
             self.embeddings = None
+        self._clear_score_caches()
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -81,9 +91,11 @@ class SourceProfileTower:
             for left, counts in snapshot["item_pair_counts"].items()
         }
         self.item_degrees = {int(dst): int(count) for dst, count in snapshot["item_degrees"].items()}
+        self._clear_score_caches()
 
     def fit_deterministic(self, interactions: InteractionTable) -> None:
         self._fit_deterministic(interactions)
+        self._clear_score_caches()
 
     def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
@@ -99,18 +111,31 @@ class SourceProfileTower:
         score_batch_size = max(int(self.config.score_batch_size), 1)
         for start in range(0, len(queries), score_batch_size):
             end = min(start + score_batch_size, len(queries))
+            cache_counts = self._cache_key_counts(queries, start, end)
             for row_idx in range(start, end):
                 src = int(queries.src[row_idx])
                 query_time = int(queries.time[row_idx])
-                history = self.index.source_view(src, query_time).visible_dsts
+                source_view = self.index.source_view(src, query_time)
+                history = source_view.visible_dsts
                 if history.size == 0:
                     continue
+                cache_key = (src, int(source_view.cutoff))
+                use_cache = cache_counts[cache_key] > 1 and history.size >= SOURCE_PROFILE_CACHE_MIN_HISTORY
                 candidates = queries.candidates[row_idx].astype(np.int64, copy=False)
                 if self.config.deterministic_enabled:
-                    self._fill_deterministic_features(history, candidates, scores[row_idx])
+                    self._fill_deterministic_features(history, candidates, scores[row_idx], cache_key, use_cache)
                 if self.embeddings is not None:
-                    self._fill_item2vec_features(history, candidates, scores[row_idx])
+                    self._fill_item2vec_features(history, candidates, scores[row_idx], cache_key, use_cache)
         return scores
+
+    def _cache_key_counts(self, queries: TestQueryArray, start: int, end: int) -> Counter[tuple[int, int]]:
+        counts: Counter[tuple[int, int]] = Counter()
+        for row_idx in range(start, end):
+            src = int(queries.src[row_idx])
+            source_view = self.index.source_view(src, int(queries.time[row_idx]))
+            if source_view.cutoff > 0:
+                counts[(src, int(source_view.cutoff))] += 1
+        return counts
 
     def _fit_deterministic(self, interactions: InteractionTable) -> None:
         pair_counts: dict[int, dict[int, int]] = defaultdict(dict)
@@ -168,7 +193,13 @@ class SourceProfileTower:
         history: np.ndarray,
         candidates: np.ndarray,
         output: np.ndarray,
+        cache_key: tuple[int, int] | None = None,
+        use_cache: bool = False,
     ) -> None:
+        if use_cache and cache_key is not None:
+            self._fill_deterministic_features_from_summary(cache_key, history, candidates, output)
+            return
+
         recent_k = max(int(self.config.recent_k), 1)
         recent_history = history[-recent_k:]
         for col_idx, candidate in enumerate(candidates):
@@ -204,28 +235,119 @@ class SourceProfileTower:
             output[col_idx, 4] = np.float32(recent_cosine_total)
             output[col_idx, 5] = np.float32(recent_cosine_max)
 
-    def _fill_item2vec_features(self, history: np.ndarray, candidates: np.ndarray, output: np.ndarray) -> None:
+    def _fill_deterministic_features_from_summary(
+        self,
+        cache_key: tuple[int, int],
+        history: np.ndarray,
+        candidates: np.ndarray,
+        output: np.ndarray,
+    ) -> None:
+        full_scores, recent_scores = self._deterministic_summary(cache_key, history)
+        for col_idx, candidate in enumerate(candidates):
+            candidate_int = int(candidate)
+            full = full_scores.get(candidate_int)
+            if full is not None:
+                output[col_idx, 0] = np.float32(full[0])
+                output[col_idx, 1] = np.float32(full[1])
+                output[col_idx, 2] = np.float32(full[2])
+                output[col_idx, 3] = np.float32(full[3])
+            recent = recent_scores.get(candidate_int)
+            if recent is not None:
+                output[col_idx, 4] = np.float32(recent[0])
+                output[col_idx, 5] = np.float32(recent[1])
+
+    def _deterministic_summary(self, cache_key: tuple[int, int], history: np.ndarray) -> DeterministicSummary:
+        cached = self._deterministic_cache.get(cache_key)
+        if cached is not None:
+            self._deterministic_cache.move_to_end(cache_key)
+            return cached
+
+        recent_k = max(int(self.config.recent_k), 1)
+        recent_start = max(history.size - recent_k, 0)
+        full_scores: dict[int, tuple[float, float, float, float]] = {}
+        recent_scores: dict[int, tuple[float, float]] = {}
+        for history_idx, seen in enumerate(history):
+            seen_int = int(seen)
+            for candidate_int, cooccur in self.item_pair_counts.get(seen_int, {}).items():
+                if cooccur <= 0 or candidate_int == seen_int:
+                    continue
+                value = math.log1p(cooccur)
+                cosine = self._cosine_from_count(cooccur, seen_int, candidate_int, self.item_degrees.get(candidate_int, 0))
+                total, max_value, cosine_total, cosine_max = full_scores.get(candidate_int, (0.0, 0.0, 0.0, 0.0))
+                full_scores[candidate_int] = (
+                    total + value,
+                    max(max_value, value),
+                    cosine_total + cosine,
+                    max(cosine_max, cosine),
+                )
+                if history_idx >= recent_start:
+                    recent_total, recent_max = recent_scores.get(candidate_int, (0.0, 0.0))
+                    recent_scores[candidate_int] = (
+                        recent_total + cosine,
+                        max(recent_max, cosine),
+                    )
+        summary = (full_scores, recent_scores)
+        self._cache_put(self._deterministic_cache, cache_key, summary)
+        return summary
+
+    def _fill_item2vec_features(
+        self,
+        history: np.ndarray,
+        candidates: np.ndarray,
+        output: np.ndarray,
+        cache_key: tuple[int, int] | None = None,
+        use_cache: bool = False,
+    ) -> None:
         if self.embeddings is None:
             return
+        full_profile, recent_profile = self._embedding_profiles(history, cache_key, use_cache)
+        dst_ids = self.id_map.dst_ids(candidates)
+        valid = dst_ids >= 0
+        if np.any(valid):
+            valid &= np.asarray([int(candidate) in self.index.dst_times for candidate in candidates], dtype=bool)
+        if not np.any(valid):
+            return
+
+        valid_rows = np.flatnonzero(valid)
+        item_vectors = self.embeddings[dst_ids[valid_rows]]
+        scale = math.sqrt(self.embeddings.shape[1])
+        output[valid_rows, 6] = np.asarray(item_vectors @ full_profile / scale, dtype=np.float32)
+        output[valid_rows, 7] = _cosine_many(item_vectors, full_profile)
+        output[valid_rows, 8] = np.asarray(item_vectors @ recent_profile / scale, dtype=np.float32)
+        output[valid_rows, 9] = _cosine_many(item_vectors, recent_profile)
+
+    def _embedding_profiles(
+        self,
+        history: np.ndarray,
+        cache_key: tuple[int, int] | None,
+        use_cache: bool,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if self.embeddings is None:
+            empty = np.empty(0, dtype=np.float32)
+            return empty, empty
+        if use_cache and cache_key is not None:
+            cached = self._embedding_profile_cache.get(cache_key)
+            if cached is not None:
+                self._embedding_profile_cache.move_to_end(cache_key)
+                return cached
+
         history_ids = self.id_map.dst_ids(history)
         history_ids = history_ids[history_ids >= 0]
         if history_ids.size == 0:
-            return
-        recent_k = max(int(self.config.recent_k), 1)
-        recent_ids = history_ids[-recent_k:]
-        full_profile = _mean_embedding(self.embeddings, history_ids)
-        recent_profile = _mean_embedding(self.embeddings, recent_ids)
-        dst_ids = self.id_map.dst_ids(candidates)
-        for col_idx, dst_id in enumerate(dst_ids):
-            if dst_id < 0:
-                continue
-            if int(candidates[col_idx]) not in self.index.dst_times:
-                continue
-            item_vec = self.embeddings[int(dst_id)]
-            output[col_idx, 6] = np.float32(float(np.dot(full_profile, item_vec)) / math.sqrt(self.embeddings.shape[1]))
-            output[col_idx, 7] = np.float32(_cosine(full_profile, item_vec))
-            output[col_idx, 8] = np.float32(float(np.dot(recent_profile, item_vec)) / math.sqrt(self.embeddings.shape[1]))
-            output[col_idx, 9] = np.float32(_cosine(recent_profile, item_vec))
+            profiles = (
+                np.zeros(self.embeddings.shape[1], dtype=np.float32),
+                np.zeros(self.embeddings.shape[1], dtype=np.float32),
+            )
+        else:
+            recent_k = max(int(self.config.recent_k), 1)
+            recent_ids = history_ids[-recent_k:]
+            profiles = (
+                _mean_embedding(self.embeddings, history_ids),
+                _mean_embedding(self.embeddings, recent_ids),
+            )
+        if use_cache and cache_key is not None:
+            self._cache_put(self._embedding_profile_cache, cache_key, profiles)
+        return profiles
 
     def _cooccur_count(self, left: int, right: int) -> int:
         if left == right:
@@ -236,6 +358,17 @@ class SourceProfileTower:
         left_degree = self.item_degrees.get(int(left), 0)
         denominator = math.sqrt(max(left_degree, 1) * max(right_degree, 1))
         return float(cooccur) / max(denominator, EPSILON)
+
+    def _clear_score_caches(self) -> None:
+        self._deterministic_cache.clear()
+        self._embedding_profile_cache.clear()
+
+    @staticmethod
+    def _cache_put(cache: OrderedDict, key, value) -> None:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > SOURCE_PROFILE_CACHE_LIMIT:
+            cache.popitem(last=False)
 
 
 class _Item2VecModel:
@@ -323,3 +456,16 @@ def _cosine(left: np.ndarray, right: np.ndarray) -> float:
     if denominator <= EPSILON:
         return 0.0
     return float(np.dot(left, right) / denominator)
+
+
+def _cosine_many(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    right_norm = float(np.linalg.norm(right))
+    if right_norm <= EPSILON:
+        return np.zeros(left.shape[0], dtype=np.float32)
+    left_norm = np.linalg.norm(left, axis=1)
+    denominator = left_norm * right_norm
+    result = np.zeros(left.shape[0], dtype=np.float32)
+    valid = denominator > EPSILON
+    if np.any(valid):
+        result[valid] = np.asarray(left[valid] @ right / denominator[valid], dtype=np.float32)
+    return result

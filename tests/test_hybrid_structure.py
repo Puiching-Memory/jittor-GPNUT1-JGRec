@@ -152,6 +152,28 @@ def test_future_only_structure_preaggregates_large_source_cooccurs():
     np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 
 
+def test_future_only_structure_preaggregates_repeated_source_cooccurs():
+    interactions = [
+        Interaction(src=1, dst=1000 + idx, time=idx)
+        for idx in range(1, 40)
+    ]
+    interactions.extend(
+        Interaction(src=1000 + idx, dst=2000 + (idx % 5), time=100 + idx)
+        for idx in range(1, 40)
+    )
+    queries = [
+        Query(src=1, time=500 + idx, candidates=(2000, 2001, 2002, 9999))
+        for idx in range(3)
+    ]
+    future_tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
+    future_tower.fit(_table(interactions), rng=np.random.default_rng(0), verbose=False)
+
+    actual = future_tower.features_for_queries(queries)
+
+    assert 1 in future_tower._full_src_cooccur_cache
+    assert np.isfinite(actual).all()
+
+
 def test_future_only_structure_preaggregates_large_source_common_neighbors():
     interactions = [Interaction(src=1, dst=1000 + idx, time=idx) for idx in range(1, 310)]
     interactions.extend(

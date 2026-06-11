@@ -19,10 +19,12 @@ from .rankers.hybrid.config import TrainingConfig
 from .rankers.registry import create_ranker
 from .submission import expected_test_rows, validate_submission_file, write_zip
 
-ModelName = Literal["hybrid", "craft"]
+ModelName = Literal["hybrid", "craft", "temporal-graph"]
 SelectionMetric = Literal["ap", "mrr"]
 GNNModel = Literal["xsimgcl", "lightgcn"]
 GNNEdgeWeighting = Literal["none", "repeat", "time_decay"]
+CandidateProtocol = Literal["random", "test_like"]
+CandidateRecentFeatureGroup = Literal["none", "recency_rank"]
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,16 @@ class CLIConfig:
     negative_sampling_workers: int = 0
     craft_neighbors: int = 30
     craft_hidden_size: int = 64
+    history_len: int = 64
+    candidate_history_len: int = 32
+    hidden_size: int = 128
+    layers: int = 3
+    heads: int = 4
+    dropout: float = 0.15
+    training_candidates: CandidateProtocol = "test_like"
+    validation_candidates: CandidateProtocol = "test_like"
+    candidate_recent_feature_group: CandidateRecentFeatureGroup = "recency_rank"
+    refit_full: bool = True
     seed: int = 42
     quiet_ranker: bool = False
     cpu: bool = False
@@ -117,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     import tyro  # noqa: PLC0415
 
     args = tyro.cli(CLIConfig, args=argv)
-    _configure_jittor_device(args.cpu)
+    _validate_device_args(args)
 
     ranker_config = _ranker_config(args)
     run_name = args.run_name or _build_run_name(args, ranker_config)
@@ -188,6 +200,34 @@ def _ranker_config(args: CLIConfig):
             early_stop_patience=args.early_stop,
             num_neighbors=args.craft_neighbors,
             hidden_size=args.craft_hidden_size,
+        )
+    if args.model == "temporal-graph":
+        from .rankers.temporal_graph.config import TemporalGraphTrainingConfig  # noqa: PLC0415
+
+        return TemporalGraphTrainingConfig(
+            val_ratio=args.val_ratio,
+            max_train_events=args.max_train_events,
+            max_val_events=args.max_val_events,
+            num_negatives=args.num_negatives,
+            max_fit_events=args.max_fit_events,
+            epochs=args.epochs,
+            train_batch_size=args.train_batch_size,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            selection_metric=args.selection_metric,
+            early_stop_patience=args.early_stop,
+            seed=args.seed,
+            verbose=not args.quiet_ranker,
+            history_len=args.history_len,
+            candidate_history_len=args.candidate_history_len,
+            hidden_size=args.hidden_size,
+            layers=args.layers,
+            heads=args.heads,
+            dropout=args.dropout,
+            training_candidates=args.training_candidates,
+            validation_candidates=args.validation_candidates,
+            candidate_recent_feature_group=args.candidate_recent_feature_group,
+            refit_full=args.refit_full,
         )
     return TrainingConfig(
         val_ratio=args.val_ratio,
@@ -263,10 +303,9 @@ def _ranker_config(args: CLIConfig):
     )
 
 
-def _configure_jittor_device(cpu: bool) -> None:
-    import jittor as jt  # noqa: PLC0415
-
-    jt.flags.use_cuda = 0 if cpu else 1
+def _validate_device_args(args: CLIConfig) -> None:
+    if args.model == "temporal-graph" and args.cpu:
+        raise ValueError("temporal-graph requires CUDA; do not pass --cpu")
 
 
 def _build_run_name(args: CLIConfig, config) -> str:
@@ -283,6 +322,16 @@ def _build_run_name(args: CLIConfig, config) -> str:
                 f"profile-{'on' if config.source_profile_enabled else 'off'}",
                 f"tower-{'on' if config.two_tower_enabled else 'off'}",
                 f"sequence-{'on' if config.seq_enabled else 'off'}",
+            ]
+        )
+    elif args.model == "temporal-graph":
+        parts.extend(
+            [
+                f"hist-{config.history_len}",
+                f"candhist-{config.candidate_history_len}",
+                f"dim-{config.hidden_size}",
+                f"layers-{config.layers}",
+                f"heads-{config.heads}",
             ]
         )
     parts.append(_config_digest(args, config))
@@ -360,6 +409,19 @@ def _run_panel(run_dir: Path, zip_path: Path, args: CLIConfig, config) -> Panel:
         table.add_row("supervised_feature_batch_size", str(config.supervised_feature_batch_size))
         table.add_row("supervised_feature_memmap", "on" if config.supervised_feature_memmap else "off")
         table.add_row("negative_sampling_workers", str(config.negative_sampling_workers))
+    elif args.model == "temporal-graph":
+        table.add_row("max_fit_events", str(config.max_fit_events) if config.max_fit_events else "full")
+        table.add_row("max_train_events", str(config.max_train_events))
+        table.add_row("max_val_events", str(config.max_val_events))
+        table.add_row("num_negatives", str(config.num_negatives))
+        table.add_row("history_len", str(config.history_len))
+        table.add_row("candidate_history_len", str(config.candidate_history_len))
+        table.add_row("hidden_size", str(config.hidden_size))
+        table.add_row("layers/heads", f"{config.layers}/{config.heads}")
+        table.add_row("training_candidates", config.training_candidates)
+        table.add_row("validation_candidates", config.validation_candidates)
+        table.add_row("candidate_recent_feature_group", config.candidate_recent_feature_group)
+        table.add_row("refit_full", "on" if config.refit_full else "off")
     return Panel(table, title="JGRec build", border_style="blue")
 
 

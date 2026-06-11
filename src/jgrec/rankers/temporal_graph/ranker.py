@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 
+import jittor as jt
 import numpy as np
 
 from jgrec.core.io import read_test_queries
@@ -13,40 +14,19 @@ from jgrec.core.types import (
 )
 from jgrec.logging import log
 
+from .config import TemporalGraphTrainingConfig
 from .index import TemporalNodeMap, safe_neighbor_sampler, temporal_data_from_interactions, temporal_loader_api
 from .model import EndToEndTemporalGraphModel, TemporalGraphModelConfig
 from .trainer import (
+    CANDIDATE_PRIOR_FEATURE_DIM,
+    CANDIDATE_PRIOR_FEATURE_NAMES,
+    CandidatePriorIndex,
     TestCandidateIndex,
     fit_full_epochs,
     predict_logits,
     queries_to_prediction_batch,
     train_listwise,
 )
-
-
-@dataclass(frozen=True)
-class TemporalGraphTrainingConfig:
-    val_ratio: float = 0.15
-    max_train_events: int = 20_000
-    max_val_events: int = 5_000
-    num_negatives: int = 99
-    max_fit_events: int = 0
-    epochs: int = 8
-    train_batch_size: int = 256
-    lr: float = 0.001
-    weight_decay: float = 0.0
-    selection_metric: str = "ap"
-    early_stop_patience: int = 10
-    seed: int = 42
-    verbose: bool = True
-    history_len: int = 64
-    candidate_history_len: int = 32
-    hidden_size: int = 128
-    layers: int = 3
-    heads: int = 4
-    dropout: float = 0.15
-    validation_candidates: str = "random"
-    refit_full: bool = True
 
 
 class TemporalGraphRanker:
@@ -58,6 +38,7 @@ class TemporalGraphRanker:
         self.neighbor_sampler = None
         self.config: TemporalGraphTrainingConfig | None = None
         self.training_report: TrainingReport | None = None
+        self._candidate_prior_index: CandidatePriorIndex | None = None
 
     def fit(
         self,
@@ -67,6 +48,7 @@ class TemporalGraphRanker:
     ) -> TrainingReport:
         if len(interactions) == 0:
             raise ValueError("training interactions are empty")
+        _configure_jittor_runtime(training_config.seed)
         interactions = interactions.sort_by_time()
         if training_config.max_fit_events > 0 and len(interactions) > training_config.max_fit_events:
             interactions = interactions.tail(training_config.max_fit_events)
@@ -92,7 +74,26 @@ class TemporalGraphRanker:
 
         rng = np.random.default_rng(training_config.seed)
         self.model = self._build_model(time_span)
-        validation_candidate_index = self._validation_candidate_index(context, training_config)
+        test_candidate_index = self._test_candidate_index(context)
+        train_candidate_index = self._candidate_index_for_protocol(
+            test_candidate_index,
+            training_config.training_candidates,
+        )
+        validation_candidate_index = self._candidate_index_for_protocol(
+            test_candidate_index,
+            training_config.validation_candidates,
+        )
+        selection_candidate_prior_index = (
+            CandidatePriorIndex.from_test_candidates(
+                test_candidate_index,
+                self.node_map.dst_ids(train_events.dst),
+                train_times=train_events.time,
+                recent_feature_group=training_config.candidate_recent_feature_group,
+            )
+            if test_candidate_index is not None
+            else None
+        )
+        self._candidate_prior_index = selection_candidate_prior_index
         result = train_listwise(
             model=self.model,
             train_events=train_events,
@@ -109,7 +110,9 @@ class TemporalGraphRanker:
             max_train_events=training_config.max_train_events,
             max_val_events=training_config.max_val_events,
             selection_metric=training_config.selection_metric,
+            train_candidate_index=train_candidate_index,
             validation_candidate_index=validation_candidate_index,
+            candidate_prior_index=selection_candidate_prior_index,
             rng=rng,
             verbose=training_config.verbose,
         )
@@ -118,6 +121,16 @@ class TemporalGraphRanker:
             log(
                 f"[temporal-graph] refit_full epochs={result.best_epoch} events={len(interactions)}",
                 enabled=training_config.verbose,
+            )
+            full_candidate_prior_index = (
+                CandidatePriorIndex.from_test_candidates(
+                    test_candidate_index,
+                    self.node_map.dst_ids(interactions.dst),
+                    train_times=interactions.time,
+                    recent_feature_group=training_config.candidate_recent_feature_group,
+                )
+                if test_candidate_index is not None
+                else None
             )
             self.model = self._build_model(time_span)
             fit_full_epochs(
@@ -132,23 +145,34 @@ class TemporalGraphRanker:
                 lr=training_config.lr,
                 weight_decay=training_config.weight_decay,
                 max_train_events=training_config.max_train_events,
+                train_candidate_index=train_candidate_index,
+                candidate_prior_index=full_candidate_prior_index,
                 rng=np.random.default_rng(training_config.seed + 10_000),
                 verbose=training_config.verbose,
             )
+            self._candidate_prior_index = full_candidate_prior_index
 
         report = TrainingReport(
             train_events=min(len(train_events), training_config.max_train_events or len(train_events)),
             val_events=min(len(val_events), training_config.max_val_events or len(val_events)),
             best_val_ap=result.best_val_ap,
             best_val_mrr=result.best_val_mrr,
-            feature_names=("node_embedding", "temporal_memory", "cross_attention", "listwise_softmax"),
+            feature_names=(
+                "node_embedding",
+                "temporal_memory",
+                "cross_attention",
+                *CANDIDATE_PRIOR_FEATURE_NAMES,
+                "listwise_softmax",
+            ),
             selected_fusion="end_to_end",
             model_name="temporal-graph",
             metrics={
                 "best_epoch": float(result.best_epoch),
                 "num_nodes": float(self.node_map.num_nodes),
                 "num_dst": float(self.node_map.num_dst),
-                "validation_test_like": 1.0 if training_config.validation_candidates == "test_like" else 0.0,
+                "training_test_like": 1.0 if train_candidate_index is not None else 0.0,
+                "validation_test_like": 1.0 if validation_candidate_index is not None else 0.0,
+                "use_cuda": 1.0,
             },
         )
         self.training_report = report
@@ -165,6 +189,7 @@ class TemporalGraphRanker:
             neighbor_sampler=self.neighbor_sampler,
             history_len=self.config.history_len,
             candidate_history_len=self.config.candidate_history_len,
+            candidate_prior_index=self._prediction_candidate_prior_index(),
         )
         logits = predict_logits(self.model, batch)
         logits = logits - logits.max(axis=1, keepdims=True)
@@ -185,21 +210,33 @@ class TemporalGraphRanker:
                 heads=self.config.heads,
                 dropout=self.config.dropout,
                 time_span=time_span,
+                candidate_feature_dim=CANDIDATE_PRIOR_FEATURE_DIM,
             )
         )
 
-    def _validation_candidate_index(
-        self,
-        context: FitContext,
-        training_config: TemporalGraphTrainingConfig,
-    ) -> TestCandidateIndex | None:
+    def _test_candidate_index(self, context: FitContext) -> TestCandidateIndex | None:
         if self.node_map is None:
             raise RuntimeError("ranker is not initialized")
-        if training_config.validation_candidates == "random":
+        test_path = context.dataset.test_path
+        if test_path is None or not test_path.exists():
             return None
-        if training_config.validation_candidates != "test_like":
-            raise ValueError(f"unsupported validation candidate protocol: {training_config.validation_candidates}")
-        return TestCandidateIndex.from_queries(read_test_queries(context.dataset.test_path), self.node_map)
+        return TestCandidateIndex.from_queries(read_test_queries(test_path), self.node_map)
+
+    def _candidate_index_for_protocol(
+        self,
+        test_candidate_index: TestCandidateIndex | None,
+        protocol: str,
+    ) -> TestCandidateIndex | None:
+        if protocol == "random":
+            return None
+        if protocol != "test_like":
+            raise ValueError(f"unsupported candidate protocol: {protocol}")
+        return test_candidate_index
+
+    def _prediction_candidate_prior_index(self) -> CandidatePriorIndex | None:
+        if self.node_map is None or self.config is None:
+            raise RuntimeError("ranker is not initialized")
+        return self._candidate_prior_index
 
 
 class TemporalGraphRankerAdapter:
@@ -219,3 +256,12 @@ class TemporalGraphRankerAdapter:
 
     def predict_batch(self, queries: TestQueryArray) -> np.ndarray:
         return self.impl.predict_batch(queries)
+
+
+def _set_jittor_seed(seed: int) -> None:
+    jt.set_global_seed(int(seed))
+
+
+def _configure_jittor_runtime(seed: int) -> None:
+    jt.flags.use_cuda = 1
+    _set_jittor_seed(seed)

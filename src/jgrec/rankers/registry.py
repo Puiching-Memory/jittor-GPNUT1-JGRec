@@ -48,8 +48,7 @@ def available_rankers() -> tuple[str, ...]:
 
 
 def ensure_builtin_rankers() -> None:
-    if registry.names():
-        return
+    registered = set(registry.names())
 
     def hybrid_factory(config: Any) -> Ranker:
         from .hybrid.config import TrainingConfig  # noqa: PLC0415
@@ -63,5 +62,17 @@ def ensure_builtin_rankers() -> None:
 
         return CRAFTBaselineRanker(config if isinstance(config, CRAFTBaselineConfig) else CRAFTBaselineConfig())
 
-    registry.register("hybrid", hybrid_factory)
-    registry.register("craft", craft_factory)
+    def temporal_graph_factory(config: Any) -> Ranker:
+        from .temporal_graph.config import TemporalGraphTrainingConfig  # noqa: PLC0415
+        from .temporal_graph.ranker import TemporalGraphRankerAdapter  # noqa: PLC0415
+
+        return TemporalGraphRankerAdapter(
+            config if isinstance(config, TemporalGraphTrainingConfig) else TemporalGraphTrainingConfig()
+        )
+
+    if "hybrid" not in registered:
+        registry.register("hybrid", hybrid_factory)
+    if "craft" not in registered:
+        registry.register("craft", craft_factory)
+    if "temporal-graph" not in registered:
+        registry.register("temporal-graph", temporal_graph_factory)
