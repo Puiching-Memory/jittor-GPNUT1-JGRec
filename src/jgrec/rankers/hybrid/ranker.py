@@ -1473,6 +1473,9 @@ class HybridRankerAdapter:
         self.impl = TemporalHybridRanker(recent_window=recent_window)
 
     def fit(self, interactions: InteractionTable, context: FitContext) -> TrainingReport:
+        import jittor as jt  # noqa: PLC0415
+
+        jt.flags.use_cuda = 1
         config = replace(
             self.config,
             seed=context.seed,

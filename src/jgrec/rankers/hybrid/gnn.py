@@ -16,6 +16,18 @@ DENSE_CPU_NODE_LIMIT = 5_000
 DENSE_CPU_EDGE_LIMIT = 20_000
 
 
+class _DenseCPUGraphModel:
+    """Deprecated CPU fallback stub; kept only to satisfy old import paths.
+
+    GNN training now requires CUDA and will raise before reaching this class.
+    """
+
+    def __new__(cls, **kwargs):  # noqa: ARG003
+        raise RuntimeError(
+            "GNN training requires CUDA. Run without --cpu and ensure a CUDA/JittorGeometric environment is available."
+        )
+
+
 class GraphTower:
     def __init__(self, id_map: NodeIdMap, config: GraphTowerConfig) -> None:
         self.id_map = id_map
@@ -147,13 +159,9 @@ class GraphTower:
             raise ValueError(f"unsupported graph model: {self.config.model_name}")
 
         if jt.flags.use_cuda == 0:
-            return _DenseCPUGraphModel(
-                num_users=self.id_map.num_src,
-                num_items=self.id_map.num_dst,
-                embedding_dim=self.config.embedding_dim,
-                n_layers=self.config.layers,
-                edge_index=edge_index,
-                reg_weight=self.config.reg_weight,
+            raise RuntimeError(
+                "GNN training requires CUDA; jt.flags.use_cuda is 0. "
+                "Run without --cpu and ensure a CUDA/JittorGeometric environment is available."
             )
 
         from jittor_geometric.nn.models import LightGCN, XSimGCL  # noqa: PLC0415

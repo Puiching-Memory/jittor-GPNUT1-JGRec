@@ -130,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = tyro.cli(CLIConfig, args=argv)
     _validate_device_args(args)
+    _configure_jittor_device(args)
 
     ranker_config = _ranker_config(args)
     run_name = args.run_name or _build_run_name(args, ranker_config)
@@ -304,8 +305,21 @@ def _ranker_config(args: CLIConfig):
 
 
 def _validate_device_args(args: CLIConfig) -> None:
+    if args.cpu:
+        raise ValueError("--cpu is disabled; this project requires CUDA")
     if args.model == "temporal-graph" and args.cpu:
         raise ValueError("temporal-graph requires CUDA; do not pass --cpu")
+
+
+def _configure_jittor_device(args: CLIConfig) -> None:
+    import jittor as jt  # noqa: PLC0415
+
+    if args.cpu:
+        jt.flags.use_cuda = 0
+    else:
+        if not jt.has_cuda:
+            raise RuntimeError("CUDA is not available but --cpu was not passed; this project requires CUDA")
+        jt.flags.use_cuda = 1
 
 
 def _build_run_name(args: CLIConfig, config) -> str:
