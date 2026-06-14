@@ -80,6 +80,51 @@ def test_structure_features_after_training_window_include_full_history():
     assert features[0, FEATURE["transition_score"]] == np.float32(math.log1p(1))
 
 
+def test_structure_common_neighbors_ignore_numeric_id_collisions_in_bipartite_graph():
+    tower = StructureFeatureTower()
+    tower.fit(
+        _table([
+            Interaction(src=1, dst=10, time=10),
+            Interaction(src=2, dst=20, time=20),
+            Interaction(src=10, dst=20, time=30),
+            Interaction(src=99, dst=30, time=50),
+        ]),
+        rng=np.random.default_rng(0),
+        verbose=False,
+    )
+
+    cutoff_features = tower.features_for_queries([Query(src=1, time=40, candidates=(20,))])[0]
+    future_features = tower.features_for_queries([Query(src=1, time=60, candidates=(20,))])[0]
+
+    assert cutoff_features[0, FEATURE["dst_unique_src"]] == np.float32(math.log1p(2))
+    assert cutoff_features[0, FEATURE["common_neighbors"]] == 0.0
+    assert cutoff_features[0, FEATURE["jaccard"]] == 0.0
+    assert future_features[0, FEATURE["dst_unique_src"]] == np.float32(math.log1p(2))
+    assert future_features[0, FEATURE["common_neighbors"]] == 0.0
+    assert future_features[0, FEATURE["jaccard"]] == 0.0
+
+
+def test_structure_common_neighbors_keep_supported_bridge_nodes_in_mixed_graph():
+    tower = StructureFeatureTower()
+    tower.fit(
+        _table([
+            Interaction(src=1, dst=10, time=10),
+            Interaction(src=10, dst=30, time=20),
+            Interaction(src=10, dst=20, time=30),
+            Interaction(src=3, dst=10, time=40),
+            Interaction(src=4, dst=10, time=50),
+            Interaction(src=5, dst=20, time=60),
+        ]),
+        rng=np.random.default_rng(0),
+        verbose=False,
+    )
+
+    features = tower.features_for_queries([Query(src=1, time=70, candidates=(20,))])[0]
+
+    assert features[0, FEATURE["common_neighbors"]] == np.float32(math.log1p(1))
+    assert features[0, FEATURE["jaccard"]] == np.float32(1 / 2)
+
+
 def test_future_only_structure_compaction_preserves_full_history_features():
     interactions = [
         Interaction(src=1, dst=10, time=10),

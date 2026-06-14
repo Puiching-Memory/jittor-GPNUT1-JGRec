@@ -29,6 +29,8 @@ FULL_HISTORY_CACHE_LIMIT = 2048
 FULL_COMMON_NEIGHBOR_CACHE_LIMIT = 2048
 FULL_COOCCUR_CACHE_LIMIT = 4096
 FULL_COOCCUR_PREAGGREGATE_NEIGHBOR_THRESHOLD = 256
+DEFAULT_BRIDGE_OVERLAP_THRESHOLD = 0.50
+DEFAULT_BRIDGE_MIN_ROLE_DEGREE = 2
 
 
 class StructureFeatureTower:
@@ -43,6 +45,9 @@ class StructureFeatureTower:
         self._full_dst_source_cache: OrderedDict[int, set[int]] = OrderedDict()
         self._full_src_common_neighbor_cache: OrderedDict[int, dict[int, int]] = OrderedDict()
         self._full_src_cooccur_cache: OrderedDict[int, dict[int, int]] = OrderedDict()
+        self._bridge_overlap_ratio = 0.0
+        self._bridge_min_role_degree = DEFAULT_BRIDGE_MIN_ROLE_DEGREE
+        self._allow_global_id_bridge = False
 
     @property
     def feature_names(self) -> tuple[str, ...]:
@@ -74,6 +79,7 @@ class StructureFeatureTower:
             max(self.graph_span * 0.20, 1.0),
             max(self.graph_span * 0.50, 1.0),
         )
+        self.fit_bridge_policy(interactions)
         self._full_src_neighbor_cache.clear()
         self._full_dst_source_cache.clear()
         self._full_src_common_neighbor_cache.clear()
@@ -100,6 +106,9 @@ class StructureFeatureTower:
             "max_time": self.max_time,
             "graph_span": self.graph_span,
             "decay_windows": self.decay_windows,
+            "bridge_overlap_ratio": self._bridge_overlap_ratio,
+            "bridge_min_role_degree": self._bridge_min_role_degree,
+            "allow_global_id_bridge": self._allow_global_id_bridge,
         }
 
     def hydrate(self, snapshot: dict[str, Any]) -> None:
@@ -108,6 +117,9 @@ class StructureFeatureTower:
         self.max_time = int(snapshot["max_time"])
         self.graph_span = int(snapshot["graph_span"])
         self.decay_windows = tuple(float(value) for value in snapshot["decay_windows"])
+        self._bridge_overlap_ratio = float(snapshot.get("bridge_overlap_ratio", 0.0))
+        self._bridge_min_role_degree = int(snapshot.get("bridge_min_role_degree", DEFAULT_BRIDGE_MIN_ROLE_DEGREE))
+        self._allow_global_id_bridge = bool(snapshot.get("allow_global_id_bridge", False))
         self._full_src_neighbor_cache.clear()
         self._full_dst_source_cache.clear()
         self._full_src_common_neighbor_cache.clear()
@@ -175,8 +187,9 @@ class StructureFeatureTower:
                 output[idx, 6] = math.exp(-max(query.time - reverse_last_time, 0) / self.graph_span)
 
             if src_neighbor_count and dst_source_count:
-                common = len(src_neighbors & dst_sources)
-                union = len(src_neighbors | dst_sources)
+                bridge_nodes = self._valid_bridge_nodes(src_neighbors & dst_sources)
+                common = len(bridge_nodes)
+                union = src_neighbor_count + dst_source_count - common
                 output[idx, 7] = math.log1p(common)
                 output[idx, 8] = common / max(union, 1)
 
@@ -287,6 +300,8 @@ class StructureFeatureTower:
 
         counts: dict[int, int] = {}
         for neighbor_src in src_neighbors:
+            if not self._is_valid_bridge_node(neighbor_src):
+                continue
             neighbor_dsts = self.index.src_dsts.get(neighbor_src)
             if neighbor_dsts is None or not neighbor_dsts.size:
                 continue
@@ -295,6 +310,40 @@ class StructureFeatureTower:
                 counts[candidate_int] = counts.get(candidate_int, 0) + 1
         self._cache_put(self._full_src_common_neighbor_cache, src, counts, FULL_COMMON_NEIGHBOR_CACHE_LIMIT)
         return counts
+
+    def fit_bridge_policy(self, interactions: InteractionTable) -> None:
+        self.fit_bridge_policy_from_values(
+            src_values={int(value) for value in np.unique(interactions.src)},
+            dst_values={int(value) for value in np.unique(interactions.dst)},
+        )
+
+    def fit_bridge_policy_from_values(self, src_values: set[int], dst_values: set[int]) -> None:
+        if not src_values or not dst_values:
+            self._bridge_overlap_ratio = 0.0
+            self._allow_global_id_bridge = False
+        else:
+            overlap = len(src_values & dst_values)
+            self._bridge_overlap_ratio = overlap / max(min(len(src_values), len(dst_values)), 1)
+            threshold = float(getattr(self.config, "bridge_overlap_threshold", DEFAULT_BRIDGE_OVERLAP_THRESHOLD))
+            self._allow_global_id_bridge = self._bridge_overlap_ratio >= threshold
+        self._bridge_min_role_degree = max(
+            int(getattr(self.config, "bridge_min_role_degree", DEFAULT_BRIDGE_MIN_ROLE_DEGREE)),
+            1,
+        )
+
+    def _valid_bridge_nodes(self, nodes: set[int]) -> set[int]:
+        if not nodes:
+            return set()
+        if self._allow_global_id_bridge:
+            return nodes
+        return {node for node in nodes if self._is_valid_bridge_node(node)}
+
+    def _is_valid_bridge_node(self, node: int) -> bool:
+        if self._allow_global_id_bridge:
+            return True
+        src_degree = len(self.index.src_dsts.get(int(node), ()))
+        dst_degree = len(self.index.dst_srcs.get(int(node), ()))
+        return src_degree >= self._bridge_min_role_degree and dst_degree >= self._bridge_min_role_degree
 
     def _full_cooccur_counts(
         self,

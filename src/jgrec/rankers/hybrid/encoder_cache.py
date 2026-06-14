@@ -138,6 +138,10 @@ class HybridPrefixStateCache:
         target_window = self._build_target_window()
         structure = StructureFeatureTower(self.structure_config)
         structure.index = self._build_structure_index(prefix_end)
+        structure.fit_bridge_policy_from_values(
+            src_values={int(src) for src in self._src_times},
+            dst_values={int(dst) for dst in self._dst_times},
+        )
         structure.min_time = int(self.interactions.time[0])
         structure.max_time = int(self.interactions.time[prefix_end - 1])
         structure.graph_span = max(structure.max_time - structure.min_time, 1)

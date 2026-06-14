@@ -42,6 +42,8 @@ class StructureTowerConfig:
     transition_enabled: bool = True
     cooccur_history_limit: int = 128
     future_only_transition_cooccur: bool = False
+    bridge_overlap_threshold: float = 0.50
+    bridge_min_role_degree: int = 2
 
 
 @dataclass(frozen=True)
