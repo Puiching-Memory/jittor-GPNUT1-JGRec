@@ -287,6 +287,60 @@ Jittor 仍可能保持 `use_cuda=0` 并走 CPU。现在 temporal graph 是 CUDA-
 结论：保留为历史线上基线。后续冲分需要同时记录本地 AP/MRR、全量 zip 路径和线上反馈；若只重跑
 `dataset2`，需要明确拼包来源并重新提交确认。
 
+### hybrid 9d9f13b 50k/20k MRR r100 seed60
+
+实验日期：2026-06-14。
+
+实验状态：`archive`，验证 `fix(hybrid): guard bridge common-neighbor ids` 的完整提交。
+
+协议：
+
+- 提交产物：`result/hybrid_9d9f13b_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip`
+- 全量输出 `dataset1` 和 `dataset2`，不使用 `--dataset` 或 `--limit-rows`
+- Seed：60
+- 训练事件历史上限：`max_fit_events=240000`
+- 融合器监督训练事件数：`max_train_events=50000`
+- 验证事件数：`max_val_events=20000`
+- 候选数：`1 positive + 63 negatives`
+- `selection_metric=mrr`
+- `test_candidate_negative_ratio=1.00`
+- `structure_cooccur_history_limit=32`
+
+关键参数：
+
+- `epochs=3`
+- `train_batch_size=512`
+- `fusion_hidden_dim=64`
+- `gnn_model=xsimgcl`
+- `gnn_edge_weighting=none`
+- `gnn_epochs=1`
+- `gnn_max_graph_edges=120000`
+- `gnn_max_train_edges=60000`
+- `seq_epochs=1`
+- `two_tower_epochs=1`
+- `supervised_feature_memmap=True`
+- `supervised_feature_batch_size=256`
+
+结果：
+
+| 数据集     |      AP |     MRR | fusion                                               | auto            |
+| ---------- | ------: | ------: | ---------------------------------------------------- | --------------- |
+| `dataset1` | 0.88264 | 0.92337 | `stats_prior_target_structure_profile_tower`         | `repeat_memory` |
+| `dataset2` | 0.89123 | 0.93760 | `stats_prior_target_structure_profile_tower_gnn`     | `new_link_cold` |
+
+| 指标            | 值                                                                 |
+| --------------- | ------------------------------------------------------------------ |
+| 线上总分        | `1.0746059132372223`                                               |
+| 运行耗时        | `59m55s`                                                           |
+| 运行时间        | `2026-06-14T16:51:41+00:00` 至 `2026-06-14T17:51:36+00:00`         |
+| zip sha256      | `dcb36b041c44d91e3af56c9fd7b9313deb7667e0e08d1e44984fbdab8d363afb` |
+| `dataset1` 行数 | `61051`                                                            |
+| `dataset2` 行数 | `153420`                                                           |
+
+结论：该次提交主要修复 `structure` 中 bridge common-neighbor 的 id guard，但线上总分 `1.0746059132372223`
+低于当前冠军基线 `1.2044345219596662`。本地 AP/MRR 与线上分数差异显著，说明本地验证指标不能替代线上评分。
+保留为 `archive`，不替换冠军基线。
+
 ### temporal-graph Optuna best v1
 
 实验日期：2026-06-02。

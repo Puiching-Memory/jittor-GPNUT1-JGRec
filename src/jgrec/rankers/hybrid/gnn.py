@@ -22,7 +22,7 @@ class _DenseCPUGraphModel:
     GNN training now requires CUDA and will raise before reaching this class.
     """
 
-    def __new__(cls, **kwargs):  # noqa: ARG003
+    def __new__(cls, **kwargs):
         raise RuntimeError(
             "GNN training requires CUDA. Run without --cpu and ensure a CUDA/JittorGeometric environment is available."
         )
