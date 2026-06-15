@@ -9,7 +9,7 @@ from jgrec.rankers.hybrid.config import CandidatePriorConfig, TrainingConfig
 from jgrec.rankers.hybrid.stats import STAT_FEATURE_DIM, STAT_FEATURE_NAMES
 
 
-def test_candidate_prior_features_cover_seen_unseen_and_row_ranks():
+def test_candidate_prior_defaults_to_train_only_features():
     tower = CandidatePriorTower(CandidatePriorConfig(enabled=True))
     tower.fit(
         InteractionTable.from_events([
@@ -30,11 +30,34 @@ def test_candidate_prior_features_cover_seen_unseen_and_row_ranks():
 
     assert features[0, names["candidate_train_seen"]] == 0.0
     assert features[1, names["candidate_train_seen"]] == 1.0
-    assert features[0, names["candidate_test_freq"]] > features[1, names["candidate_test_freq"]]
-    assert features[0, names["candidate_unseen_test_freq"]] > 0.0
+    assert features[0, names["candidate_test_freq"]] == 0.0
+    assert features[1, names["candidate_test_freq"]] == 0.0
+    assert features[2, names["candidate_test_freq"]] == 0.0
+    assert features[0, names["candidate_unseen_test_freq"]] == 0.0
     assert features[1, names["candidate_unseen_test_freq"]] == 0.0
     assert features[1, names["candidate_dst_pop_row_rank"]] == 1.0
     assert features[2, names["candidate_dst_recency_row_rank"]] == 1.0
+    assert np.all(features[:, names["candidate_test_freq_row_rank"]] == 0.0)
+
+
+def test_candidate_prior_can_opt_into_test_frequency_features():
+    tower = CandidatePriorTower(CandidatePriorConfig(enabled=True, include_test_frequency=True))
+    tower.fit(
+        InteractionTable.from_events([
+            Interaction(src=1, dst=10, time=10),
+            Interaction(src=1, dst=20, time=20),
+        ]),
+        Counter({999: 50, 20: 25, 10: 5}),
+    )
+    queries = [TestQuery(src=1, time=30, candidates=(999, 20, 10))]
+    stat_features = np.zeros((1, 3, STAT_FEATURE_DIM), dtype=np.float32)
+
+    features = tower.features_for_queries(queries, stat_features)[0]
+    names = {name: idx for idx, name in enumerate(CANDIDATE_PRIOR_FEATURE_NAMES)}
+
+    assert features[0, names["candidate_test_freq"]] > features[1, names["candidate_test_freq"]]
+    assert features[0, names["candidate_unseen_test_freq"]] > 0.0
+    assert features[1, names["candidate_unseen_test_freq"]] == 0.0
     assert features[0, names["candidate_test_freq_row_rank"]] == 1.0
 
 

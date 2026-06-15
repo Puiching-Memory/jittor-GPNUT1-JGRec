@@ -88,11 +88,12 @@ class CandidatePriorTower:
 
         seen, test_freq = self._lookup_candidate_features(candidate_ids, denominator)
         features[:, :, 0] = seen.astype(np.float32, copy=False)
-        features[:, :, 1] = test_freq
-        features[:, :, 2] = np.where(seen, 0.0, test_freq).astype(np.float32, copy=False)
         features[:, :, 3] = _row_rank_features(stat_features[:, :, DST_POPULARITY_INDEX])
         features[:, :, 4] = _row_rank_features(stat_features[:, :, DST_RECENCY_INDEX])
-        features[:, :, 5] = _row_rank_features(test_freq)
+        if self.config.include_test_frequency:
+            features[:, :, 1] = test_freq
+            features[:, :, 2] = np.where(seen, 0.0, test_freq).astype(np.float32, copy=False)
+            features[:, :, 5] = _row_rank_features(test_freq)
         return features
 
     def _build_dense_features(self) -> None:

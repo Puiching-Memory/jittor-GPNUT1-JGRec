@@ -155,10 +155,10 @@ def profile_dataset_paths(train_path: Path, test_path: Path, val_ratio: float = 
 
 def choose_auto_strategy(profile: DatasetProfile) -> AutoStrategy:
     if profile.holdout_pair_hit_rate >= 0.25 and profile.candidate_unseen_dst_rate <= 0.20:
-        return AutoStrategy(mode=REPEAT_MEMORY_MODE, test_candidate_negative_ratio=0.10)
+        return AutoStrategy(mode=REPEAT_MEMORY_MODE, test_candidate_negative_ratio=0.0)
     if profile.holdout_pair_hit_rate < 0.10 and profile.candidate_unseen_dst_rate >= 0.30:
-        return AutoStrategy(mode=NEW_LINK_COLD_MODE, test_candidate_negative_ratio=0.60)
-    return AutoStrategy(mode=BALANCED_MODE, test_candidate_negative_ratio=0.35)
+        return AutoStrategy(mode=NEW_LINK_COLD_MODE, test_candidate_negative_ratio=0.0)
+    return AutoStrategy(mode=BALANCED_MODE, test_candidate_negative_ratio=0.0)
 
 
 def test_candidate_arrays(profile: DatasetProfile | None) -> tuple[np.ndarray, np.ndarray]:

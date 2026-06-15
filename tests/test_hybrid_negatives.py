@@ -3,6 +3,8 @@ import numpy as np
 from jgrec.core.types import Interaction, InteractionTable
 from jgrec.idmap import NodeIdMap
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
+from jgrec.rankers.hybrid.config import TrainingConfig
+from jgrec.rankers.hybrid.ranker import TemporalHybridRanker
 from jgrec.rankers.hybrid.sampling import (
     NegativeSamplingContext,
     NegativeSamplingJob,
@@ -218,3 +220,61 @@ def test_parallel_negative_sampling_is_stable_across_worker_counts():
     assert [len(negatives) for negatives in two_workers] == [4, 4, 4, 4]
     for job, negatives in zip(jobs, two_workers, strict=True):
         assert job.positive_dst not in negatives
+
+
+def test_learn_fusion_uses_visible_dst_pools_for_train_and_val(monkeypatch):
+    interactions = InteractionTable.from_events(
+        [
+            Interaction(src=idx, dst=dst, time=idx)
+            for idx, dst in enumerate(
+                [
+                    *([10, 20, 30] * 15),
+                    *([40, 50, 60] * 15),
+                    *([70, 80] * 15),
+                ],
+                start=1,
+            )
+        ]
+    )
+    config = TrainingConfig(
+        val_ratio=0.25,
+        context_ratio=0.5,
+        num_negatives=1,
+        epochs=1,
+        max_train_events=0,
+        max_val_events=0,
+        encoder_state_cache_enabled=False,
+        test_candidate_negative_ratio=1.0,
+        verbose=False,
+    )
+    ranker = TemporalHybridRanker()
+    ranker.id_map = NodeIdMap.from_interactions(interactions)
+    ranker.feature_names = ("feature",)
+    captured: list[tuple[str, tuple[int, ...], float]] = []
+
+    class DummyEncoder:
+        feature_dim = 1
+
+    def fake_fit_encoder(*args, **kwargs):
+        return DummyEncoder()
+
+    def fake_build_supervised_features(positives, encoder, dst_pool, config, rng, label):
+        captured.append((label, tuple(int(value) for value in dst_pool), config.test_candidate_negative_ratio))
+        return np.zeros((len(positives), config.num_negatives + 1, encoder.feature_dim), dtype=np.float32)
+
+    class DummyFusionResult:
+        best_val_ap = 0.1
+        best_val_mrr = 0.2
+        feature_indices = (0,)
+        candidate_name = "dummy"
+
+    monkeypatch.setattr(ranker, "_timed_fit_encoder", fake_fit_encoder)
+    monkeypatch.setattr(ranker, "_fit_best_fusion", lambda **kwargs: (object(), DummyFusionResult()))
+    monkeypatch.setattr("jgrec.rankers.hybrid.ranker._build_supervised_features", fake_build_supervised_features)
+
+    ranker._learn_fusion(interactions, config)
+
+    assert captured == [
+        ("train_features", (10, 20, 30), 0.0),
+        ("val_features", (10, 20, 30, 40, 50, 60), 0.0),
+    ]

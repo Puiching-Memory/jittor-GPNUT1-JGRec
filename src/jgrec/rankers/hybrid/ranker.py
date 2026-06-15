@@ -597,12 +597,11 @@ class TemporalHybridRanker:
                 config,
                 profile_holdout_pair_hit_rate=profile.holdout_pair_hit_rate,
                 profile_candidate_unseen_dst_rate=profile.candidate_unseen_dst_rate,
+                test_candidate_negative_ratio=0.0,
             )
 
         strategy = choose_auto_strategy(profile)
-        ratio = config.test_candidate_negative_ratio
-        if ratio <= 0.0:
-            ratio = strategy.test_candidate_negative_ratio
+        ratio = 0.0
         log_event(
             "[auto-strategy] "
             f"mode={strategy.mode} holdout_pair_hit={profile.holdout_pair_hit_rate:.5f} "
@@ -652,6 +651,8 @@ class TemporalHybridRanker:
         interactions: InteractionTable,
         config: TrainingConfig,
     ) -> tuple[FusionMLP, FusionResult, TrainingReport, HybridPrefixStateCache | None, TrainingConfig]:
+        if config.test_candidate_negative_ratio != 0.0:
+            config = replace(config, test_candidate_negative_ratio=0.0)
         n_events = len(interactions)
         if n_events < 100 or config.num_negatives < 1 or config.epochs < 1:
             raise ValueError(
@@ -676,12 +677,13 @@ class TemporalHybridRanker:
 
         train_events = _sample_events(train_events, config.max_train_events, rng)
         val_events = _sample_events(val_events, config.max_val_events, rng)
-        dst_pool = np.unique(interactions.dst).astype(np.int64, copy=False)
+        train_dst_pool = np.unique(context_events.dst).astype(np.int64, copy=False)
+        val_dst_pool = np.unique(val_context_events.dst).astype(np.int64, copy=False)
 
         log_event(
             "[hybrid-fit] split "
             f"context={len(context_events)} train={len(train_events)} val={len(val_events)} "
-            f"dst={len(dst_pool)}",
+            f"train_dst={len(train_dst_pool)} val_dst={len(val_dst_pool)}",
             enabled=config.verbose,
         )
         log_memory("split_done", enabled=config.verbose)
@@ -705,7 +707,7 @@ class TemporalHybridRanker:
         train_features = _build_supervised_features(
             train_events,
             train_encoder,
-            dst_pool,
+            train_dst_pool,
             config,
             rng,
             label="train_features",
@@ -734,7 +736,7 @@ class TemporalHybridRanker:
         val_features = _build_supervised_features(
             val_events,
             val_encoder,
-            dst_pool,
+            val_dst_pool,
             config,
             rng,
             label="val_features",

@@ -252,7 +252,7 @@ def _ranker_config(args: CLIConfig):
         candidate_prior_enabled=not args.disable_candidate_prior,
         target_window_enabled=not args.disable_target_window,
         target_window_fractions=_parse_target_window_fractions(args.target_window_fractions),
-        test_candidate_negative_ratio=args.test_candidate_negative_ratio,
+        test_candidate_negative_ratio=0.0,
         structure_enabled=not args.disable_structure,
         structure_cooccur_enabled=not args.disable_structure_cooccur,
         structure_transition_enabled=not args.disable_structure_transition,
