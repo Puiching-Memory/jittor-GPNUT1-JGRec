@@ -49,7 +49,7 @@ class StructureTowerConfig:
 @dataclass(frozen=True)
 class CandidatePriorConfig:
     enabled: bool = True
-    include_test_frequency: bool = False
+    include_test_frequency: bool = True
 
 
 @dataclass(frozen=True)
@@ -148,7 +148,7 @@ class TrainingConfig:
     encoder_state_cache_enabled: bool = True
     auto_strategy_enabled: bool = True
     candidate_prior_enabled: bool = True
-    candidate_prior_include_test_frequency: bool = False
+    candidate_prior_include_test_frequency: bool = True
     target_window_enabled: bool = True
     target_window_fractions: tuple[float, ...] = (0.01, 0.05, 0.20, 1.00)
     test_candidate_negative_ratio: float = 0.0

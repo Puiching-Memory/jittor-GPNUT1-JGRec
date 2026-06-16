@@ -142,8 +142,17 @@ def _row_rank_feature(values: np.ndarray) -> np.ndarray:
     if values.size == 0:
         return np.empty(0, dtype=np.float32)
     order = np.argsort(-values, kind="mergesort")
+    sorted_values = values[order]
     ranks = np.empty(values.shape[0], dtype=np.float32)
-    ranks[order] = np.arange(1, values.shape[0] + 1, dtype=np.float32)
+    i = 0
+    n = values.shape[0]
+    while i < n:
+        j = i
+        while j + 1 < n and sorted_values[j + 1] == sorted_values[i]:
+            j += 1
+        avg_rank = (i + j + 2) / 2.0
+        ranks[order[i : j + 1]] = avg_rank
+        i = j + 1
     return (1.0 / ranks).astype(np.float32)
 
 
@@ -151,7 +160,17 @@ def _row_rank_features(values: np.ndarray) -> np.ndarray:
     if values.size == 0:
         return np.empty(values.shape, dtype=np.float32)
     order = np.argsort(-values, axis=1, kind="mergesort")
+    n_rows, n_cols = values.shape
+    row_indices = np.arange(n_rows)[:, None]
+    sorted_values = values[row_indices, order]
     ranks = np.empty(values.shape, dtype=np.float32)
-    row_indices = np.arange(values.shape[0])[:, None]
-    ranks[row_indices, order] = np.arange(1, values.shape[1] + 1, dtype=np.float32)
+    for row in range(n_rows):
+        i = 0
+        while i < n_cols:
+            j = i
+            while j + 1 < n_cols and sorted_values[row, j + 1] == sorted_values[row, i]:
+                j += 1
+            avg_rank = (i + j + 2) / 2.0
+            ranks[row, order[row, i : j + 1]] = avg_rank
+            i = j + 1
     return (1.0 / ranks).astype(np.float32, copy=False)

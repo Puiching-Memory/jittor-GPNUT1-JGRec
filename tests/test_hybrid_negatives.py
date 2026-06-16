@@ -275,6 +275,6 @@ def test_learn_fusion_uses_visible_dst_pools_for_train_and_val(monkeypatch):
     ranker._learn_fusion(interactions, config)
 
     assert captured == [
-        ("train_features", (10, 20, 30), 0.0),
-        ("val_features", (10, 20, 30, 40, 50, 60), 0.0),
+        ("train_features", (10, 20, 30, 40, 50, 60, 70, 80), 0.0),
+        ("val_features", (10, 20, 30, 40, 50, 60, 70, 80), 0.0),
     ]

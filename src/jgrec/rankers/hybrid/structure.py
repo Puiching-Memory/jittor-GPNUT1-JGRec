@@ -343,6 +343,11 @@ class StructureFeatureTower:
             return True
         src_degree = len(self.index.src_dsts.get(int(node), ()))
         dst_degree = len(self.index.dst_srcs.get(int(node), ()))
+        # In bipartite graphs (no src/dst overlap), bridge nodes cannot satisfy
+        # both degree thresholds. Fall back to allowing any node that appears
+        # in at least one role, to avoid zeroing out structure signals.
+        if self._bridge_overlap_ratio == 0.0:
+            return (src_degree + dst_degree) >= self._bridge_min_role_degree
         return src_degree >= self._bridge_min_role_degree and dst_degree >= self._bridge_min_role_degree
 
     def _full_cooccur_counts(

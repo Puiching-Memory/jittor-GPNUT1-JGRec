@@ -537,7 +537,9 @@ class TemporalHybridRanker:
         final_snapshot = cache.snapshot_for_prefix(len(interactions)) if cache is not None else None
         log_event(
             "[hybrid-fit] final_encoder "
-            f"prior={final_config.candidate_prior_enabled} profile={final_config.source_profile_enabled} "
+            f"prior={final_config.candidate_prior_enabled} "
+            f"prior_test_freq={final_config.candidate_prior_include_test_frequency} "
+            f"profile={final_config.source_profile_enabled} "
             f"target={final_config.target_window_enabled} "
             f"tower={final_config.two_tower_enabled} "
             f"gnn={final_config.gnn_enabled} seq={final_config.seq_enabled} "
@@ -677,13 +679,12 @@ class TemporalHybridRanker:
 
         train_events = _sample_events(train_events, config.max_train_events, rng)
         val_events = _sample_events(val_events, config.max_val_events, rng)
-        train_dst_pool = np.unique(context_events.dst).astype(np.int64, copy=False)
-        val_dst_pool = np.unique(val_context_events.dst).astype(np.int64, copy=False)
+        dst_pool = np.unique(interactions.dst).astype(np.int64, copy=False)
 
         log_event(
             "[hybrid-fit] split "
             f"context={len(context_events)} train={len(train_events)} val={len(val_events)} "
-            f"train_dst={len(train_dst_pool)} val_dst={len(val_dst_pool)}",
+            f"dst={len(dst_pool)}",
             enabled=config.verbose,
         )
         log_memory("split_done", enabled=config.verbose)
@@ -707,7 +708,7 @@ class TemporalHybridRanker:
         train_features = _build_supervised_features(
             train_events,
             train_encoder,
-            train_dst_pool,
+            dst_pool,
             config,
             rng,
             label="train_features",
@@ -736,7 +737,7 @@ class TemporalHybridRanker:
         val_features = _build_supervised_features(
             val_events,
             val_encoder,
-            val_dst_pool,
+            dst_pool,
             config,
             rng,
             label="val_features",
@@ -868,7 +869,9 @@ class TemporalHybridRanker:
         start = perf_counter()
         log_event(
             f"[hybrid-fit] {label} start events={len(interactions)} "
-            f"prior={config.candidate_prior_enabled} target={config.target_window_enabled} "
+            f"prior={config.candidate_prior_enabled} "
+            f"prior_test_freq={config.candidate_prior_include_test_frequency} "
+            f"target={config.target_window_enabled} "
             f"profile={config.source_profile_enabled} "
             f"tower={config.two_tower_enabled} "
             f"gnn={config.gnn_enabled} seq={config.seq_enabled} "
@@ -1047,6 +1050,40 @@ def _auto_mode_code(mode: str) -> float:
     return 0.0
 
 
+def _candidate_prior_test_frequency_indices() -> tuple[int, ...]:
+    stats_end = len(STAT_FEATURE_NAMES)
+    return tuple(
+        stats_end + CANDIDATE_PRIOR_FEATURE_NAMES.index(name)
+        for name in (
+            "candidate_test_freq",
+            "candidate_unseen_test_freq",
+            "candidate_test_freq_row_rank",
+        )
+    )
+
+
+def _selected_features_use_test_frequency(feature_indices: tuple[int, ...]) -> bool:
+    test_frequency_indices = _candidate_prior_test_frequency_indices()
+    return any(idx in test_frequency_indices for idx in feature_indices)
+
+
+def _config_for_supervised_encoder(
+    config: TrainingConfig,
+    *,
+    include_test_frequency: bool = True,
+) -> TrainingConfig:
+    """Fusion supervision needs test.csv candidate frequencies so the MLP learns prior weights.
+
+    This reintroduces mild validation leakage from global test candidate counts, but without
+    it fusion selection optimizes on zeroed prior columns and inference collapses to uniform.
+    """
+    return replace(
+        config,
+        structure_future_only_transition_cooccur=True,
+        candidate_prior_include_test_frequency=include_test_frequency,
+    )
+
+
 def _config_for_selected_features(config: TrainingConfig, feature_indices: tuple[int, ...]) -> TrainingConfig:
     stats_end = len(STAT_FEATURE_NAMES)
     prior_end = stats_end + len(CANDIDATE_PRIOR_FEATURE_NAMES)
@@ -1062,7 +1099,7 @@ def _config_for_selected_features(config: TrainingConfig, feature_indices: tuple
     needs_tower = any(profile_end <= idx < tower_end for idx in feature_indices)
     needs_graph = any(tower_end <= idx < graph_end for idx in feature_indices)
     needs_sequence = any(idx >= graph_end for idx in feature_indices)
-    return replace(
+    selected = replace(
         config,
         candidate_prior_enabled=config.candidate_prior_enabled and needs_prior,
         target_window_enabled=config.target_window_enabled and needs_target,
@@ -1072,6 +1109,9 @@ def _config_for_selected_features(config: TrainingConfig, feature_indices: tuple
         gnn_enabled=config.gnn_enabled and needs_graph,
         seq_enabled=config.seq_enabled and needs_sequence,
     )
+    if selected.candidate_prior_enabled and _selected_features_use_test_frequency(feature_indices):
+        selected = replace(selected, candidate_prior_include_test_frequency=True)
+    return selected
 
 
 def _can_reuse_encoder_cache(source_config: TrainingConfig, target_config: TrainingConfig) -> bool:
