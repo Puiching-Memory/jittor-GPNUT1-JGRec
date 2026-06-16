@@ -93,6 +93,7 @@ class CandidatePriorIndex:
     test_candidate_total: int
     recent_train_features: dict[int, tuple[float, ...]]
     recent_feature_mask: tuple[bool, ...]
+    include_test_frequency: bool = False
 
     @classmethod
     def from_test_candidates(
@@ -101,6 +102,7 @@ class CandidatePriorIndex:
         train_dst_ids: np.ndarray,
         train_times: np.ndarray | None = None,
         recent_feature_group: str = "none",
+        include_test_frequency: bool = False,
     ) -> CandidatePriorIndex:
         if candidate_index.global_candidates.size:
             candidate_values = candidate_index.global_candidates
@@ -144,6 +146,7 @@ class CandidatePriorIndex:
             test_candidate_total=total,
             recent_train_features=_recent_train_feature_map(train_values, aligned_train_times),
             recent_feature_mask=_recent_feature_mask(recent_feature_group),
+            include_test_frequency=include_test_frequency,
         )
 
 
@@ -567,15 +570,6 @@ def build_candidate_prior_features(
         dtype=bool,
         count=flat_candidates.size,
     ).reshape(candidates.shape)
-    test_freq = np.fromiter(
-        (
-            candidate_prior_index.test_candidate_counts.get(int(candidate), 0)
-            / max(float(candidate_prior_index.test_candidate_total), 1.0)
-            for candidate in flat_candidates
-        ),
-        dtype=np.float32,
-        count=flat_candidates.size,
-    ).reshape(candidates.shape)
     train_freq = np.fromiter(
         (
             candidate_prior_index.train_dst_counts.get(int(candidate), 0)
@@ -588,9 +582,22 @@ def build_candidate_prior_features(
     valid = candidates > 0
 
     features[:, :, 0] = train_seen.astype(np.float32, copy=False)
-    features[:, :, 1] = test_freq
-    features[:, :, 2] = np.where(train_seen, 0.0, test_freq).astype(np.float32, copy=False)
-    features[:, :, 3] = _row_rank_features(test_freq)
+    # Columns 1-3 carry test-set candidate frequency, which leaks test-side label
+    # information. Keep them zero unless explicitly opted in; the train-only
+    # frequency prior (columns 4-5) provides the non-leaky popularity signal.
+    if candidate_prior_index.include_test_frequency:
+        test_freq = np.fromiter(
+            (
+                candidate_prior_index.test_candidate_counts.get(int(candidate), 0)
+                / max(float(candidate_prior_index.test_candidate_total), 1.0)
+                for candidate in flat_candidates
+            ),
+            dtype=np.float32,
+            count=flat_candidates.size,
+        ).reshape(candidates.shape)
+        features[:, :, 1] = test_freq
+        features[:, :, 2] = np.where(train_seen, 0.0, test_freq).astype(np.float32, copy=False)
+        features[:, :, 3] = _row_rank_features(test_freq)
     features[:, :, 4] = train_freq
     features[:, :, 5] = _row_rank_features(train_freq)
     _fill_recent_train_features(features, candidates, candidate_prior_index)
@@ -844,10 +851,30 @@ def _select_metric(ap: float, mrr: float, metric: str) -> float:
 
 
 def _row_rank_features(values: np.ndarray) -> np.ndarray:
+    # Tied candidates share an averaged rank so the feature cannot encode column
+    # position. Without this, stable-sort tie-breaking would award the positive
+    # (always column 0 during training) the best rank among ties -> label leak.
     if values.size == 0:
         return np.empty(values.shape, dtype=np.float32)
-    order = np.argsort(-values, axis=1, kind="mergesort")
-    ranks = np.empty(values.shape, dtype=np.float32)
-    row_indices = np.arange(values.shape[0])[:, None]
-    ranks[row_indices, order] = np.arange(1, values.shape[1] + 1, dtype=np.float32)
+    ranks = _average_descending_ranks(values)
     return (1.0 / ranks).astype(np.float32, copy=False)
+
+
+def _average_descending_ranks(values: np.ndarray) -> np.ndarray:
+    """Fractional (average) 1-based ranks in descending order, ties averaged."""
+    n_rows, n_cols = values.shape
+    order = np.argsort(-values, axis=1, kind="mergesort")
+    sorted_values = np.take_along_axis(values, order, axis=1)
+    positions = np.broadcast_to(np.arange(1, n_cols + 1, dtype=np.float64), (n_rows, n_cols))
+    is_group_start = np.ones((n_rows, n_cols), dtype=bool)
+    is_group_start[:, 1:] = sorted_values[:, 1:] != sorted_values[:, :-1]
+    group_id = np.cumsum(is_group_start, axis=1) - 1
+    flat_group = (np.arange(n_rows)[:, None] * n_cols + group_id).ravel()
+    minlength = n_rows * n_cols
+    sums = np.bincount(flat_group, weights=positions.ravel(), minlength=minlength)
+    counts = np.bincount(flat_group, minlength=minlength)
+    avg_rank = sums / np.maximum(counts, 1)
+    sorted_ranks = avg_rank[flat_group].reshape(n_rows, n_cols)
+    ranks = np.empty((n_rows, n_cols), dtype=np.float64)
+    np.put_along_axis(ranks, order, sorted_ranks, axis=1)
+    return ranks

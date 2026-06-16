@@ -250,39 +250,40 @@ def _count_in_window(times: np.ndarray, start_time: int, cutoff_time: int) -> in
 def _row_rank_feature(values: np.ndarray) -> np.ndarray:
     if values.size == 0:
         return np.empty(0, dtype=np.float32)
-    order = np.argsort(-values, kind="mergesort")
-    sorted_values = values[order]
-    ranks = np.empty(values.shape[0], dtype=np.float32)
-    i = 0
-    n = values.shape[0]
-    while i < n:
-        j = i
-        while j + 1 < n and sorted_values[j + 1] == sorted_values[i]:
-            j += 1
-        avg_rank = (i + j + 2) / 2.0
-        ranks[order[i : j + 1]] = avg_rank
-        i = j + 1
+    ranks = _average_descending_ranks(values[np.newaxis, :])[0]
     return (1.0 / ranks).astype(np.float32)
 
 
 def _row_rank_feature_matrix(values: np.ndarray) -> np.ndarray:
     if values.size == 0:
         return np.empty(values.shape, dtype=np.float32)
-    order = np.argsort(-values, axis=1, kind="mergesort")
-    n_rows, n_cols = values.shape
-    row_indices = np.arange(n_rows)[:, None]
-    sorted_values = values[row_indices, order]
-    ranks = np.empty(values.shape, dtype=np.float32)
-    for row in range(n_rows):
-        i = 0
-        while i < n_cols:
-            j = i
-            while j + 1 < n_cols and sorted_values[row, j + 1] == sorted_values[row, i]:
-                j += 1
-            avg_rank = (i + j + 2) / 2.0
-            ranks[row, order[row, i : j + 1]] = avg_rank
-            i = j + 1
+    ranks = _average_descending_ranks(values)
     return (1.0 / ranks).astype(np.float32)
+
+
+def _average_descending_ranks(values: np.ndarray) -> np.ndarray:
+    """Fractional (average) 1-based ranks in descending order, ties averaged.
+
+    Ties share an averaged rank so the feature cannot encode column position.
+    Otherwise stable-sort tie-breaking awards the positive (always column 0
+    during training) the best rank among equal candidates -> label leak.
+    """
+    n_rows, n_cols = values.shape
+    order = np.argsort(-values, axis=1, kind="mergesort")
+    sorted_values = np.take_along_axis(values, order, axis=1)
+    positions = np.broadcast_to(np.arange(1, n_cols + 1, dtype=np.float64), (n_rows, n_cols))
+    is_group_start = np.ones((n_rows, n_cols), dtype=bool)
+    is_group_start[:, 1:] = sorted_values[:, 1:] != sorted_values[:, :-1]
+    group_id = np.cumsum(is_group_start, axis=1) - 1
+    flat_group = (np.arange(n_rows)[:, None] * n_cols + group_id).ravel()
+    minlength = n_rows * n_cols
+    sums = np.bincount(flat_group, weights=positions.ravel(), minlength=minlength)
+    counts = np.bincount(flat_group, minlength=minlength)
+    avg_rank = sums / np.maximum(counts, 1)
+    sorted_ranks = avg_rank[flat_group].reshape(n_rows, n_cols)
+    ranks = np.empty((n_rows, n_cols), dtype=np.float64)
+    np.put_along_axis(ranks, order, sorted_ranks, axis=1)
+    return ranks
 
 
 def _compact_int_array(values: list[int]) -> np.ndarray:

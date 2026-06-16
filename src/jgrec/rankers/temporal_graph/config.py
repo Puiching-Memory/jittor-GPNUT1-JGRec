@@ -27,4 +27,7 @@ class TemporalGraphTrainingConfig:
     training_candidates: str = "test_like"
     validation_candidates: str = "test_like"
     candidate_recent_feature_group: str = "recency_rank"
+    # Transductive signal over the given test candidate lists (inputs, not
+    # labels); matches the hybrid champion behavior. Toggle off to ablate.
+    candidate_include_test_frequency: bool = True
     refit_full: bool = True
