@@ -158,9 +158,6 @@ class _DisabledStructureTower:
     def compact_for_future_queries(self) -> None:
         return
 
-    def clear_full_history_cache(self) -> None:
-        return
-
 
 class HybridFeatureEncoder:
     def __init__(
@@ -398,9 +395,6 @@ class HybridFeatureEncoder:
         if callable(compact_future_structure):
             compact_future_structure()
         release_memory()
-
-    def clear_predict_caches(self) -> None:
-        self.structure.clear_full_history_cache()
 
 
 def _build_candidate_prior(config: CandidatePriorConfig) -> Any:
@@ -646,17 +640,14 @@ class TemporalHybridRanker:
 
         from .fusion import predict_logits  # noqa: PLC0415
 
-        try:
-            features = self.encoder.features_for_queries(queries)
-            if self.fusion_result.feature_indices:
-                features = features[:, :, self.fusion_result.feature_indices]
-            logits = predict_logits(self.fusion, features, self.fusion_result.mean, self.fusion_result.std)
-            logits = logits - logits.max(axis=1, keepdims=True)
-            exp_logits = np.exp(logits)
-            probs = exp_logits / exp_logits.sum(axis=1, keepdims=True)
-            return probs.astype(np.float64, copy=False)
-        finally:
-            self.encoder.clear_predict_caches()
+        features = self.encoder.features_for_queries(queries)
+        if self.fusion_result.feature_indices:
+            features = features[:, :, self.fusion_result.feature_indices]
+        logits = predict_logits(self.fusion, features, self.fusion_result.mean, self.fusion_result.std)
+        logits = logits - logits.max(axis=1, keepdims=True)
+        exp_logits = np.exp(logits)
+        probs = exp_logits / exp_logits.sum(axis=1, keepdims=True)
+        return probs.astype(np.float64, copy=False)
 
     def _learn_fusion(
         self,

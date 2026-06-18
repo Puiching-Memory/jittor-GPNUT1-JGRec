@@ -1,18 +1,9 @@
-import sys
-from types import SimpleNamespace
-
 import numpy as np
-import pytest
 
 from jgrec.core.types import InteractionTable, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.rankers.hybrid.config import TrainingConfig
-from jgrec.rankers.hybrid.ranker import (
-    HybridFeatureEncoder,
-    HybridRankerAdapter,
-    TemporalHybridRanker,
-    _build_supervised_queries,
-)
+from jgrec.rankers.hybrid.ranker import HybridFeatureEncoder, HybridRankerAdapter, _build_supervised_queries
 
 
 class _CapturingHybridImpl:
@@ -78,73 +69,3 @@ def test_supervised_query_builder_returns_test_query_array_batches():
     np.testing.assert_array_equal(queries.time, np.asarray([10, 20], dtype=np.int32))
     assert queries.candidates.shape == (2, 3)
     np.testing.assert_array_equal(queries.candidates[:, 0], np.asarray([10, 20], dtype=np.int32))
-
-
-class _FakeEncoder:
-    feature_dim = 2
-
-    def __init__(self) -> None:
-        self.clear_calls = 0
-
-    def features_for_queries(self, queries):
-        return np.ones((len(queries), queries.candidate_count, self.feature_dim), dtype=np.float32)
-
-    def clear_predict_caches(self) -> None:
-        self.clear_calls += 1
-
-
-class _FakeFusionResult:
-    mean = np.zeros(2, dtype=np.float32)
-    std = np.ones(2, dtype=np.float32)
-    feature_indices = ()
-
-
-def _predict_ready_ranker():
-    ranker = TemporalHybridRanker()
-    encoder = _FakeEncoder()
-    ranker.encoder = encoder
-    ranker.fusion = object()
-    ranker.fusion_result = _FakeFusionResult()
-    queries = TestQueryArray(
-        src=np.asarray([1, 2], dtype=np.int32),
-        time=np.asarray([10, 11], dtype=np.int32),
-        candidates=np.asarray([[3, 4, 5], [6, 7, 8]], dtype=np.int32),
-    )
-    return ranker, encoder, queries
-
-
-def test_hybrid_predict_batch_clears_predict_caches_after_success(monkeypatch):
-    ranker, encoder, queries = _predict_ready_ranker()
-
-    def fake_predict_logits(model, features, mean, std):
-        return np.asarray([[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]], dtype=np.float32)
-
-    monkeypatch.setitem(
-        sys.modules,
-        "jgrec.rankers.hybrid.fusion",
-        SimpleNamespace(predict_logits=fake_predict_logits),
-    )
-
-    probs = ranker.predict_batch(queries)
-
-    assert encoder.clear_calls == 1
-    assert probs.shape == (2, 3)
-    np.testing.assert_allclose(probs.sum(axis=1), np.ones(2))
-
-
-def test_hybrid_predict_batch_clears_predict_caches_after_prediction_error(monkeypatch):
-    ranker, encoder, queries = _predict_ready_ranker()
-
-    def fake_predict_logits(model, features, mean, std):
-        raise ValueError("fusion failed")
-
-    monkeypatch.setitem(
-        sys.modules,
-        "jgrec.rankers.hybrid.fusion",
-        SimpleNamespace(predict_logits=fake_predict_logits),
-    )
-
-    with pytest.raises(ValueError, match="fusion failed"):
-        ranker.predict_batch(queries)
-
-    assert encoder.clear_calls == 1
