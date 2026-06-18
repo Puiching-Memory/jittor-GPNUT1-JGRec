@@ -51,7 +51,7 @@ def test_auto_strategy_detects_new_link_cold_without_dataset_name(tmp_path):
     assert profile.holdout_pair_hit_rate == 0.0
     assert profile.candidate_unseen_dst_rate == 1.0
     assert strategy.mode == NEW_LINK_COLD_MODE
-    assert strategy.test_candidate_negative_ratio == 0.0
+    assert strategy.test_candidate_negative_ratio == 0.60
 
 
 def test_auto_strategy_detects_repeat_memory_without_dataset_name(tmp_path):
@@ -68,10 +68,10 @@ def test_auto_strategy_detects_repeat_memory_without_dataset_name(tmp_path):
     assert profile.holdout_pair_hit_rate >= 0.25
     assert profile.candidate_unseen_dst_rate <= 0.20
     assert strategy.mode == REPEAT_MEMORY_MODE
-    assert strategy.test_candidate_negative_ratio == 0.0
+    assert strategy.test_candidate_negative_ratio == 0.10
 
 
-def test_auto_strategy_detects_balanced_without_test_candidate_negatives():
+def test_auto_strategy_detects_balanced_with_test_candidate_negatives():
     profile = type(
         "Profile",
         (),
@@ -84,7 +84,7 @@ def test_auto_strategy_detects_balanced_without_test_candidate_negatives():
     strategy = choose_auto_strategy(profile)
 
     assert strategy.mode == BALANCED_MODE
-    assert strategy.test_candidate_negative_ratio == 0.0
+    assert strategy.test_candidate_negative_ratio == 0.35
 
 
 def test_profile_dataset_counts_test_candidates_and_min_time_once(tmp_path):

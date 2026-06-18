@@ -599,11 +599,12 @@ class TemporalHybridRanker:
                 config,
                 profile_holdout_pair_hit_rate=profile.holdout_pair_hit_rate,
                 profile_candidate_unseen_dst_rate=profile.candidate_unseen_dst_rate,
-                test_candidate_negative_ratio=0.0,
             )
 
         strategy = choose_auto_strategy(profile)
-        ratio = 0.0
+        ratio = config.test_candidate_negative_ratio
+        if ratio <= 0.0:
+            ratio = strategy.test_candidate_negative_ratio
         log_event(
             "[auto-strategy] "
             f"mode={strategy.mode} holdout_pair_hit={profile.holdout_pair_hit_rate:.5f} "
@@ -653,8 +654,6 @@ class TemporalHybridRanker:
         interactions: InteractionTable,
         config: TrainingConfig,
     ) -> tuple[FusionMLP, FusionResult, TrainingReport, HybridPrefixStateCache | None, TrainingConfig]:
-        if config.test_candidate_negative_ratio != 0.0:
-            config = replace(config, test_candidate_negative_ratio=0.0)
         n_events = len(interactions)
         if n_events < 100 or config.num_negatives < 1 or config.epochs < 1:
             raise ValueError(

@@ -89,6 +89,7 @@ class TemporalGraphRanker:
                 self.node_map.dst_ids(train_events.dst),
                 train_times=train_events.time,
                 recent_feature_group=training_config.candidate_recent_feature_group,
+                include_test_frequency=training_config.candidate_include_test_frequency,
             )
             if test_candidate_index is not None
             else None
@@ -128,6 +129,7 @@ class TemporalGraphRanker:
                     self.node_map.dst_ids(interactions.dst),
                     train_times=interactions.time,
                     recent_feature_group=training_config.candidate_recent_feature_group,
+                    include_test_frequency=training_config.candidate_include_test_frequency,
                 )
                 if test_candidate_index is not None
                 else None

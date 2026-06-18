@@ -135,7 +135,7 @@ class HybridPrefixStateCache:
         stats = self._build_stats(prefix_end)
         candidate_prior = CandidatePriorTower(self.candidate_prior_config)
         candidate_prior.fit_from_counts(set(self._dst_counts), self.test_candidate_counts)
-        target_window = self._build_target_window()
+        target_window = self._build_target_window(prefix_end)
         structure = StructureFeatureTower(self.structure_config)
         structure.index = self._build_structure_index(prefix_end)
         structure.fit_bridge_policy_from_values(
@@ -195,7 +195,7 @@ class HybridPrefixStateCache:
         stats._build_dense_dst_features()
         return stats
 
-    def _build_target_window(self):
+    def _build_target_window(self, prefix_end: int):
         from .target_window import TargetWindowTower  # noqa: PLC0415
 
         target_window = TargetWindowTower(self.target_window_config)
@@ -203,7 +203,7 @@ class HybridPrefixStateCache:
             dst_event_times=self._dst_times,
             event_times=self._event_times,
             min_time=int(self.interactions.time[0]),
-            max_time=int(self.interactions.time[self._cursor - 1]),
+            max_time=int(self.interactions.time[prefix_end - 1]),
         )
         return target_window
 

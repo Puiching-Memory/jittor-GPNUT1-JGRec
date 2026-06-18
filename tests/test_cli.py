@@ -137,7 +137,7 @@ def test_cli_config_passes_negative_sampling_workers_to_hybrid():
     assert config.two_tower_config().score_batch_size == 256
 
 
-def test_cli_config_clamps_test_candidate_negatives_for_hybrid():
+def test_cli_config_passes_test_candidate_negatives_for_hybrid():
     CLIConfig, _, _ranker_config = _cli_symbols()
     args = CLIConfig(auto_strategy=False, disable_candidate_prior=True, test_candidate_negative_ratio=0.4)
 
@@ -145,7 +145,7 @@ def test_cli_config_clamps_test_candidate_negatives_for_hybrid():
 
     assert not config.auto_strategy_enabled
     assert not config.candidate_prior_enabled
-    assert config.test_candidate_negative_ratio == 0.0
+    assert config.test_candidate_negative_ratio == 0.4
 
 
 def test_cli_config_passes_source_profile_options_to_hybrid():

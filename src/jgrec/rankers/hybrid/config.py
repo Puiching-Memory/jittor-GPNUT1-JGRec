@@ -49,6 +49,8 @@ class StructureTowerConfig:
 @dataclass(frozen=True)
 class CandidatePriorConfig:
     enabled: bool = True
+    # Test-candidate frequency is a transductive signal over the GIVEN candidate
+    # lists (inputs, not labels) and was part of the 1.1983 champion baseline.
     include_test_frequency: bool = True
 
 
@@ -148,6 +150,9 @@ class TrainingConfig:
     encoder_state_cache_enabled: bool = True
     auto_strategy_enabled: bool = True
     candidate_prior_enabled: bool = True
+    # Transductive signal over the given test candidate lists; part of the
+    # 1.1983 champion baseline. Disabling it (the reverted "leakage fix") was the
+    # main online regression.
     candidate_prior_include_test_frequency: bool = True
     target_window_enabled: bool = True
     target_window_fractions: tuple[float, ...] = (0.01, 0.05, 0.20, 1.00)

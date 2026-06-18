@@ -18,7 +18,9 @@ class SequenceTower:
         self.id_map = id_map
         self.config = config
         self.model: _GRUSequenceModel | None = None
-        self.src_sequences: dict[int, tuple[int, ...]] = {}
+        # Per-source history as (item_ids, times) so scoring can apply a strict
+        # `< query_time` cutoff instead of relying on the upstream temporal split.
+        self.src_sequences: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         self.seen_items: np.ndarray | None = None
 
     @property
@@ -87,16 +89,21 @@ class SequenceTower:
         candidate_valid = np.zeros((len(queries), candidate_count), dtype=bool)
         active = np.zeros(len(queries), dtype=bool)
         src_ids = self.id_map.src_ids(queries.src)
+        query_times = queries.time
         dst_ids_by_row = self.id_map.dst_ids(queries.candidates)
 
         for row_idx, src_id in enumerate(src_ids):
             if src_id >= 0:
-                history = self.src_sequences.get(int(src_id), ())
-                if history:
-                    length = min(len(history), self.config.max_seq_len)
-                    seqs[row_idx, :length] = history[-length:]
-                    lengths[row_idx] = length
-                    active[row_idx] = True
+                entry = self.src_sequences.get(int(src_id))
+                if entry is not None:
+                    items, times = entry
+                    # Strict `< query_time` cutoff: only history before the query.
+                    cutoff = int(np.searchsorted(times, int(query_times[row_idx]), side="left"))
+                    if cutoff > 0:
+                        length = min(cutoff, self.config.max_seq_len)
+                        seqs[row_idx, :length] = items[cutoff - length : cutoff]
+                        lengths[row_idx] = length
+                        active[row_idx] = True
 
             dst_ids = dst_ids_by_row[row_idx]
             valid = dst_ids >= 0
@@ -190,18 +197,27 @@ def _final_sequences(
     interactions: InteractionTable,
     id_map: NodeIdMap,
     max_seq_len: int,
-) -> tuple[dict[int, tuple[int, ...]], np.ndarray]:
-    histories: dict[int, deque[int]] = defaultdict(lambda: deque(maxlen=max_seq_len))
+) -> tuple[dict[int, tuple[np.ndarray, np.ndarray]], np.ndarray]:
+    item_histories: dict[int, deque[int]] = defaultdict(lambda: deque(maxlen=max_seq_len))
+    time_histories: dict[int, deque[int]] = defaultdict(lambda: deque(maxlen=max_seq_len))
     seen_items = np.zeros(id_map.num_dst + 1, dtype=bool)
-    for src, dst in zip(interactions.src, interactions.dst, strict=True):
+    for src, dst, time in zip(interactions.src, interactions.dst, interactions.time, strict=True):
         src_id = id_map.src_id(int(src))
         dst_id = id_map.dst_id(int(dst))
         if src_id < 0 or dst_id < 0:
             continue
         item_id = dst_id + 1
-        histories[src_id].append(item_id)
+        item_histories[src_id].append(item_id)
+        time_histories[src_id].append(int(time))
         seen_items[item_id] = True
-    return {src_id: tuple(values) for src_id, values in histories.items()}, seen_items
+    sequences = {
+        src_id: (
+            np.fromiter(items, dtype=np.int32, count=len(items)),
+            np.fromiter(time_histories[src_id], dtype=np.int64, count=len(items)),
+        )
+        for src_id, items in item_histories.items()
+    }
+    return sequences, seen_items
 
 
 def _build_sequence_samples(
