@@ -238,6 +238,36 @@ def test_future_only_structure_preaggregates_large_source_common_neighbors():
     np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 
 
+def test_structure_clear_full_history_cache_preserves_recomputed_features():
+    interactions = [Interaction(src=1, dst=1000 + idx, time=idx) for idx in range(1, 310)]
+    interactions.extend(
+        Interaction(src=1000 + idx, dst=2000 + (idx % 7), time=400 + idx)
+        for idx in range(1, 310)
+    )
+    tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
+    tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    query = Query(src=1, time=1000, candidates=(2000, 2001, 2002, 9999))
+
+    before = tower.features_for_queries([query])
+    tower._full_dst_sources(2000)
+
+    assert tower._full_src_neighbor_cache
+    assert tower._full_dst_source_cache
+    assert tower._full_src_common_neighbor_cache
+    assert tower._full_src_cooccur_cache
+
+    tower.clear_full_history_cache()
+
+    assert not tower._full_src_neighbor_cache
+    assert not tower._full_dst_source_cache
+    assert not tower._full_src_common_neighbor_cache
+    assert not tower._full_src_cooccur_cache
+
+    after = tower.features_for_queries([query])
+
+    np.testing.assert_allclose(after, before, rtol=1e-6, atol=1e-6)
+
+
 def test_structure_common_neighbor_counts_unique_neighbor_once():
     tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
     tower.fit(

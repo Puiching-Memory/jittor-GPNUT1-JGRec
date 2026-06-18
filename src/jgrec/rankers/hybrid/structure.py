@@ -80,6 +80,9 @@ class StructureFeatureTower:
             max(self.graph_span * 0.50, 1.0),
         )
         self.fit_bridge_policy(interactions)
+        self.clear_full_history_cache()
+
+    def clear_full_history_cache(self) -> None:
         self._full_src_neighbor_cache.clear()
         self._full_dst_source_cache.clear()
         self._full_src_common_neighbor_cache.clear()
@@ -87,17 +90,11 @@ class StructureFeatureTower:
 
     def compact_for_future_queries(self) -> None:
         self.index.compact_for_future_queries()
-        self._full_src_neighbor_cache.clear()
-        self._full_dst_source_cache.clear()
-        self._full_src_common_neighbor_cache.clear()
-        self._full_src_cooccur_cache.clear()
+        self.clear_full_history_cache()
 
     def compact_transition_cooccur_for_future_queries(self) -> None:
         self.index.compact_transition_cooccur_for_future_queries()
-        self._full_src_neighbor_cache.clear()
-        self._full_dst_source_cache.clear()
-        self._full_src_common_neighbor_cache.clear()
-        self._full_src_cooccur_cache.clear()
+        self.clear_full_history_cache()
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -120,10 +117,7 @@ class StructureFeatureTower:
         self._bridge_overlap_ratio = float(snapshot.get("bridge_overlap_ratio", 0.0))
         self._bridge_min_role_degree = int(snapshot.get("bridge_min_role_degree", DEFAULT_BRIDGE_MIN_ROLE_DEGREE))
         self._allow_global_id_bridge = bool(snapshot.get("allow_global_id_bridge", False))
-        self._full_src_neighbor_cache.clear()
-        self._full_dst_source_cache.clear()
-        self._full_src_common_neighbor_cache.clear()
-        self._full_src_cooccur_cache.clear()
+        self.clear_full_history_cache()
 
     def features_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
