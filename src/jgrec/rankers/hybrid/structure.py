@@ -25,9 +25,9 @@ STRUCTURE_FEATURE_NAMES = (
     "transition_score",
 )
 STRUCTURE_FEATURE_DIM = len(STRUCTURE_FEATURE_NAMES)
-FULL_HISTORY_CACHE_LIMIT = 2048
-FULL_COMMON_NEIGHBOR_CACHE_LIMIT = 2048
-FULL_COOCCUR_CACHE_LIMIT = 4096
+FULL_HISTORY_CACHE_LIMIT = 256
+FULL_COMMON_NEIGHBOR_CACHE_LIMIT = 128
+FULL_COOCCUR_CACHE_LIMIT = 256
 FULL_COOCCUR_PREAGGREGATE_NEIGHBOR_THRESHOLD = 256
 DEFAULT_BRIDGE_OVERLAP_THRESHOLD = 0.50
 DEFAULT_BRIDGE_MIN_ROLE_DEGREE = 2
@@ -214,6 +214,15 @@ class StructureFeatureTower:
         src_neighbor_count = len(src_neighbors)
         src_dsts = self.index.src_dsts.get(query.src)
         last_visible_dst = int(src_dsts[-1]) if src_dsts is not None and src_dsts.size else None
+        limit = self.config.predict_neighbor_limit
+        if limit > 0 and src_neighbor_count > limit and src_dsts is not None:
+            recent_unique: dict[int, None] = {}
+            for dst in reversed(src_dsts):
+                recent_unique[int(dst)] = None
+                if len(recent_unique) >= limit:
+                    break
+            src_neighbors = set(recent_unique)
+            src_neighbor_count = len(src_neighbors)
         candidate_ids = tuple(int(dst) for dst in query.candidates)
         common_counts = self._full_src_common_neighbors(query.src, src_neighbors) if src_neighbor_count else {}
         cooccur_counts = (

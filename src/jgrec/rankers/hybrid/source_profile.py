@@ -18,7 +18,7 @@ SOURCE_PROFILE_FEATURE_DIM = len(SOURCE_PROFILE_FEATURE_NAMES)
 DETERMINISTIC_FEATURE_DIM = 6
 ITEM2VEC_FEATURE_DIM = 4
 EPSILON = 1e-8
-SOURCE_PROFILE_CACHE_LIMIT = 4096
+SOURCE_PROFILE_CACHE_LIMIT = 256
 SOURCE_PROFILE_CACHE_MIN_HISTORY = 32
 
 DeterministicSummary = tuple[
@@ -109,6 +109,7 @@ class SourceProfileTower:
             return np.empty((0, 0, SOURCE_PROFILE_FEATURE_DIM), dtype=np.float32)
         scores = np.zeros((len(queries), queries.candidate_count, SOURCE_PROFILE_FEATURE_DIM), dtype=np.float32)
         score_batch_size = max(int(self.config.score_batch_size), 1)
+        hist_limit = self.config.predict_history_limit
         for start in range(0, len(queries), score_batch_size):
             end = min(start + score_batch_size, len(queries))
             cache_counts = self._cache_key_counts(queries, start, end)
@@ -119,8 +120,10 @@ class SourceProfileTower:
                 history = source_view.visible_dsts
                 if history.size == 0:
                     continue
+                if hist_limit > 0 and history.size > hist_limit:
+                    history = history[-hist_limit:]
                 cache_key = (src, int(source_view.cutoff))
-                use_cache = cache_counts[cache_key] > 1 and history.size >= SOURCE_PROFILE_CACHE_MIN_HISTORY
+                use_cache = history.size >= SOURCE_PROFILE_CACHE_MIN_HISTORY
                 candidates = queries.candidates[row_idx].astype(np.int64, copy=False)
                 if self.config.deterministic_enabled:
                     self._fill_deterministic_features(history, candidates, scores[row_idx], cache_key, use_cache)

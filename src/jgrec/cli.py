@@ -113,6 +113,7 @@ class CLIConfig:
     disable_structure_cooccur: bool = False
     disable_structure_transition: bool = False
     structure_cooccur_history_limit: int = 128
+    structure_predict_neighbor_limit: int = 0
     disable_source_profile: bool = False
     disable_source_profile_deterministic: bool = False
     disable_source_profile_item2vec: bool = False
@@ -123,6 +124,7 @@ class CLIConfig:
     source_profile_max_samples: int = 100_000
     source_profile_window_size: int = 16
     source_profile_recent_k: int = 32
+    source_profile_predict_history_limit: int = 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -257,6 +259,7 @@ def _ranker_config(args: CLIConfig):
         structure_cooccur_enabled=not args.disable_structure_cooccur,
         structure_transition_enabled=not args.disable_structure_transition,
         structure_cooccur_history_limit=args.structure_cooccur_history_limit,
+        structure_predict_neighbor_limit=args.structure_predict_neighbor_limit,
         source_profile_enabled=not args.disable_source_profile,
         source_profile_deterministic_enabled=not args.disable_source_profile_deterministic,
         source_profile_item2vec_enabled=not args.disable_source_profile_item2vec,
@@ -267,6 +270,7 @@ def _ranker_config(args: CLIConfig):
         source_profile_max_samples=args.source_profile_max_samples,
         source_profile_window_size=args.source_profile_window_size,
         source_profile_recent_k=args.source_profile_recent_k,
+        source_profile_predict_history_limit=args.source_profile_predict_history_limit,
         gnn_enabled=not args.disable_gnn,
         gnn_model=args.gnn_model,
         gnn_edge_weighting=args.gnn_edge_weighting,
@@ -419,6 +423,8 @@ def _run_panel(run_dir: Path, zip_path: Path, args: CLIConfig, config) -> Panel:
         table.add_row("structure_cooccur", "on" if config.structure_cooccur_enabled else "off")
         table.add_row("structure_transition", "on" if config.structure_transition_enabled else "off")
         table.add_row("structure_cooccur_history_limit", str(config.structure_cooccur_history_limit))
+        table.add_row("structure_predict_neighbor_limit", str(config.structure_predict_neighbor_limit) if config.structure_predict_neighbor_limit else "off")
+        table.add_row("source_profile_predict_history_limit", str(config.source_profile_predict_history_limit) if config.source_profile_predict_history_limit else "off")
         table.add_row("max_fit_events", str(config.max_fit_events) if config.max_fit_events else "full")
         table.add_row("supervised_feature_batch_size", str(config.supervised_feature_batch_size))
         table.add_row("supervised_feature_memmap", "on" if config.supervised_feature_memmap else "off")

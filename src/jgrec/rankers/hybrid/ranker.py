@@ -713,6 +713,7 @@ class TemporalHybridRanker:
             label="train_features",
         )
         del train_encoder
+        release_memory()
         log_event(
             f"[hybrid-fit] train_features shape={train_features.shape} elapsed={perf_counter() - feature_start:.1f}s",
             enabled=config.verbose,

@@ -44,6 +44,7 @@ class StructureTowerConfig:
     future_only_transition_cooccur: bool = False
     bridge_overlap_threshold: float = 0.50
     bridge_min_role_degree: int = 2
+    predict_neighbor_limit: int = 0
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,7 @@ class SourceProfileConfig:
     recent_k: int = 32
     lr: float = 1e-3
     weight_decay: float = 0.0
+    predict_history_limit: int = 0
 
 
 @dataclass(frozen=True)
@@ -207,6 +209,8 @@ class TrainingConfig:
     source_profile_max_samples: int = 100_000
     source_profile_window_size: int = 16
     source_profile_recent_k: int = 32
+    source_profile_predict_history_limit: int = 0
+    structure_predict_neighbor_limit: int = 0
     fusion_hidden_dim: int = 64
     hard_negative_ratio: float = 0.5
     popular_negative_ratio: float = 0.25
@@ -231,6 +235,7 @@ class TrainingConfig:
             transition_enabled=self.structure_transition_enabled,
             cooccur_history_limit=self.structure_cooccur_history_limit,
             future_only_transition_cooccur=self.structure_future_only_transition_cooccur,
+            predict_neighbor_limit=self.structure_predict_neighbor_limit,
         )
 
     def graph_config(self) -> GraphTowerConfig:
@@ -298,6 +303,7 @@ class TrainingConfig:
             recent_k=self.source_profile_recent_k,
             lr=self.lr,
             weight_decay=self.weight_decay,
+            predict_history_limit=self.source_profile_predict_history_limit,
         )
 
     def fusion_config(self) -> FusionConfig:

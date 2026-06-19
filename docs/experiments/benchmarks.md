@@ -4,59 +4,85 @@
 
 ## 当前提交候选
 
-记录日期：2026-06-08
+记录日期：2026-06-20
 
 当前工作区已验证提交包：
 
 ```text
-result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
+result/fullhist_d2/result.zip
 ```
 
 线上反馈：
 
 ```text
-1.2044345219596662
+1.3159985967161738
 ```
 
 CSV 来源：
 
-| 数据集     | CSV 来源                                                                 |
-| ---------- | ------------------------------------------------------------------------ |
-| `dataset1` | `result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset1.csv` |
-| `dataset2` | `result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/csv/dataset2.csv` |
+| 数据集     | CSV 来源                                     |
+| ---------- | -------------------------------------------- |
+| `dataset1` | `result/fullhist_d2/csv/dataset1.csv`        |
+| `dataset2` | `result/fullhist_d2/csv/dataset2.csv`        |
 
 当前模型链路：
 
 ```text
-stats + candidate_prior + structure + two_tower + graph + sequence -> Fusion MLP
+stats + candidate_prior + target_window + structure + source_profile + two_tower + graph + sequence -> Fusion MLP
 ```
 
 关键设置：
 
-- 全量输出 `dataset1` 和 `dataset2`，不使用 `--dataset` 或 `--limit-rows`；
-- `max_fit_events=240000`，final encoder 使用尾部 24 万训练事件；
+- 分别单跑 `dataset1` 和 `dataset2`（`--dataset dataset2` / `--dataset dataset1`），本地合并打包；
+- **`max_fit_events=0`（全量历史）**，dataset2 使用全部 2,261,283 训练事件，dataset1 使用全部 782,789 训练事件；
 - dataset1 自动画像为 `repeat_memory`，dataset2 自动画像为 `new_link_cold`；
 - 手动设置 `test_candidate_negative_ratio=1.00`；
 - 监督融合训练使用 `max_train_events=50000`、`max_val_events=20000`；
 - `selection_metric=mrr`，`structure_cooccur_history_limit=32`；
-- 质量优先，不通过关闭 `structure`、`two_tower`、`candidate_prior` 解决内存或速度问题；
-- 监督特征使用 memmap 和流式 fusion 控制内存。
+- **predict 时间优化**：`structure_predict_neighbor_limit=256`，`source_profile_predict_history_limit=256`，截断 predict/val 阶段的 per-source 历史长度，避免全量历史下 OOM；
+- LRU 缓存上限缩减：structure common_neighbor=128, cooccur=256, neighbor=256; source_profile=256；
+- 质量优先，所有特征塔均开启，fusion 选择了全部特征组 `stats_prior_target_structure_profile_tower_gnn_seq`。
 
 本地验证结果：
 
-| 数据集     |      AP |     MRR | fusion                        | auto            |
-| ---------- | ------: | ------: | ----------------------------- | --------------- |
-| `dataset1` | 0.75512 | 0.77363 | `stats_prior_structure_tower`     | `repeat_memory` |
-| `dataset2` | 0.32691 | 0.55251 | `stats_prior_structure_tower_gnn` | `new_link_cold` |
+| 数据集     |      AP |     MRR | fusion                                                    | auto            |
+| ---------- | ------: | ------: | --------------------------------------------------------- | --------------- |
+| `dataset1` | 0.81080 | 0.82847 | `stats_prior_target_structure_profile_tower_gnn_seq` (56) | `repeat_memory` |
+| `dataset2` | 0.54828 | 0.70429 | `stats_prior_target_structure_profile_tower_gnn_seq` (57) | `new_link_cold` |
+
+对比前冠军（`max_fit_events=240000`）：
+
+| 数据集     | 前冠军 MRR | 全量历史 MRR | 提升   |
+| ---------- | ---------: | -----------: | -----: |
+| `dataset1` |    0.77363 |      0.82847 | +7.1%  |
+| `dataset2` |    0.55251 |      0.70429 | +27.5% |
+| 线上总分   |    1.20443 |      1.31600 | +9.3%  |
 
 提交结论：
 
-- 该包是当前工作区可定位、可检查、已得到线上反馈的提交候选。
-- 该包为性能优化后同参数全量复跑，耗时约 `55m57s`，线上反馈从历史最好 `1.1983` 提升到
-  `1.2044345219596662`。
-- 若继续冲分，优先单跑 dataset2 对比 `max_train_events/max_val_events`、`selection_metric=mrr` 和
-  `test_candidate_negative_ratio`，再与稳定 dataset1 拼包。
-- 不使用 `--limit-rows` 产物提交。
+- 全量历史是本轮最大增量来源，让模型看到完整训练数据而非尾部 24 万事件。
+- predict 阶段需要 `predict_neighbor_limit` 和 `predict_history_limit` 截断以控制时间和内存。
+- dataset2 predict 耗时约 9.3 小时（33592s），dataset1 约 6 分钟（364s）。
+- K=512 截断时 dataset2 val_mrr 约 0.76（vs K=256 的 0.704），但 predict 阶段会 OOM（32GB 内存不够）。提升截断上限需要先解决内存问题（如 predict 分片、memmap 缓存、或更大内存机器）。
+
+## 前冠军存档
+
+记录日期：2026-06-08 → 2026-06-20 归档
+
+提交包：
+
+```text
+result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
+```
+
+线上反馈：`1.2044345219596662`
+
+| 数据集     |      AP |     MRR | fusion                            | auto            |
+| ---------- | ------: | ------: | --------------------------------- | --------------- |
+| `dataset1` | 0.75512 | 0.77363 | `stats_prior_structure_tower`     | `repeat_memory` |
+| `dataset2` | 0.32691 | 0.55251 | `stats_prior_structure_tower_gnn` | `new_link_cold` |
+
+关键设置：`max_fit_events=240000`，其余同当前冠军。
 
 ## 2026-06-07 Dataset2 速度诊断
 
