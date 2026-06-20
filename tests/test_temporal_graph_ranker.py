@@ -147,7 +147,7 @@ def test_fit_builds_selection_candidate_prior_from_train_split_only(monkeypatch)
     def fake_build_model(self, time_span):
         return FakeModel()
 
-    def fake_from_test_candidates(candidate_index, train_dst_ids, train_times=None, recent_feature_group="none"):
+    def fake_from_test_candidates(candidate_index, train_dst_ids, train_times=None, recent_feature_group="none", include_test_frequency=False):
         marker = object()
         prior_calls.append((tuple(int(value) for value in train_dst_ids), tuple(int(value) for value in train_times)))
         return marker

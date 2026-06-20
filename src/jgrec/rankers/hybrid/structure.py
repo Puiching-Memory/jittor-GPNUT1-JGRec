@@ -25,9 +25,9 @@ STRUCTURE_FEATURE_NAMES = (
     "transition_score",
 )
 STRUCTURE_FEATURE_DIM = len(STRUCTURE_FEATURE_NAMES)
-FULL_HISTORY_CACHE_LIMIT = 256
-FULL_COMMON_NEIGHBOR_CACHE_LIMIT = 128
-FULL_COOCCUR_CACHE_LIMIT = 256
+FULL_HISTORY_CACHE_LIMIT = 2048
+FULL_COMMON_NEIGHBOR_CACHE_LIMIT = 1024
+FULL_COOCCUR_CACHE_LIMIT = 2048
 FULL_COOCCUR_PREAGGREGATE_NEIGHBOR_THRESHOLD = 256
 DEFAULT_BRIDGE_OVERLAP_THRESHOLD = 0.50
 DEFAULT_BRIDGE_MIN_ROLE_DEGREE = 2
@@ -235,11 +235,9 @@ class StructureFeatureTower:
             if self.config.cooccur_enabled
             else np.zeros(len(candidate_ids), dtype=np.int32)
         )
-        transition_counts = (
-            self.index.future_transition_count_maps.get(last_visible_dst, {})
-            if self.index.future_only and self.config.transition_enabled and last_visible_dst is not None
-            else None
-        )
+        transition_row = None
+        if self.config.transition_enabled and last_visible_dst is not None and self.index.future_only:
+            transition_row = self.index.future_transition_count_maps.get_row(last_visible_dst)
 
         for idx, dst_int in enumerate(candidate_ids):
             pair_times = self.index.pair_times.get((query.src, dst_int))
@@ -271,11 +269,12 @@ class StructureFeatureTower:
                     output[idx, 9] = math.log1p(cooccur)
 
             if self.config.transition_enabled and last_visible_dst is not None:
-                transition = (
-                    transition_counts.get(dst_int, 0)
-                    if transition_counts is not None
-                    else self.index.transition_count(last_visible_dst, dst_int, query.time)
-                )
+                if transition_row is not None:
+                    cols, vals = transition_row
+                    pos = int(np.searchsorted(cols, dst_int))
+                    transition = int(vals[pos]) if pos < len(cols) and cols[pos] == dst_int else 0
+                else:
+                    transition = self.index.transition_count(last_visible_dst, dst_int, query.time)
                 if transition:
                     output[idx, 10] = math.log1p(transition)
 
@@ -307,16 +306,19 @@ class StructureFeatureTower:
             self._full_src_common_neighbor_cache.move_to_end(src)
             return cached
 
-        counts: dict[int, int] = {}
+        chunks: list[np.ndarray] = []
         for neighbor_src in src_neighbors:
             if not self._is_valid_bridge_node(neighbor_src):
                 continue
             neighbor_dsts = self.index.src_dsts.get(neighbor_src)
-            if neighbor_dsts is None or not neighbor_dsts.size:
-                continue
-            for candidate in self._full_src_neighbors(neighbor_src):
-                candidate_int = int(candidate)
-                counts[candidate_int] = counts.get(candidate_int, 0) + 1
+            if neighbor_dsts is not None and neighbor_dsts.size:
+                chunks.append(np.unique(neighbor_dsts))
+        if chunks:
+            all_dsts = np.concatenate(chunks)
+            unique, raw_counts = np.unique(all_dsts, return_counts=True)
+            counts = dict(zip(unique.tolist(), raw_counts.tolist()))
+        else:
+            counts = {}
         self._cache_put(self._full_src_common_neighbor_cache, src, counts, FULL_COMMON_NEIGHBOR_CACHE_LIMIT)
         return counts
 
@@ -379,20 +381,26 @@ class StructureFeatureTower:
         if force_preaggregate and has_grouped_cooccurs:
             candidate_counts = self._full_src_cooccurs(src, src_neighbors)
         elif len(src_neighbors) <= FULL_COOCCUR_PREAGGREGATE_NEIGHBOR_THRESHOLD or not has_grouped_cooccurs:
-            unique_candidates = tuple(dict.fromkeys(candidate_ids))
-            candidate_counts: dict[int, int] = {}
-            for candidate in unique_candidates:
-                total = 0
-                for seen_dst in src_neighbors:
-                    if seen_dst == candidate:
-                        continue
-                    if self.index.future_only:
-                        total += self.index.future_cooccur_count_maps.get(seen_dst, {}).get(candidate, 0)
-                    else:
+            if self.index.future_only:
+                neighbor_arr = np.asarray(sorted(src_neighbors), dtype=np.int32)
+                unique_candidates = tuple(dict.fromkeys(candidate_ids))
+                candidate_counts: dict[int, int] = {}
+                for candidate in unique_candidates:
+                    per_neighbor = self.index.future_cooccur_count_maps.batch_get_counts(neighbor_arr, candidate)
+                    mask = neighbor_arr != candidate
+                    candidate_counts[candidate] = int(per_neighbor[mask].sum())
+            else:
+                unique_candidates = tuple(dict.fromkeys(candidate_ids))
+                candidate_counts: dict[int, int] = {}
+                for candidate in unique_candidates:
+                    total = 0
+                    for seen_dst in src_neighbors:
+                        if seen_dst == candidate:
+                            continue
                         times = self.index.cooccur_times.get((seen_dst, candidate))
                         if times is not None:
                             total += len(times)
-                candidate_counts[candidate] = total
+                    candidate_counts[candidate] = total
         else:
             candidate_counts = self._full_src_cooccurs(src, src_neighbors)
 
@@ -406,16 +414,15 @@ class StructureFeatureTower:
             self._full_src_cooccur_cache.move_to_end(src)
             return cached
 
-        counts: dict[int, int] = {}
-        for seen_dst in src_neighbors:
-            if self.index.future_only:
-                cooccur_items = self.index.future_cooccur_count_maps.get(seen_dst, {}).items()
-            else:
-                cooccur_items = self.index.cooccurs_by_left.get(seen_dst, ())
-            for candidate, value in cooccur_items:
-                candidate_int = int(candidate)
-                count = int(value) if self.index.future_only else len(value)
-                counts[candidate_int] = counts.get(candidate_int, 0) + count
+        if self.index.future_only:
+            neighbor_arr = np.asarray(sorted(src_neighbors), dtype=np.int32)
+            counts = self.index.future_cooccur_count_maps.sum_rows(neighbor_arr)
+        else:
+            counts: dict[int, int] = {}
+            for seen_dst in src_neighbors:
+                for candidate, times_arr in self.index.cooccurs_by_left.get(seen_dst, ()):
+                    candidate_int = int(candidate)
+                    counts[candidate_int] = counts.get(candidate_int, 0) + len(times_arr)
         self._cache_put(self._full_src_cooccur_cache, src, counts, FULL_COOCCUR_CACHE_LIMIT)
         return counts
 

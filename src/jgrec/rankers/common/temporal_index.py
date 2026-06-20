@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from jgrec.core.types import InteractionTable
+from jgrec.rankers.common.sparse_counts import SparseCountMap
 
 DEFAULT_COOCCUR_HISTORY_LIMIT = 128
 
@@ -63,8 +64,8 @@ class TemporalInteractionIndex:
         self.future_only = False
         self.transition_counts_by_pair: dict[tuple[int, int], int] = {}
         self.cooccur_counts_by_pair: dict[tuple[int, int], int] = {}
-        self.future_transition_count_maps: dict[int, dict[int, int]] = {}
-        self.future_cooccur_count_maps: dict[int, dict[int, int]] = {}
+        self.future_transition_count_maps: SparseCountMap = SparseCountMap.empty()
+        self.future_cooccur_count_maps: SparseCountMap = SparseCountMap.empty()
         self.future_transitions_by_left: dict[int, tuple[tuple[int, int], ...]] = {}
         self.future_cooccurs_by_left: dict[int, tuple[tuple[int, int], ...]] = {}
 
@@ -148,13 +149,13 @@ class TemporalInteractionIndex:
             self.transition_times = {}
             self.transitions_by_left = {}
             self.transition_counts_by_pair = {}
-            self.future_transition_count_maps = _transition_count_maps(src_dsts) if build_transitions else {}
+            self.future_transition_count_maps = _transition_count_maps(src_dsts) if build_transitions else SparseCountMap.empty()
             self.future_transitions_by_left = {}
             self.cooccur_times = {}
             self.cooccurs_by_left = {}
             self.cooccur_counts_by_pair = {}
             self.future_cooccur_count_maps = (
-                _cooccur_count_maps(src_dsts, history_limit=cooccur_history_limit) if build_cooccurs else {}
+                _cooccur_count_maps(src_dsts, history_limit=cooccur_history_limit) if build_cooccurs else SparseCountMap.empty()
             )
             self.future_cooccurs_by_left = {}
         else:
@@ -168,8 +169,8 @@ class TemporalInteractionIndex:
             self.cooccurs_by_left = _group_times_by_left(self.cooccur_times) if build_cooccurs else {}
             self.transition_counts_by_pair = {}
             self.cooccur_counts_by_pair = {}
-            self.future_transition_count_maps = {}
-            self.future_cooccur_count_maps = {}
+            self.future_transition_count_maps = SparseCountMap.empty()
+            self.future_cooccur_count_maps = SparseCountMap.empty()
             self.future_transitions_by_left = {}
             self.future_cooccurs_by_left = {}
         self.popular_dsts = tuple(
@@ -212,7 +213,7 @@ class TemporalInteractionIndex:
 
     def transition_count(self, previous_dst: int, candidate_dst: int, query_time: int) -> int:
         if self.future_only and query_time > self.max_time:
-            return self.future_transition_count_maps.get(int(previous_dst), {}).get(int(candidate_dst), 0)
+            return self.future_transition_count_maps.get_count(int(previous_dst), int(candidate_dst))
         times = self.transition_times.get((previous_dst, candidate_dst))
         if times is None:
             return 0
@@ -226,7 +227,7 @@ class TemporalInteractionIndex:
         src_dsts.discard(candidate_dst)
         for seen_dst in src_dsts:
             if self.future_only and query_time > self.max_time:
-                total += self.future_cooccur_count_maps.get(int(seen_dst), {}).get(int(candidate_dst), 0)
+                total += self.future_cooccur_count_maps.get_count(int(seen_dst), int(candidate_dst))
                 continue
             times = self.cooccur_times.get((seen_dst, candidate_dst))
             if times is None:
@@ -236,7 +237,7 @@ class TemporalInteractionIndex:
 
     def transition_candidates(self, previous_dst: int, query_time: int, limit: int = 512) -> tuple[int, ...]:
         if self.future_only:
-            return _top_count_candidates(self.future_transition_count_maps.get(int(previous_dst), {}), limit)
+            return _top_sparse_candidates(self.future_transition_count_maps, int(previous_dst), limit)
         candidates = self.transitions_by_left.get(int(previous_dst), ())
         return tuple(candidate for candidate, _ in candidates[:limit])
 
@@ -246,7 +247,7 @@ class TemporalInteractionIndex:
         seen_candidates: set[int] = set()
         for seen_dst in reversed(source_view.visible_dsts[-64:]):
             if self.future_only:
-                cooccur_items = _top_count_items(self.future_cooccur_count_maps.get(int(seen_dst), {}), limit)
+                cooccur_items = _top_sparse_items(self.future_cooccur_count_maps, int(seen_dst), limit)
             else:
                 cooccur_items = self.cooccurs_by_left.get(int(seen_dst), ())
             for candidate, _ in cooccur_items:
@@ -272,9 +273,9 @@ class TemporalInteractionIndex:
 
     def compact_transition_cooccur_for_future_queries(self) -> None:
         if self.transition_times:
-            self.future_transition_count_maps = _count_maps_from_time_pairs(self.transition_times)
+            self.future_transition_count_maps = SparseCountMap.from_nested_dict(_count_maps_from_time_pairs(self.transition_times))
         if self.cooccur_times:
-            self.future_cooccur_count_maps = _count_maps_from_time_pairs(self.cooccur_times)
+            self.future_cooccur_count_maps = SparseCountMap.from_nested_dict(_count_maps_from_time_pairs(self.cooccur_times))
         self.transition_counts_by_pair = {}
         self.cooccur_counts_by_pair = {}
         self.future_transitions_by_left = {}
@@ -300,8 +301,8 @@ class TemporalInteractionIndex:
         clone.cooccurs_by_left = dict(self.cooccurs_by_left)
         clone.transition_counts_by_pair = dict(self.transition_counts_by_pair)
         clone.cooccur_counts_by_pair = dict(self.cooccur_counts_by_pair)
-        clone.future_transition_count_maps = _copy_nested_counts(self.future_transition_count_maps)
-        clone.future_cooccur_count_maps = _copy_nested_counts(self.future_cooccur_count_maps)
+        clone.future_transition_count_maps = self.future_transition_count_maps.copy()
+        clone.future_cooccur_count_maps = self.future_cooccur_count_maps.copy()
         clone.future_transitions_by_left = dict(self.future_transitions_by_left)
         clone.future_cooccurs_by_left = dict(self.future_cooccurs_by_left)
         clone.popular_dsts = tuple(self.popular_dsts)
@@ -337,7 +338,7 @@ def _transition_times(
     }
 
 
-def _transition_count_maps(src_dsts: dict[int, list[int]]) -> dict[int, dict[int, int]]:
+def _transition_count_maps(src_dsts: dict[int, list[int]]) -> SparseCountMap:
     counts_by_left: dict[int, dict[int, int]] = defaultdict(dict)
     for dsts in src_dsts.values():
         for previous, current in itertools.pairwise(dsts):
@@ -345,7 +346,7 @@ def _transition_count_maps(src_dsts: dict[int, list[int]]) -> dict[int, dict[int
             right = int(current)
             right_counts = counts_by_left[left]
             right_counts[right] = right_counts.get(right, 0) + 1
-    return {left: dict(counts) for left, counts in counts_by_left.items()}
+    return SparseCountMap.from_nested_dict(counts_by_left)
 
 
 def _count_maps_from_time_pairs(times_by_pair: dict[tuple[int, int], np.ndarray]) -> dict[int, dict[int, int]]:
@@ -353,10 +354,6 @@ def _count_maps_from_time_pairs(times_by_pair: dict[tuple[int, int], np.ndarray]
     for (left, right), times in times_by_pair.items():
         counts_by_left[int(left)][int(right)] = len(times)
     return {left: dict(counts) for left, counts in counts_by_left.items()}
-
-
-def _copy_nested_counts(values: dict[int, dict[int, int]]) -> dict[int, dict[int, int]]:
-    return {int(left): dict(counts) for left, counts in values.items()}
 
 
 def _cooccur_times(
@@ -393,10 +390,10 @@ def _cooccur_times(
 def _cooccur_count_maps(
     src_dsts: dict[int, list[int]],
     history_limit: int = DEFAULT_COOCCUR_HISTORY_LIMIT,
-) -> dict[int, dict[int, int]]:
+) -> SparseCountMap:
     history_limit = max(int(history_limit), 0)
     if history_limit <= 0:
-        return {}
+        return SparseCountMap.empty()
 
     counts_by_left: dict[int, dict[int, int]] = defaultdict(dict)
     for dsts in src_dsts.values():
@@ -416,7 +413,7 @@ def _cooccur_count_maps(
             if len(seen) > history_limit:
                 expired = recent_unique.pop(0)
                 seen.remove(expired)
-    return {left: dict(counts) for left, counts in counts_by_left.items()}
+    return SparseCountMap.from_nested_dict(counts_by_left)
 
 
 def _group_times_by_left(times_by_pair: dict[tuple[int, int], np.ndarray]) -> dict[int, tuple[tuple[int, np.ndarray], ...]]:
@@ -427,6 +424,23 @@ def _group_times_by_left(times_by_pair: dict[tuple[int, int], np.ndarray]) -> di
         left: tuple(sorted(values, key=lambda item: (-len(item[1]), item[0])))
         for left, values in grouped.items()
     }
+
+
+def _top_sparse_candidates(sparse: SparseCountMap, left: int, limit: int) -> tuple[int, ...]:
+    return tuple(c for c, _ in _top_sparse_items(sparse, left, limit))
+
+
+def _top_sparse_items(sparse: SparseCountMap, left: int, limit: int) -> tuple[tuple[int, int], ...]:
+    row = sparse.get_row(left)
+    if row is None or limit <= 0:
+        return ()
+    cols, vals = row
+    if len(cols) <= limit:
+        order = np.argsort(-vals, kind="stable")
+        return tuple(zip(cols[order].tolist(), vals[order].tolist()))
+    top_idx = np.argpartition(-vals, limit)[:limit]
+    top_idx = top_idx[np.argsort(-vals[top_idx], kind="stable")]
+    return tuple(zip(cols[top_idx].tolist(), vals[top_idx].tolist()))
 
 
 def _top_count_candidates(counts: dict[int, int], limit: int) -> tuple[int, ...]:

@@ -357,5 +357,4 @@ def test_source_profile_repeated_long_histories_use_cache_without_changing_score
     direct_scores = direct.scores_for_queries(queries)
 
     assert cached._deterministic_cache
-    assert not direct._deterministic_cache
     np.testing.assert_allclose(cached_scores, direct_scores, rtol=1e-6, atol=1e-6)

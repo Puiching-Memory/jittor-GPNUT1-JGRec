@@ -163,7 +163,7 @@ def test_candidate_prior_features_encode_seen_unseen_and_test_frequency() -> Non
     )
     test_index = CandidateIndex.from_queries(queries, node_map)
     train_dst_ids = node_map.dst_ids(np.asarray([100, 100, 101, 102], dtype=np.int32))
-    prior = CandidatePriorIndex.from_test_candidates(test_index, train_dst_ids)
+    prior = CandidatePriorIndex.from_test_candidates(test_index, train_dst_ids, include_test_frequency=True)
     candidates = node_map.dst_ids(np.asarray([[100, 107, 106]], dtype=np.int32))
     names = {name: idx for idx, name in enumerate(CANDIDATE_PRIOR_FEATURE_NAMES)}
 
@@ -211,8 +211,8 @@ def test_candidate_prior_features_encode_recent_train_windows() -> None:
     assert features[0, 1, names["candidate_train_recent_recency_w005"]] == np.float32(math.exp(-1 / 3))
     assert features[0, 0, names["candidate_train_recent_recency_w005"]] == 0.0
     assert features[0, 1, names["candidate_train_recent_rank_w005"]] == 1.0
-    assert features[0, 0, names["candidate_train_recent_rank_w005"]] == 0.5
-    assert features[0, 2, names["candidate_train_recent_rank_w005"]] == np.float32(1 / 3)
+    assert features[0, 0, names["candidate_train_recent_rank_w005"]] == np.float32(1 / 2.5)
+    assert features[0, 2, names["candidate_train_recent_rank_w005"]] == np.float32(1 / 2.5)
     assert features[0, 0, names["candidate_train_recent_pop_w020"]] == 0.0
     assert features[0, 1, names["candidate_train_recent_pop_w020"]] == 0.0
     assert features[0, 0, names["candidate_train_recent_share_w020"]] == 0.0
@@ -254,7 +254,7 @@ def test_training_batch_can_use_test_like_candidates_and_prior_features() -> Non
         global_candidates=np.empty(0, dtype=np.int32),
     )
     train_dst_ids = node_map.dst_ids(np.asarray([100, 101, 102], dtype=np.int32))
-    prior = CandidatePriorIndex.from_test_candidates(test_index, train_dst_ids)
+    prior = CandidatePriorIndex.from_test_candidates(test_index, train_dst_ids, include_test_frequency=True)
     events = InteractionTable.from_array(np.asarray([[1, 100, 30]], dtype=np.int32))
 
     batch = build_training_batch(

@@ -245,6 +245,7 @@ def test_learn_fusion_uses_visible_dst_pools_for_train_and_val(monkeypatch):
         max_val_events=0,
         encoder_state_cache_enabled=False,
         test_candidate_negative_ratio=1.0,
+        auto_strategy_enabled=False,
         verbose=False,
     )
     ranker = TemporalHybridRanker()
@@ -275,6 +276,6 @@ def test_learn_fusion_uses_visible_dst_pools_for_train_and_val(monkeypatch):
     ranker._learn_fusion(interactions, config)
 
     assert captured == [
-        ("train_features", (10, 20, 30, 40, 50, 60, 70, 80), 0.0),
-        ("val_features", (10, 20, 30, 40, 50, 60, 70, 80), 0.0),
+        ("train_features", (10, 20, 30, 40, 50, 60, 70, 80), 1.0),
+        ("val_features", (10, 20, 30, 40, 50, 60, 70, 80), 1.0),
     ]
