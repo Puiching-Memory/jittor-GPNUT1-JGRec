@@ -138,7 +138,7 @@ class TrainingConfig:
     max_train_events: int = 20_000
     max_val_events: int = 5_000
     supervised_feature_batch_size: int = 4096
-    supervised_feature_memmap: bool = False
+    supervised_feature_memmap: bool = True
     num_negatives: int = 31
     max_fit_events: int = 0
     epochs: int = 5

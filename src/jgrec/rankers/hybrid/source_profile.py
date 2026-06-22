@@ -19,7 +19,7 @@ SOURCE_PROFILE_FEATURE_DIM = len(SOURCE_PROFILE_FEATURE_NAMES)
 DETERMINISTIC_FEATURE_DIM = 6
 ITEM2VEC_FEATURE_DIM = 4
 EPSILON = 1e-8
-SOURCE_PROFILE_CACHE_LIMIT = 2048
+SOURCE_PROFILE_CACHE_LIMIT = 256
 SOURCE_PROFILE_CACHE_MIN_HISTORY = 32
 
 DeterministicSummary = tuple[
@@ -39,7 +39,6 @@ class SourceProfileTower:
         self.id_map = id_map
         self.config = config
         self.index = TemporalInteractionIndex()
-        self.item_pair_counts: dict[int, dict[int, int]] = {}
         self.item_pair_counts_sparse: SparseCountMap = SparseCountMap.empty()
         self.item_degrees: dict[int, int] = {}
         self.embeddings: np.ndarray | None = None
@@ -73,7 +72,6 @@ class SourceProfileTower:
         if self.config.deterministic_enabled and not deterministic_ready:
             self.fit_deterministic(interactions)
         elif not self.config.deterministic_enabled:
-            self.item_pair_counts = {}
             self.item_degrees = {}
         if self.config.item2vec_enabled and self.config.epochs > 0 and self.id_map.num_dst >= 2:
             self._fit_item2vec(interactions, rng=rng, verbose=verbose)
@@ -83,16 +81,16 @@ class SourceProfileTower:
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            "item_pair_counts": {int(left): dict(counts) for left, counts in self.item_pair_counts.items()},
+            "item_pair_counts": self.item_pair_counts_sparse.to_nested_dict(),
             "item_degrees": dict(self.item_degrees),
         }
 
     def hydrate(self, snapshot: dict[str, Any]) -> None:
-        self.item_pair_counts = {
+        nested = {
             int(left): {int(right): int(count) for right, count in counts.items()}
             for left, counts in snapshot["item_pair_counts"].items()
         }
-        self.item_pair_counts_sparse = SparseCountMap.from_nested_dict(self.item_pair_counts)
+        self.item_pair_counts_sparse = SparseCountMap.from_nested_dict(nested)
         self.item_degrees = {int(dst): int(count) for dst, count in snapshot["item_degrees"].items()}
         self._clear_score_caches()
 
@@ -153,8 +151,8 @@ class SourceProfileTower:
                         continue
                     pair_counts[left_int][right_int] = pair_counts[left_int].get(right_int, 0) + 1
                     pair_counts[right_int][left_int] = pair_counts[right_int].get(left_int, 0) + 1
-        self.item_pair_counts = {left: dict(counts) for left, counts in pair_counts.items()}
-        self.item_pair_counts_sparse = SparseCountMap.from_nested_dict(self.item_pair_counts)
+        nested = {left: dict(counts) for left, counts in pair_counts.items()}
+        self.item_pair_counts_sparse = SparseCountMap.from_nested_dict(nested)
         self.item_degrees = degrees
 
     def _fit_item2vec(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool) -> None:
@@ -342,11 +340,6 @@ class SourceProfileTower:
         if use_cache and cache_key is not None:
             self._cache_put(self._embedding_profile_cache, cache_key, profiles)
         return profiles
-
-    def _cooccur_count(self, left: int, right: int) -> int:
-        if left == right:
-            return 0
-        return self.item_pair_counts.get(int(left), {}).get(int(right), 0)
 
     def _cosine_from_count(self, cooccur: int, left: int, right: int, right_degree: int) -> float:
         left_degree = self.item_degrees.get(int(left), 0)

@@ -23,11 +23,15 @@ STRUCTURE_FEATURE_NAMES = (
     "jaccard",
     "cooccur_score",
     "transition_score",
+    "adamic_adar",
+    "resource_allocation",
+    "preferential_attachment",
+    "src_degree",
 )
 STRUCTURE_FEATURE_DIM = len(STRUCTURE_FEATURE_NAMES)
-FULL_HISTORY_CACHE_LIMIT = 2048
-FULL_COMMON_NEIGHBOR_CACHE_LIMIT = 1024
-FULL_COOCCUR_CACHE_LIMIT = 2048
+FULL_HISTORY_CACHE_LIMIT = 256
+FULL_COMMON_NEIGHBOR_CACHE_LIMIT = 256
+FULL_COOCCUR_CACHE_LIMIT = 256
 FULL_COOCCUR_PREAGGREGATE_NEIGHBOR_THRESHOLD = 256
 DEFAULT_BRIDGE_OVERLAP_THRESHOLD = 0.50
 DEFAULT_BRIDGE_MIN_ROLE_DEGREE = 2
@@ -43,7 +47,9 @@ class StructureFeatureTower:
         self.decay_windows: tuple[float, float, float] = (1.0, 1.0, 1.0)
         self._full_src_neighbor_cache: OrderedDict[int, set[int]] = OrderedDict()
         self._full_dst_source_cache: OrderedDict[int, set[int]] = OrderedDict()
-        self._full_src_common_neighbor_cache: OrderedDict[int, dict[int, int]] = OrderedDict()
+        self._full_src_structure_cache: OrderedDict[
+            int, tuple[dict[int, int], dict[int, float], dict[int, float]]
+        ] = OrderedDict()
         self._full_src_cooccur_cache: OrderedDict[int, dict[int, int]] = OrderedDict()
         self._bridge_overlap_ratio = 0.0
         self._bridge_min_role_degree = DEFAULT_BRIDGE_MIN_ROLE_DEGREE
@@ -82,21 +88,21 @@ class StructureFeatureTower:
         self.fit_bridge_policy(interactions)
         self._full_src_neighbor_cache.clear()
         self._full_dst_source_cache.clear()
-        self._full_src_common_neighbor_cache.clear()
+        self._full_src_structure_cache.clear()
         self._full_src_cooccur_cache.clear()
 
     def compact_for_future_queries(self) -> None:
         self.index.compact_for_future_queries()
         self._full_src_neighbor_cache.clear()
         self._full_dst_source_cache.clear()
-        self._full_src_common_neighbor_cache.clear()
+        self._full_src_structure_cache.clear()
         self._full_src_cooccur_cache.clear()
 
     def compact_transition_cooccur_for_future_queries(self) -> None:
         self.index.compact_transition_cooccur_for_future_queries()
         self._full_src_neighbor_cache.clear()
         self._full_dst_source_cache.clear()
-        self._full_src_common_neighbor_cache.clear()
+        self._full_src_structure_cache.clear()
         self._full_src_cooccur_cache.clear()
 
     def snapshot(self) -> dict[str, Any]:
@@ -122,7 +128,7 @@ class StructureFeatureTower:
         self._allow_global_id_bridge = bool(snapshot.get("allow_global_id_bridge", False))
         self._full_src_neighbor_cache.clear()
         self._full_dst_source_cache.clear()
-        self._full_src_common_neighbor_cache.clear()
+        self._full_src_structure_cache.clear()
         self._full_src_cooccur_cache.clear()
 
     def features_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
@@ -165,6 +171,9 @@ class StructureFeatureTower:
         src_neighbor_count = len(src_neighbors)
         last_visible_dst = int(src_view.visible_dsts[-1]) if src_view.cutoff > 0 else None
 
+        if src_neighbor_count:
+            output[:, 14] = math.log1p(src_neighbor_count)
+
         for idx, dst in enumerate(query.candidates):
             dst_int = int(dst)
             pair_times = self.index.pair_times_before(query.src, dst_int, query.time)
@@ -192,6 +201,9 @@ class StructureFeatureTower:
                 union = src_neighbor_count + dst_source_count - common
                 output[idx, 7] = math.log1p(common)
                 output[idx, 8] = common / max(union, 1)
+                if bridge_nodes:
+                    output[idx, 11], output[idx, 12] = self._bridge_aa_ra(bridge_nodes)
+                output[idx, 13] = math.log1p(src_neighbor_count) * math.log1p(dst_source_count)
 
             if self.config.cooccur_enabled:
                 cooccur = self.index.cooccur_count(query.src, dst_int, query.time)
@@ -224,7 +236,12 @@ class StructureFeatureTower:
             src_neighbors = set(recent_unique)
             src_neighbor_count = len(src_neighbors)
         candidate_ids = tuple(int(dst) for dst in query.candidates)
-        common_counts = self._full_src_common_neighbors(query.src, src_neighbors) if src_neighbor_count else {}
+        if src_neighbor_count:
+            common_counts, aa_scores, ra_scores = self._full_src_structure(query.src, src_neighbors)
+        else:
+            common_counts, aa_scores, ra_scores = {}, {}, {}
+        if src_neighbor_count:
+            output[:, 14] = math.log1p(src_neighbor_count)
         cooccur_counts = (
             self._full_cooccur_counts(
                 query.src,
@@ -262,6 +279,9 @@ class StructureFeatureTower:
                 union = src_neighbor_count + dst_source_count - common
                 output[idx, 7] = math.log1p(common)
                 output[idx, 8] = common / max(union, 1)
+                output[idx, 11] = aa_scores.get(dst_int, 0.0)
+                output[idx, 12] = ra_scores.get(dst_int, 0.0)
+                output[idx, 13] = math.log1p(src_neighbor_count) * math.log1p(dst_source_count)
 
             if self.config.cooccur_enabled:
                 cooccur = int(cooccur_counts[idx])
@@ -300,27 +320,64 @@ class StructureFeatureTower:
         self._cache_put(self._full_dst_source_cache, dst, sources, FULL_HISTORY_CACHE_LIMIT)
         return sources
 
-    def _full_src_common_neighbors(self, src: int, src_neighbors: set[int]) -> dict[int, int]:
-        cached = self._full_src_common_neighbor_cache.get(src)
+    def _full_src_structure(
+        self, src: int, src_neighbors: set[int],
+    ) -> tuple[dict[int, int], dict[int, float], dict[int, float]]:
+        cached = self._full_src_structure_cache.get(src)
         if cached is not None:
-            self._full_src_common_neighbor_cache.move_to_end(src)
+            self._full_src_structure_cache.move_to_end(src)
             return cached
 
         chunks: list[np.ndarray] = []
-        for neighbor_src in src_neighbors:
-            if not self._is_valid_bridge_node(neighbor_src):
+        weights_aa: list[float] = []
+        weights_ra: list[float] = []
+        for z in src_neighbors:
+            if not self._is_valid_bridge_node(z):
                 continue
-            neighbor_dsts = self.index.src_dsts.get(neighbor_src)
-            if neighbor_dsts is not None and neighbor_dsts.size:
-                chunks.append(np.unique(neighbor_dsts))
-        if chunks:
-            all_dsts = np.concatenate(chunks)
-            unique, raw_counts = np.unique(all_dsts, return_counts=True)
-            counts = dict(zip(unique.tolist(), raw_counts.tolist()))
+            z_dsts = self.index.src_dsts.get(z)
+            if z_dsts is None or not z_dsts.size:
+                continue
+            deg = self._node_degree(z)
+            if deg <= 0:
+                continue
+            chunk = np.unique(z_dsts)
+            chunks.append(chunk)
+            weights_aa.append(1.0 / math.log1p(deg))
+            weights_ra.append(1.0 / deg)
+        if not chunks:
+            result = ({}, {}, {})
         else:
-            counts = {}
-        self._cache_put(self._full_src_common_neighbor_cache, src, counts, FULL_COMMON_NEIGHBOR_CACHE_LIMIT)
-        return counts
+            all_dsts = np.concatenate(chunks)
+            unique, inverse = np.unique(all_dsts, return_inverse=True)
+            counts_arr = np.zeros(len(unique), dtype=np.int32)
+            np.add.at(counts_arr, inverse, 1)
+            summed_aa = np.zeros(len(unique), dtype=np.float64)
+            summed_ra = np.zeros(len(unique), dtype=np.float64)
+            w_aa = np.concatenate([np.full(len(c), w) for c, w in zip(chunks, weights_aa)])
+            w_ra = np.concatenate([np.full(len(c), w) for c, w in zip(chunks, weights_ra)])
+            np.add.at(summed_aa, inverse, w_aa)
+            np.add.at(summed_ra, inverse, w_ra)
+            ulist = unique.tolist()
+            result = (
+                dict(zip(ulist, counts_arr.tolist())),
+                dict(zip(ulist, summed_aa.tolist())),
+                dict(zip(ulist, summed_ra.tolist())),
+            )
+        self._cache_put(self._full_src_structure_cache, src, result, FULL_COMMON_NEIGHBOR_CACHE_LIMIT)
+        return result
+
+    def _node_degree(self, node: int) -> int:
+        return len(self.index.src_dsts.get(node, ())) + len(self.index.dst_srcs.get(node, ()))
+
+    def _bridge_aa_ra(self, bridge_nodes: set[int]) -> tuple[float, float]:
+        aa = 0.0
+        ra = 0.0
+        for z in bridge_nodes:
+            deg = self._node_degree(z)
+            if deg > 0:
+                aa += 1.0 / math.log1p(deg)
+                ra += 1.0 / deg
+        return aa, ra
 
     def fit_bridge_policy(self, interactions: InteractionTable) -> None:
         self.fit_bridge_policy_from_values(

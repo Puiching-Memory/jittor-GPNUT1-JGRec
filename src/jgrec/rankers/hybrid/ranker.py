@@ -384,6 +384,15 @@ class HybridFeatureEncoder:
         while self._profile_rows >= self._profile_next_rows:
             self._profile_next_rows += FEATURE_PROFILE_INTERVAL
 
+    def clear_batch_caches(self) -> None:
+        if hasattr(self.structure, "_full_src_structure_cache"):
+            self.structure._full_src_structure_cache.clear()
+            self.structure._full_src_neighbor_cache.clear()
+            self.structure._full_dst_source_cache.clear()
+            self.structure._full_src_cooccur_cache.clear()
+        if hasattr(self.source_profile, "_deterministic_cache"):
+            self.source_profile._clear_score_caches()
+
     def compact_for_future_queries(self) -> None:
         compact_stats = getattr(self.stats, "compact_for_future_queries", None)
         if callable(compact_stats):
@@ -1424,6 +1433,7 @@ def _build_supervised_features(
             )
         candidate_checksum += batch_candidate_checksum
         del batch_features
+        encoder.clear_batch_caches()
         if isinstance(features, np.memmap) and (start // batch_size + 1) % FEATURE_MEMMAP_FLUSH_INTERVAL == 0:
             features.flush()
         release_memory()
