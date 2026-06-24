@@ -69,7 +69,9 @@ class GraphTowerConfig:
     time_decay_ratio: float = 0.05
     embedding_dim: int = 128
     layers: int = 2
-    epochs: int = 3
+    epochs: int = 10
+    early_stop_patience: int = 3
+    early_stop_val_ratio: float = 0.1
     batch_size: int = 8192
     max_graph_edges: int = 0
     max_train_edges: int = 200_000
@@ -84,7 +86,9 @@ class GraphTowerConfig:
 @dataclass(frozen=True)
 class SequenceTowerConfig:
     enabled: bool = True
-    epochs: int = 3
+    epochs: int = 10
+    early_stop_patience: int = 3
+    early_stop_val_ratio: float = 0.1
     batch_size: int = 512
     score_batch_size: int = 1024
     max_samples: int = 50_000
@@ -102,7 +106,9 @@ class TwoTowerConfig:
     enabled: bool = True
     embedding_dim: int = 64
     hidden_dim: int = 64
-    epochs: int = 3
+    epochs: int = 10
+    early_stop_patience: int = 3
+    early_stop_val_ratio: float = 0.1
     batch_size: int = 512
     score_batch_size: int = 2048
     max_samples: int = 50_000
@@ -120,7 +126,9 @@ class SourceProfileConfig:
     deterministic_enabled: bool = True
     item2vec_enabled: bool = True
     embedding_dim: int = 64
-    epochs: int = 3
+    epochs: int = 10
+    early_stop_patience: int = 3
+    early_stop_val_ratio: float = 0.1
     batch_size: int = 2048
     score_batch_size: int = 8192
     max_samples: int = 100_000
@@ -141,12 +149,12 @@ class TrainingConfig:
     supervised_feature_memmap: bool = True
     num_negatives: int = 31
     max_fit_events: int = 0
-    epochs: int = 5
+    epochs: int = 15
     train_batch_size: int = 512
     lr: float = 0.001
     weight_decay: float = 0.0
     selection_metric: str = "ap"
-    early_stop_patience: int = 10
+    early_stop_patience: int = 3
     seed: int = 42
     verbose: bool = True
     encoder_state_cache_enabled: bool = True
@@ -175,7 +183,9 @@ class TrainingConfig:
     gnn_time_decay_ratio: float = 0.05
     gnn_embedding_dim: int = 128
     gnn_layers: int = 2
-    gnn_epochs: int = 3
+    gnn_epochs: int = 10
+    gnn_early_stop_patience: int = 3
+    gnn_early_stop_val_ratio: float = 0.1
     gnn_batch_size: int = 2048
     gnn_max_graph_edges: int = 0
     gnn_max_train_edges: int = 40_000
@@ -183,7 +193,9 @@ class TrainingConfig:
     gnn_reg_weight: float = 1e-5
     gnn_cl_rate: float = 1e-4
     seq_enabled: bool = True
-    seq_epochs: int = 3
+    seq_epochs: int = 10
+    seq_early_stop_patience: int = 3
+    seq_early_stop_val_ratio: float = 0.1
     seq_batch_size: int = 512
     seq_score_batch_size: int = 1024
     seq_max_samples: int = 50_000
@@ -195,7 +207,9 @@ class TrainingConfig:
     two_tower_enabled: bool = True
     two_tower_embedding_dim: int = 64
     two_tower_hidden_dim: int = 64
-    two_tower_epochs: int = 3
+    two_tower_epochs: int = 10
+    two_tower_early_stop_patience: int = 3
+    two_tower_early_stop_val_ratio: float = 0.1
     two_tower_batch_size: int = 512
     two_tower_score_batch_size: int = 2048
     two_tower_max_samples: int = 50_000
@@ -203,7 +217,9 @@ class TrainingConfig:
     source_profile_deterministic_enabled: bool = True
     source_profile_item2vec_enabled: bool = True
     source_profile_embedding_dim: int = 64
-    source_profile_epochs: int = 3
+    source_profile_epochs: int = 10
+    source_profile_early_stop_patience: int = 3
+    source_profile_early_stop_val_ratio: float = 0.1
     source_profile_batch_size: int = 2048
     source_profile_score_batch_size: int = 8192
     source_profile_max_samples: int = 100_000
@@ -247,6 +263,8 @@ class TrainingConfig:
             embedding_dim=self.gnn_embedding_dim,
             layers=self.gnn_layers,
             epochs=self.gnn_epochs,
+            early_stop_patience=self.gnn_early_stop_patience,
+            early_stop_val_ratio=self.gnn_early_stop_val_ratio,
             batch_size=self.gnn_batch_size,
             max_graph_edges=self.gnn_max_graph_edges,
             max_train_edges=self.gnn_max_train_edges,
@@ -260,6 +278,8 @@ class TrainingConfig:
         return SequenceTowerConfig(
             enabled=self.seq_enabled,
             epochs=self.seq_epochs,
+            early_stop_patience=self.seq_early_stop_patience,
+            early_stop_val_ratio=self.seq_early_stop_val_ratio,
             batch_size=self.seq_batch_size,
             score_batch_size=self.seq_score_batch_size,
             max_samples=self.seq_max_samples,
@@ -278,6 +298,8 @@ class TrainingConfig:
             embedding_dim=self.two_tower_embedding_dim,
             hidden_dim=self.two_tower_hidden_dim,
             epochs=self.two_tower_epochs,
+            early_stop_patience=self.two_tower_early_stop_patience,
+            early_stop_val_ratio=self.two_tower_early_stop_val_ratio,
             batch_size=self.two_tower_batch_size,
             score_batch_size=self.two_tower_score_batch_size,
             max_samples=self.two_tower_max_samples,
@@ -296,6 +318,8 @@ class TrainingConfig:
             item2vec_enabled=self.source_profile_item2vec_enabled,
             embedding_dim=self.source_profile_embedding_dim,
             epochs=self.source_profile_epochs,
+            early_stop_patience=self.source_profile_early_stop_patience,
+            early_stop_val_ratio=self.source_profile_early_stop_val_ratio,
             batch_size=self.source_profile_batch_size,
             score_batch_size=self.source_profile_score_batch_size,
             max_samples=self.source_profile_max_samples,

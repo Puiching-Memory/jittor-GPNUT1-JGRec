@@ -10,6 +10,7 @@ from jgrec.core.memory import release_memory
 from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log, track
+from jgrec.rankers.common.early_stop import LossEarlyStopper
 from jgrec.rankers.common.sparse_counts import SparseCountMap
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
 
@@ -165,23 +166,53 @@ class SourceProfileTower:
         jt = _jt()
         model = _Item2VecModel(num_items=self.id_map.num_dst, embedding_dim=self.config.embedding_dim)
         optimizer = jt.nn.Adam(model.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay)
-        train_size = int(centers.shape[0])
+        full_size = int(centers.shape[0])
+        val_size = max(0, int(full_size * self.config.early_stop_val_ratio))
+        val_perm = rng.permutation(full_size)
+        val_idx = val_perm[:val_size]
+        train_idx = val_perm[val_size:]
+        train_size = train_idx.shape[0]
+        stopper = LossEarlyStopper(patience=self.config.early_stop_patience)
         for epoch in track(range(1, self.config.epochs + 1), description="source-profile", total=self.config.epochs, enabled=verbose):
             order = rng.permutation(train_size)
             losses: list[float] = []
             for start in range(0, train_size, max(int(self.config.batch_size), 1)):
-                batch_idx = order[start : start + int(self.config.batch_size)]
-                center = jt.array(centers[batch_idx], dtype=jt.int32)
-                pos = jt.array(positives[batch_idx], dtype=jt.int32)
-                neg = jt.array(negatives[batch_idx], dtype=jt.int32)
-                loss = model(center, pos, neg)
+                batch_idx = train_idx[order[start : start + int(self.config.batch_size)]]
+                loss = self._item2vec_loss(model, centers, positives, negatives, batch_idx)
                 optimizer.step(loss)
                 losses.append(float(loss.item()))
-            log(f"[source-profile] epoch={epoch} loss={float(np.mean(losses)) if losses else 0.0:.5f}", enabled=verbose)
+            mean_loss = float(np.mean(losses)) if losses else 0.0
+            val_loss = self._item2vec_val_loss(model, centers, positives, negatives, val_idx) if val_size > 0 else 0.0
+            log(f"[source-profile] epoch={epoch} loss={mean_loss:.5f} val_loss={val_loss:.5f}", enabled=verbose)
             release_memory()
+            stop_signal = val_loss if val_size > 0 else mean_loss
+            if stopper.update(epoch, stop_signal, model):
+                log(f"[source-profile] early_stop epoch={epoch} best_epoch={stopper.best_epoch} best_val={stopper.best_loss:.5f}", enabled=verbose)
+                break
+        stopper.restore_best(model)
 
         with jt.no_grad():
             self.embeddings = np.asarray(model.item_embedding.weight.numpy(), dtype=np.float32)
+
+    @staticmethod
+    def _item2vec_loss(model, centers, positives, negatives, batch_idx):
+        jt = _jt()
+        center = jt.array(centers[batch_idx], dtype=jt.int32)
+        pos = jt.array(positives[batch_idx], dtype=jt.int32)
+        neg = jt.array(negatives[batch_idx], dtype=jt.int32)
+        return model(center, pos, neg)
+
+    def _item2vec_val_loss(self, model, centers, positives, negatives, val_idx) -> float:
+        if val_idx.shape[0] == 0:
+            return 0.0
+        jt = _jt()
+        with jt.no_grad():
+            losses: list[float] = []
+            for start in range(0, val_idx.shape[0], max(int(self.config.batch_size), 1)):
+                batch_idx = val_idx[start : start + int(self.config.batch_size)]
+                loss = self._item2vec_loss(model, centers, positives, negatives, batch_idx)
+                losses.append(float(loss.item()))
+            return float(np.mean(losses)) if losses else 0.0
 
     def _fill_deterministic_features(
         self,

@@ -9,6 +9,7 @@ import numpy as np
 from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log, track
+from jgrec.rankers.common.early_stop import LossEarlyStopper
 
 from .config import SEQUENCE_FEATURE_NAMES, SequenceTowerConfig
 
@@ -46,28 +47,54 @@ class SequenceTower:
             dropout=self.config.dropout,
         )
         optimizer = jt.nn.Adam(self.model.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay)
-        train_size = seqs.shape[0]
+        full_size = seqs.shape[0]
+        val_size = max(0, int(full_size * self.config.early_stop_val_ratio))
+        val_perm = rng.permutation(full_size)
+        val_idx = val_perm[:val_size]
+        train_idx = val_perm[val_size:]
+        train_size = train_idx.shape[0]
 
         epochs = range(1, self.config.epochs + 1)
+        stopper = LossEarlyStopper(patience=self.config.early_stop_patience)
         for epoch in track(epochs, description="gru-seq", total=self.config.epochs, enabled=verbose):
             order = rng.permutation(train_size)
             losses: list[float] = []
             for start in range(0, train_size, self.config.batch_size):
-                batch_idx = order[start : start + self.config.batch_size]
-                seq_output = self.model.sequence_vectors(
-                    jt.array(seqs[batch_idx], dtype=jt.int32),
-                    jt.array(lengths[batch_idx], dtype=jt.int32),
-                )
-                pos_emb = self.model.item_vectors(jt.array(pos_items[batch_idx], dtype=jt.int32))
-                neg_emb = self.model.item_vectors(jt.array(neg_items[batch_idx], dtype=jt.int32))
-                pos_scores = (seq_output * pos_emb).sum(dim=-1) / self.model.score_scale
-                neg_scores = (seq_output * neg_emb).sum(dim=-1) / self.model.score_scale
-                loss = -jt.log(jt.sigmoid(pos_scores - neg_scores) + 1e-8).mean()
+                batch_idx = train_idx[order[start : start + self.config.batch_size]]
+                loss = self._sequence_loss(seqs, lengths, pos_items, neg_items, batch_idx)
                 optimizer.step(loss)
                 losses.append(float(loss.item()))
 
             mean_loss = float(np.mean(losses)) if losses else 0.0
-            log(f"[gru-seq] epoch={epoch} loss={mean_loss:.5f}", enabled=verbose)
+            val_loss = self._sequence_val_loss(seqs, lengths, pos_items, neg_items, val_idx) if val_size > 0 else 0.0
+            log(f"[gru-seq] epoch={epoch} loss={mean_loss:.5f} val_loss={val_loss:.5f}", enabled=verbose)
+            stop_signal = val_loss if val_size > 0 else mean_loss
+            if stopper.update(epoch, stop_signal, self.model):
+                log(f"[gru-seq] early_stop epoch={epoch} best_epoch={stopper.best_epoch} best_val={stopper.best_loss:.5f}", enabled=verbose)
+                break
+        stopper.restore_best(self.model)
+
+    def _sequence_loss(self, seqs, lengths, pos_items, neg_items, batch_idx) -> "jt.Var":
+        seq_output = self.model.sequence_vectors(
+            jt.array(seqs[batch_idx], dtype=jt.int32),
+            jt.array(lengths[batch_idx], dtype=jt.int32),
+        )
+        pos_emb = self.model.item_vectors(jt.array(pos_items[batch_idx], dtype=jt.int32))
+        neg_emb = self.model.item_vectors(jt.array(neg_items[batch_idx], dtype=jt.int32))
+        pos_scores = (seq_output * pos_emb).sum(dim=-1) / self.model.score_scale
+        neg_scores = (seq_output * neg_emb).sum(dim=-1) / self.model.score_scale
+        return -jt.log(jt.sigmoid(pos_scores - neg_scores) + 1e-8).mean()
+
+    def _sequence_val_loss(self, seqs, lengths, pos_items, neg_items, val_idx) -> float:
+        if val_idx.shape[0] == 0:
+            return 0.0
+        with jt.no_grad():
+            losses: list[float] = []
+            for start in range(0, val_idx.shape[0], self.config.batch_size):
+                batch_idx = val_idx[start : start + self.config.batch_size]
+                loss = self._sequence_loss(seqs, lengths, pos_items, neg_items, batch_idx)
+                losses.append(float(loss.item()))
+            return float(np.mean(losses)) if losses else 0.0
 
     def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:

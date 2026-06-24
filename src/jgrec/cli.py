@@ -47,12 +47,12 @@ class CLIConfig:
     supervised_feature_memmap: bool = False
     num_negatives: int = 31
     max_fit_events: int = 0
-    epochs: int = 5
+    epochs: int = 15
     train_batch_size: int = 512
     lr: float = 0.001
     weight_decay: float = 0.0
     selection_metric: SelectionMetric = "ap"
-    early_stop: int = 10
+    early_stop: int = 3
     fusion_hidden_dim: int = 64
     disable_gnn: bool = False
     gnn_model: GNNModel = "xsimgcl"
@@ -60,7 +60,8 @@ class CLIConfig:
     gnn_time_decay_ratio: float = 0.05
     gnn_embedding_dim: int = 128
     gnn_layers: int = 2
-    gnn_epochs: int = 3
+    gnn_epochs: int = 10
+    gnn_early_stop_patience: int = 3
     gnn_batch_size: int = 2048
     gnn_max_graph_edges: int = 0
     gnn_max_train_edges: int = 40_000
@@ -68,7 +69,8 @@ class CLIConfig:
     gnn_reg_weight: float = 1e-5
     gnn_cl_rate: float = 1e-4
     disable_seq: bool = False
-    seq_epochs: int = 3
+    seq_epochs: int = 10
+    seq_early_stop_patience: int = 3
     seq_batch_size: int = 512
     seq_score_batch_size: int = 1024
     seq_max_samples: int = 50_000
@@ -80,7 +82,8 @@ class CLIConfig:
     disable_two_tower: bool = False
     two_tower_embedding_dim: int = 64
     two_tower_hidden_dim: int = 64
-    two_tower_epochs: int = 3
+    two_tower_epochs: int = 10
+    two_tower_early_stop_patience: int = 3
     two_tower_batch_size: int = 512
     two_tower_score_batch_size: int = 2048
     two_tower_max_samples: int = 50_000
@@ -118,7 +121,8 @@ class CLIConfig:
     disable_source_profile_deterministic: bool = False
     disable_source_profile_item2vec: bool = False
     source_profile_embedding_dim: int = 64
-    source_profile_epochs: int = 3
+    source_profile_epochs: int = 10
+    source_profile_early_stop_patience: int = 3
     source_profile_batch_size: int = 2048
     source_profile_score_batch_size: int = 8192
     source_profile_max_samples: int = 100_000
@@ -265,6 +269,7 @@ def _ranker_config(args: CLIConfig):
         source_profile_item2vec_enabled=not args.disable_source_profile_item2vec,
         source_profile_embedding_dim=args.source_profile_embedding_dim,
         source_profile_epochs=args.source_profile_epochs,
+        source_profile_early_stop_patience=args.source_profile_early_stop_patience,
         source_profile_batch_size=args.source_profile_batch_size,
         source_profile_score_batch_size=args.source_profile_score_batch_size,
         source_profile_max_samples=args.source_profile_max_samples,
@@ -278,6 +283,7 @@ def _ranker_config(args: CLIConfig):
         gnn_embedding_dim=args.gnn_embedding_dim,
         gnn_layers=args.gnn_layers,
         gnn_epochs=args.gnn_epochs,
+        gnn_early_stop_patience=args.gnn_early_stop_patience,
         gnn_batch_size=args.gnn_batch_size,
         gnn_max_graph_edges=args.gnn_max_graph_edges,
         gnn_max_train_edges=args.gnn_max_train_edges,
@@ -286,6 +292,7 @@ def _ranker_config(args: CLIConfig):
         gnn_cl_rate=args.gnn_cl_rate,
         seq_enabled=not args.disable_seq,
         seq_epochs=args.seq_epochs,
+        seq_early_stop_patience=args.seq_early_stop_patience,
         seq_batch_size=args.seq_batch_size,
         seq_score_batch_size=args.seq_score_batch_size,
         seq_max_samples=args.seq_max_samples,
@@ -298,6 +305,7 @@ def _ranker_config(args: CLIConfig):
         two_tower_embedding_dim=args.two_tower_embedding_dim,
         two_tower_hidden_dim=args.two_tower_hidden_dim,
         two_tower_epochs=args.two_tower_epochs,
+        two_tower_early_stop_patience=args.two_tower_early_stop_patience,
         two_tower_batch_size=args.two_tower_batch_size,
         two_tower_score_batch_size=args.two_tower_score_batch_size,
         two_tower_max_samples=args.two_tower_max_samples,

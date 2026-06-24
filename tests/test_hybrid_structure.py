@@ -55,9 +55,13 @@ def test_structure_features_use_temporal_cutoff():
     assert features[1, FEATURE["jaccard"]] == np.float32(1.0)
     assert features[1, FEATURE["cooccur_score"]] == 0.0
     assert features[1, FEATURE["transition_score"]] == 0.0
+    assert features[1, FEATURE["aa_log_rank"]] == np.float32(1.0)
 
-    assert np.all(features[2, :FEATURE["src_degree"]] == 0.0)
-    assert features[2, FEATURE["src_degree"]] == np.float32(math.log1p(1))
+    assert features[0, FEATURE["adamic_adar_log"]] == 0.0
+    assert features[0, FEATURE["resource_allocation_log"]] == 0.0
+    assert features[0, FEATURE["aa_log_rank"]] == 0.0
+
+    assert np.all(features[2] == 0.0)
 
 
 def test_structure_features_after_training_window_include_full_history():
@@ -321,24 +325,24 @@ def test_structure_link_prediction_features():
 
     # Full-history path (time > max_time): bridges {5, 6}
     # degree(5)=3 (out:[1,7] in:[1]), degree(6)=2 (out:[7] in:[1])
+    # node_degree(7) = 0 (out) + 3 (in: 5, 6, 3) = 3
+    aa_full = 1.0 / math.log1p(3) + 1.0 / math.log1p(2)
+    ra_full = 1.0 / 3 + 1.0 / 2
     full = tower.features_for_queries([Query(src=1, time=60, candidates=(7,))])[0]
-    assert full[0, FEATURE["adamic_adar"]] == np.float32(
-        1.0 / math.log1p(3) + 1.0 / math.log1p(2)
-    )
-    assert full[0, FEATURE["resource_allocation"]] == np.float32(1.0 / 3 + 1.0 / 2)
-    assert full[0, FEATURE["preferential_attachment"]] == np.float32(
-        math.log1p(2) * math.log1p(3)
-    )
-    assert full[0, FEATURE["src_degree"]] == np.float32(math.log1p(2))
+    assert full[0, FEATURE["adamic_adar_log"]] == np.float32(math.log1p(aa_full))
+    assert full[0, FEATURE["resource_allocation_log"]] == np.float32(math.log1p(ra_full))
+    assert full[0, FEATURE["dst_degree_log"]] == np.float32(math.log1p(3))
+    # Single candidate -> rank stays 0
+    assert full[0, FEATURE["aa_log_rank"]] == 0.0
 
     # Cutoff path (time=35): only bridge {5} visible for dst=7
+    aa_cut = 1.0 / math.log1p(3)
+    ra_cut = 1.0 / 3
     cutoff = tower.features_for_queries([Query(src=1, time=35, candidates=(7,))])[0]
-    assert cutoff[0, FEATURE["adamic_adar"]] == np.float32(1.0 / math.log1p(3))
-    assert cutoff[0, FEATURE["resource_allocation"]] == np.float32(1.0 / 3)
-    assert cutoff[0, FEATURE["preferential_attachment"]] == np.float32(
-        math.log1p(2) * math.log1p(1)
-    )
-    assert cutoff[0, FEATURE["src_degree"]] == np.float32(math.log1p(2))
+    assert cutoff[0, FEATURE["adamic_adar_log"]] == np.float32(math.log1p(aa_cut))
+    assert cutoff[0, FEATURE["resource_allocation_log"]] == np.float32(math.log1p(ra_cut))
+    assert cutoff[0, FEATURE["dst_degree_log"]] == np.float32(math.log1p(3))
+    assert cutoff[0, FEATURE["aa_log_rank"]] == 0.0
 
 
 def test_hybrid_feature_masks_include_structure_groups():
