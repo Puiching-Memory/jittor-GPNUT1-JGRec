@@ -22,6 +22,7 @@ from .submission import expected_test_rows, validate_submission_file, write_zip
 ModelName = Literal["hybrid", "craft", "temporal-graph"]
 SelectionMetric = Literal["ap", "mrr"]
 GNNModel = Literal["xsimgcl", "lightgcn"]
+FusionMode = Literal["mlp", "lgbm", "ensemble"]
 GNNEdgeWeighting = Literal["none", "repeat", "time_decay"]
 CandidateProtocol = Literal["random", "test_like"]
 CandidateRecentFeatureGroup = Literal["none", "recency_rank"]
@@ -54,6 +55,7 @@ class CLIConfig:
     selection_metric: SelectionMetric = "ap"
     early_stop: int = 3
     fusion_hidden_dim: int = 64
+    fusion_mode: FusionMode = "mlp"
     disable_gnn: bool = False
     gnn_model: GNNModel = "xsimgcl"
     gnn_edge_weighting: GNNEdgeWeighting = "none"
@@ -310,6 +312,7 @@ def _ranker_config(args: CLIConfig):
         two_tower_score_batch_size=args.two_tower_score_batch_size,
         two_tower_max_samples=args.two_tower_max_samples,
         fusion_hidden_dim=args.fusion_hidden_dim,
+        fusion_mode=args.fusion_mode,
         hard_negative_ratio=args.hard_negative_ratio,
         popular_negative_ratio=args.popular_negative_ratio,
         negative_sampling_workers=args.negative_sampling_workers,

@@ -228,6 +228,7 @@ class TrainingConfig:
     source_profile_predict_history_limit: int = 0
     structure_predict_neighbor_limit: int = 0
     fusion_hidden_dim: int = 64
+    fusion_mode: str = "mlp"
     hard_negative_ratio: float = 0.5
     popular_negative_ratio: float = 0.25
     negative_sampling_workers: int = 0
