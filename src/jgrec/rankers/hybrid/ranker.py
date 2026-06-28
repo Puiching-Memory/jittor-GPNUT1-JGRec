@@ -664,7 +664,8 @@ class TemporalHybridRanker:
 
             lgbm_logits = predict_logits_lgbm(self.lgbm_result.model_text, selected)
             lgbm_probs = _softmax(lgbm_logits)
-            probs = (probs + lgbm_probs) / 2.0
+            w = self.lgbm_result.mlp_weight
+            probs = w * probs + (1.0 - w) * lgbm_probs
 
         return probs.astype(np.float64, copy=False)
 
@@ -779,6 +780,7 @@ class TemporalHybridRanker:
         )
         lgbm_result = self._fit_lgbm_fusion(
             train_features, val_features, result.feature_indices, result.candidate_name, config,
+            mlp_model=fusion, mlp_result=result,
         )
         del train_features
         del val_features
@@ -810,6 +812,8 @@ class TemporalHybridRanker:
         feature_indices: tuple[int, ...],
         candidate_name: str,
         config: TrainingConfig,
+        mlp_model: FusionMLP | None = None,
+        mlp_result: FusionResult | None = None,
     ) -> LGBMFusionResult | None:
         if config.fusion_mode not in ("lgbm", "ensemble"):
             return None
@@ -824,9 +828,15 @@ class TemporalHybridRanker:
             feature_indices=feature_indices,
             candidate_name=candidate_name,
         )
+        mlp_weight = _find_ensemble_weight(
+            mlp_model, mlp_result, result, val_features, feature_indices, config,
+        )
+        from dataclasses import replace as dc_replace  # noqa: PLC0415
+        result = dc_replace(result, mlp_weight=mlp_weight)
         log_event(
             f"[fusion-lgbm-select] chosen={result.candidate_name} "
-            f"val_ap={result.best_val_ap:.5f} val_mrr={result.best_val_mrr:.5f}",
+            f"val_ap={result.best_val_ap:.5f} val_mrr={result.best_val_mrr:.5f} "
+            f"mlp_weight={mlp_weight:.2f}",
             enabled=config.verbose,
         )
         log_memory("lgbm_fusion_done", enabled=config.verbose)
@@ -1089,6 +1099,47 @@ def _selected_report_metric(result: FusionResult, metric: str) -> float:
     if normalized == "mrr":
         return result.best_val_mrr
     raise ValueError(f"unsupported fusion selection metric: {metric}")
+
+
+def _find_ensemble_weight(
+    mlp_model: "FusionMLP | None",
+    mlp_result: "FusionResult | None",
+    lgbm_result: "LGBMFusionResult",
+    val_features: np.ndarray,
+    feature_indices: tuple[int, ...],
+    config: "TrainingConfig",
+) -> float:
+    if mlp_model is None or mlp_result is None:
+        return 0.5
+    from .fusion import predict_logits  # noqa: PLC0415
+    from .fusion_lgbm import predict_logits_lgbm  # noqa: PLC0415
+
+    selected = val_features[:, :, feature_indices] if feature_indices else val_features
+    mlp_probs = _softmax(predict_logits(mlp_model, selected, mlp_result.mean, mlp_result.std))
+    lgbm_probs = _softmax(predict_logits_lgbm(lgbm_result.model_text, selected))
+
+    metric = config.selection_metric.lower()
+    best_w, best_score = 0.5, -1.0
+    for w_int in range(0, 11):
+        w = w_int / 10.0
+        blended = w * mlp_probs + (1.0 - w) * lgbm_probs
+        score = _mrr_from_probs(blended) if metric == "mrr" else _ap_from_probs(blended)
+        if score > best_score:
+            best_w, best_score = w, score
+    log_event(f"[ensemble-weight] best_w={best_w:.1f} {metric}={best_score:.5f}", enabled=config.verbose)
+    return best_w
+
+
+def _mrr_from_probs(probs: np.ndarray) -> float:
+    ranks = 1 + (probs[:, 1:] > probs[:, 0:1]).sum(axis=1)
+    return float(np.mean(1.0 / ranks))
+
+
+def _ap_from_probs(probs: np.ndarray) -> float:
+    from sklearn.metrics import average_precision_score  # noqa: PLC0415
+    labels = np.zeros(probs.shape, dtype=np.int8)
+    labels[:, 0] = 1
+    return float(average_precision_score(labels.ravel(), probs.ravel()))
 
 
 def _softmax(logits: np.ndarray) -> np.ndarray:

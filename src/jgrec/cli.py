@@ -62,7 +62,7 @@ class CLIConfig:
     gnn_time_decay_ratio: float = 0.05
     gnn_embedding_dim: int = 128
     gnn_layers: int = 2
-    gnn_epochs: int = 10
+    gnn_epochs: int = 50
     gnn_early_stop_patience: int = 3
     gnn_batch_size: int = 2048
     gnn_max_graph_edges: int = 0
@@ -71,7 +71,7 @@ class CLIConfig:
     gnn_reg_weight: float = 1e-5
     gnn_cl_rate: float = 1e-4
     disable_seq: bool = False
-    seq_epochs: int = 10
+    seq_epochs: int = 50
     seq_early_stop_patience: int = 3
     seq_batch_size: int = 512
     seq_score_batch_size: int = 1024
@@ -84,7 +84,7 @@ class CLIConfig:
     disable_two_tower: bool = False
     two_tower_embedding_dim: int = 64
     two_tower_hidden_dim: int = 64
-    two_tower_epochs: int = 10
+    two_tower_epochs: int = 50
     two_tower_early_stop_patience: int = 3
     two_tower_batch_size: int = 512
     two_tower_score_batch_size: int = 2048
@@ -123,7 +123,7 @@ class CLIConfig:
     disable_source_profile_deterministic: bool = False
     disable_source_profile_item2vec: bool = False
     source_profile_embedding_dim: int = 64
-    source_profile_epochs: int = 10
+    source_profile_epochs: int = 50
     source_profile_early_stop_patience: int = 3
     source_profile_batch_size: int = 2048
     source_profile_score_batch_size: int = 8192

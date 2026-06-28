@@ -16,6 +16,7 @@ class LGBMFusionResult:
     model_text: str
     feature_indices: tuple[int, ...]
     candidate_name: str
+    mlp_weight: float = 0.5
 
 
 def fit_fusion_lgbm(

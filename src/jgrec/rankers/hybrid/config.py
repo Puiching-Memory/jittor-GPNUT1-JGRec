@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from .fusion import FusionConfig
 
 GRAPH_WINDOW_NAMES = ("gnn_full", "gnn_recent", "gnn_short")
-SEQUENCE_FEATURE_NAMES = ("gru_score",)
+SEQUENCE_FEATURE_NAMES = ("gru_dot", "gru_cosine", "gru_decay_dot")
 TWO_TOWER_FEATURE_NAMES = ("two_tower_dot", "two_tower_cosine")
 TARGET_WINDOW_FRACTION_LABELS = ("001", "005", "020", "100")
 TARGET_WINDOW_FEATURE_NAMES = tuple(
@@ -69,7 +69,7 @@ class GraphTowerConfig:
     time_decay_ratio: float = 0.05
     embedding_dim: int = 128
     layers: int = 2
-    epochs: int = 10
+    epochs: int = 50
     early_stop_patience: int = 3
     early_stop_val_ratio: float = 0.1
     batch_size: int = 8192
@@ -86,7 +86,7 @@ class GraphTowerConfig:
 @dataclass(frozen=True)
 class SequenceTowerConfig:
     enabled: bool = True
-    epochs: int = 10
+    epochs: int = 50
     early_stop_patience: int = 3
     early_stop_val_ratio: float = 0.1
     batch_size: int = 512
@@ -106,7 +106,7 @@ class TwoTowerConfig:
     enabled: bool = True
     embedding_dim: int = 64
     hidden_dim: int = 64
-    epochs: int = 10
+    epochs: int = 50
     early_stop_patience: int = 3
     early_stop_val_ratio: float = 0.1
     batch_size: int = 512
@@ -126,7 +126,7 @@ class SourceProfileConfig:
     deterministic_enabled: bool = True
     item2vec_enabled: bool = True
     embedding_dim: int = 64
-    epochs: int = 10
+    epochs: int = 50
     early_stop_patience: int = 3
     early_stop_val_ratio: float = 0.1
     batch_size: int = 2048
