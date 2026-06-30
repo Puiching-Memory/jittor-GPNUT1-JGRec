@@ -10,6 +10,7 @@ from jgrec.core.memory import release_memory
 from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log, track
+from jgrec.rankers.common.early_stop import LossEarlyStopper
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
 
 from .config import TWO_TOWER_FEATURE_NAMES, TwoTowerConfig
@@ -123,54 +124,45 @@ class TwoTower:
             hidden_dim=self.config.hidden_dim,
         )
         optimizer = jt.nn.Adam(self.model.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay)
-        train_size = len(sampled_events)
-        negative_seeds = rng.integers(0, 2**32 - 1, size=train_size, dtype=np.uint32)
+        full_size = len(sampled_events)
+        negative_seeds = rng.integers(0, 2**32 - 1, size=full_size, dtype=np.uint32)
         training_context = _TowerTrainingContext.from_interactions(
             interactions=interactions,
             id_map=self.id_map,
             index=self.index,
         )
+        val_size = max(0, int(full_size * self.config.early_stop_val_ratio))
+        val_perm = rng.permutation(full_size)
+        val_idx = val_perm[:val_size]
+        train_idx = val_perm[val_size:]
+        train_size = train_idx.shape[0]
 
         epochs = range(1, self.config.epochs + 1)
+        stopper = LossEarlyStopper(patience=self.config.early_stop_patience)
         for epoch in track(epochs, description="two-tower", total=self.config.epochs, enabled=verbose):
             order = rng.permutation(train_size)
             losses: list[float] = []
             for start in range(0, train_size, self.config.batch_size):
-                batch_idx = order[start : start + self.config.batch_size]
-                samples = _build_training_batch_for_events(
-                    events=sampled_events.take(batch_idx),
-                    negative_seeds=negative_seeds[batch_idx],
-                    training_context=training_context,
-                    config=self.config,
+                batch_idx = train_idx[order[start : start + self.config.batch_size]]
+                loss = self._two_tower_loss(
+                    sampled_events, batch_idx, negative_seeds, training_context, train=True,
                 )
-                logits = self.model(
-                    jt.array(samples.src_ids, dtype=jt.int32),
-                    jt.array(samples.src_activity_buckets, dtype=jt.int32),
-                    jt.array(samples.src_recency_buckets, dtype=jt.int32),
-                    jt.array(samples.src_time_buckets, dtype=jt.int32),
-                    jt.array(samples.dst_ids, dtype=jt.int32),
-                    jt.array(samples.dst_popularity_buckets, dtype=jt.int32),
-                    jt.array(samples.dst_recency_buckets, dtype=jt.int32),
-                    jt.array(samples.dst_time_buckets, dtype=jt.int32),
-                )
-                targets = np.zeros((samples.src_ids.shape[0], logits.shape[1]), dtype=np.float32)
-                targets[:, 0] = 1.0
-                target_var = jt.array(targets, dtype=jt.float32)
-                probs = jt.sigmoid(logits)
-                loss = -(
-                    target_var * jt.log(probs + 1e-8)
-                    + (1.0 - target_var) * jt.log(1.0 - probs + 1e-8)
-                ).mean()
                 optimizer.step(loss)
                 losses.append(float(loss.item()))
-                del samples
                 if start and start % max(self.config.batch_size * 16, 1) == 0:
                     release_memory()
 
             mean_loss = float(np.mean(losses)) if losses else 0.0
-            log(f"[two-tower] epoch={epoch} loss={mean_loss:.5f}", enabled=verbose)
+            val_loss = self._two_tower_val_loss(sampled_events, val_idx, negative_seeds, training_context) if val_size > 0 else 0.0
+            log(f"[two-tower] epoch={epoch} loss={mean_loss:.5f} val_loss={val_loss:.5f}", enabled=verbose)
             release_memory()
+            stop_signal = val_loss if val_size > 0 else mean_loss
+            if stopper.update(epoch, stop_signal, self.model):
+                log(f"[two-tower] early_stop epoch={epoch} best_epoch={stopper.best_epoch} best_val={stopper.best_loss:.5f}", enabled=verbose)
+                break
+        stopper.restore_best(self.model)
 
+        del train_idx, val_idx, val_perm
         if owns_index:
             self.index.transition_times = {}
             self.index.transitions_by_left = {}
@@ -181,6 +173,61 @@ class TwoTower:
         if not queries:
             return np.empty((0, 0, len(TWO_TOWER_FEATURE_NAMES)), dtype=np.float32)
         return self.scores_for_query_array(TestQueryArray.from_queries(queries))
+
+    def _two_tower_loss(
+        self,
+        sampled_events,
+        batch_idx: np.ndarray,
+        negative_seeds: np.ndarray,
+        training_context,
+        *,
+        train: bool,
+    ) -> "jt.Var":
+        samples = _build_training_batch_for_events(
+            events=sampled_events.take(batch_idx),
+            negative_seeds=negative_seeds[batch_idx],
+            training_context=training_context,
+            config=self.config,
+        )
+        logits = self.model(
+            jt.array(samples.src_ids, dtype=jt.int32),
+            jt.array(samples.src_activity_buckets, dtype=jt.int32),
+            jt.array(samples.src_recency_buckets, dtype=jt.int32),
+            jt.array(samples.src_time_buckets, dtype=jt.int32),
+            jt.array(samples.dst_ids, dtype=jt.int32),
+            jt.array(samples.dst_popularity_buckets, dtype=jt.int32),
+            jt.array(samples.dst_recency_buckets, dtype=jt.int32),
+            jt.array(samples.dst_time_buckets, dtype=jt.int32),
+        )
+        targets = np.zeros((samples.src_ids.shape[0], logits.shape[1]), dtype=np.float32)
+        targets[:, 0] = 1.0
+        target_var = jt.array(targets, dtype=jt.float32)
+        probs = jt.sigmoid(logits)
+        loss = -(
+            target_var * jt.log(probs + 1e-8)
+            + (1.0 - target_var) * jt.log(1.0 - probs + 1e-8)
+        ).mean()
+        del samples
+        return loss
+
+    def _two_tower_val_loss(
+        self,
+        sampled_events,
+        val_idx: np.ndarray,
+        negative_seeds: np.ndarray,
+        training_context,
+    ) -> float:
+        if val_idx.shape[0] == 0:
+            return 0.0
+        with jt.no_grad():
+            losses: list[float] = []
+            for start in range(0, val_idx.shape[0], self.config.batch_size):
+                batch_idx = val_idx[start : start + self.config.batch_size]
+                loss = self._two_tower_loss(
+                    sampled_events, batch_idx, negative_seeds, training_context, train=False,
+                )
+                losses.append(float(loss.item()))
+            return float(np.mean(losses)) if losses else 0.0
 
     def scores_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
         if not queries:

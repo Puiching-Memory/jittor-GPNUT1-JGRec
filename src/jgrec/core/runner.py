@@ -88,10 +88,7 @@ def _write_batch(output_file, ranker: Ranker, batch: TestQueryArray) -> int:
         )
     np.clip(probs_batch, 0.0, 1.0, out=probs_batch)
     np.savetxt(output_file, probs_batch, delimiter=",", fmt="%.8f")
-    batch_rows = len(batch)
-    del probs_batch
-    release_memory()
-    return batch_rows
+    return len(batch)
 
 
 def _log_predict_progress(

@@ -56,6 +56,7 @@ from .structure import STRUCTURE_FEATURE_NAMES, StructureFeatureTower
 
 if TYPE_CHECKING:
     from .fusion import FusionMLP, FusionResult
+    from .fusion_lgbm import LGBMFusionResult
 
 _FEATURE_MEMMAP_TEMP_FILES: list[Any] = []
 FEATURE_PROFILE_INTERVAL = 10_000
@@ -384,6 +385,15 @@ class HybridFeatureEncoder:
         while self._profile_rows >= self._profile_next_rows:
             self._profile_next_rows += FEATURE_PROFILE_INTERVAL
 
+    def clear_batch_caches(self) -> None:
+        if hasattr(self.structure, "_full_src_structure_cache"):
+            self.structure._full_src_structure_cache.clear()
+            self.structure._full_src_neighbor_cache.clear()
+            self.structure._full_dst_source_cache.clear()
+            self.structure._full_src_cooccur_cache.clear()
+        if hasattr(self.source_profile, "_deterministic_cache"):
+            self.source_profile._clear_score_caches()
+
     def compact_for_future_queries(self) -> None:
         compact_stats = getattr(self.stats, "compact_for_future_queries", None)
         if callable(compact_stats):
@@ -490,6 +500,7 @@ class TemporalHybridRanker:
         self.encoder: HybridFeatureEncoder | None = None
         self.fusion: FusionMLP | None = None
         self.fusion_result: FusionResult | None = None
+        self.lgbm_result: LGBMFusionResult | None = None
         self.training_report: TrainingReport | None = None
         self.feature_names: tuple[str, ...] = ()
         self._fusion_hidden_dim = 64
@@ -518,9 +529,12 @@ class TemporalHybridRanker:
         training_config = self._apply_auto_strategy(interactions, training_config)
         log_memory("hybrid_fit_start", enabled=training_config.verbose)
         log(f"[hybrid-fit] start events={len(interactions)}", enabled=training_config.verbose)
-        fusion, fusion_result, report, encoder_cache, cache_config = self._learn_fusion(interactions, training_config)
+        fusion, fusion_result, lgbm_result, report, encoder_cache, cache_config = self._learn_fusion(
+            interactions, training_config,
+        )
         self.fusion = fusion
         self.fusion_result = fusion_result
+        self.lgbm_result = lgbm_result
 
         rng = np.random.default_rng(training_config.seed + 10_000)
         final_config = _config_for_selected_features(training_config, fusion_result.feature_indices)
@@ -641,12 +655,18 @@ class TemporalHybridRanker:
         from .fusion import predict_logits  # noqa: PLC0415
 
         features = self.encoder.features_for_queries(queries)
-        if self.fusion_result.feature_indices:
-            features = features[:, :, self.fusion_result.feature_indices]
-        logits = predict_logits(self.fusion, features, self.fusion_result.mean, self.fusion_result.std)
-        logits = logits - logits.max(axis=1, keepdims=True)
-        exp_logits = np.exp(logits)
-        probs = exp_logits / exp_logits.sum(axis=1, keepdims=True)
+        selected = features[:, :, self.fusion_result.feature_indices] if self.fusion_result.feature_indices else features
+        mlp_logits = predict_logits(self.fusion, selected, self.fusion_result.mean, self.fusion_result.std)
+        probs = _softmax(mlp_logits)
+
+        if self.lgbm_result is not None:
+            from .fusion_lgbm import predict_logits_lgbm  # noqa: PLC0415
+
+            lgbm_logits = predict_logits_lgbm(self.lgbm_result.model_text, selected)
+            lgbm_probs = _softmax(lgbm_logits)
+            w = self.lgbm_result.mlp_weight
+            probs = w * probs + (1.0 - w) * lgbm_probs
+
         return probs.astype(np.float64, copy=False)
 
     def _learn_fusion(
@@ -713,6 +733,7 @@ class TemporalHybridRanker:
             label="train_features",
         )
         del train_encoder
+        release_memory()
         log_event(
             f"[hybrid-fit] train_features shape={train_features.shape} elapsed={perf_counter() - feature_start:.1f}s",
             enabled=config.verbose,
@@ -757,6 +778,10 @@ class TemporalHybridRanker:
             rng=rng,
             verbose=config.verbose,
         )
+        lgbm_result = self._fit_lgbm_fusion(
+            train_features, val_features, result.feature_indices, result.candidate_name, config,
+            mlp_model=fusion, mlp_result=result,
+        )
         del train_features
         del val_features
         _release_feature_memmaps()
@@ -778,7 +803,44 @@ class TemporalHybridRanker:
                 "test_candidate_negative_ratio": config.test_candidate_negative_ratio,
             },
         )
-        return fusion, result, report, encoder_cache, supervised_encoder_config
+        return fusion, result, lgbm_result, report, encoder_cache, supervised_encoder_config
+
+    def _fit_lgbm_fusion(
+        self,
+        train_features: np.ndarray,
+        val_features: np.ndarray,
+        feature_indices: tuple[int, ...],
+        candidate_name: str,
+        config: TrainingConfig,
+        mlp_model: FusionMLP | None = None,
+        mlp_result: FusionResult | None = None,
+    ) -> LGBMFusionResult | None:
+        if config.fusion_mode not in ("lgbm", "ensemble"):
+            return None
+        from .fusion_lgbm import fit_fusion_lgbm  # noqa: PLC0415
+
+        log_memory("lgbm_fusion_start", enabled=config.verbose)
+        result = fit_fusion_lgbm(
+            train_features=train_features,
+            val_features=val_features,
+            selection_metric=config.selection_metric,
+            verbose=config.verbose,
+            feature_indices=feature_indices,
+            candidate_name=candidate_name,
+        )
+        mlp_weight = _find_ensemble_weight(
+            mlp_model, mlp_result, result, val_features, feature_indices, config,
+        )
+        from dataclasses import replace as dc_replace  # noqa: PLC0415
+        result = dc_replace(result, mlp_weight=mlp_weight)
+        log_event(
+            f"[fusion-lgbm-select] chosen={result.candidate_name} "
+            f"val_ap={result.best_val_ap:.5f} val_mrr={result.best_val_mrr:.5f} "
+            f"mlp_weight={mlp_weight:.2f}",
+            enabled=config.verbose,
+        )
+        log_memory("lgbm_fusion_done", enabled=config.verbose)
+        return result
 
     def _fit_best_fusion(
         self,
@@ -1037,6 +1099,53 @@ def _selected_report_metric(result: FusionResult, metric: str) -> float:
     if normalized == "mrr":
         return result.best_val_mrr
     raise ValueError(f"unsupported fusion selection metric: {metric}")
+
+
+def _find_ensemble_weight(
+    mlp_model: "FusionMLP | None",
+    mlp_result: "FusionResult | None",
+    lgbm_result: "LGBMFusionResult",
+    val_features: np.ndarray,
+    feature_indices: tuple[int, ...],
+    config: "TrainingConfig",
+) -> float:
+    if mlp_model is None or mlp_result is None:
+        return 0.5
+    from .fusion import predict_logits  # noqa: PLC0415
+    from .fusion_lgbm import predict_logits_lgbm  # noqa: PLC0415
+
+    selected = val_features[:, :, feature_indices] if feature_indices else val_features
+    mlp_probs = _softmax(predict_logits(mlp_model, selected, mlp_result.mean, mlp_result.std))
+    lgbm_probs = _softmax(predict_logits_lgbm(lgbm_result.model_text, selected))
+
+    metric = config.selection_metric.lower()
+    best_w, best_score = 0.5, -1.0
+    for w_int in range(0, 11):
+        w = w_int / 10.0
+        blended = w * mlp_probs + (1.0 - w) * lgbm_probs
+        score = _mrr_from_probs(blended) if metric == "mrr" else _ap_from_probs(blended)
+        if score > best_score:
+            best_w, best_score = w, score
+    log_event(f"[ensemble-weight] best_w={best_w:.1f} {metric}={best_score:.5f}", enabled=config.verbose)
+    return best_w
+
+
+def _mrr_from_probs(probs: np.ndarray) -> float:
+    ranks = 1 + (probs[:, 1:] > probs[:, 0:1]).sum(axis=1)
+    return float(np.mean(1.0 / ranks))
+
+
+def _ap_from_probs(probs: np.ndarray) -> float:
+    from sklearn.metrics import average_precision_score  # noqa: PLC0415
+    labels = np.zeros(probs.shape, dtype=np.int8)
+    labels[:, 0] = 1
+    return float(average_precision_score(labels.ravel(), probs.ravel()))
+
+
+def _softmax(logits: np.ndarray) -> np.ndarray:
+    shifted = logits - logits.max(axis=1, keepdims=True)
+    exp_l = np.exp(shifted)
+    return exp_l / exp_l.sum(axis=1, keepdims=True)
 
 
 def _auto_mode_code(mode: str) -> float:
@@ -1423,6 +1532,7 @@ def _build_supervised_features(
             )
         candidate_checksum += batch_candidate_checksum
         del batch_features
+        encoder.clear_batch_caches()
         if isinstance(features, np.memmap) and (start // batch_size + 1) % FEATURE_MEMMAP_FLUSH_INTERVAL == 0:
             features.flush()
         release_memory()

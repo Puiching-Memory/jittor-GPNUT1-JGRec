@@ -8,6 +8,7 @@ import numpy as np
 from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log, track
+from jgrec.rankers.common.early_stop import LossEarlyStopper
 
 from .config import GRAPH_WINDOW_NAMES, GraphTowerConfig
 
@@ -116,10 +117,24 @@ class GraphTower:
 
         users = edge_index[0].astype(np.int32, copy=False)
         pos_items = edge_index[1].astype(np.int32, copy=False)
-        train_size = users.shape[0]
+        full_size = users.shape[0]
+        val_size = max(0, int(full_size * self.config.early_stop_val_ratio))
+        val_perm = rng.permutation(full_size)
+        val_idx = val_perm[:val_size]
+        train_idx = val_perm[val_size:]
+        val_users = users[val_idx]
+        val_pos = pos_items[val_idx]
+        val_neg = rng.integers(0, self.id_map.num_dst, size=val_users.shape[0], dtype=np.int32)
+        same_v = val_neg == val_pos
+        if np.any(same_v):
+            val_neg[same_v] = (val_neg[same_v] + 1) % self.id_map.num_dst
+        train_users = users[train_idx]
+        train_pos = pos_items[train_idx]
+        train_size = train_users.shape[0]
         max_edges = train_size if self.config.max_train_edges <= 0 else min(train_size, self.config.max_train_edges)
 
         epochs = range(1, self.config.epochs + 1)
+        stopper = LossEarlyStopper(patience=self.config.early_stop_patience)
         for epoch in track(epochs, description=f"gnn:{name}", total=self.config.epochs, enabled=verbose):
             if max_edges < train_size:
                 order = rng.choice(train_size, size=max_edges, replace=False)
@@ -130,8 +145,8 @@ class GraphTower:
             losses: list[float] = []
             for start in range(0, order.shape[0], self.config.batch_size):
                 batch_idx = order[start : start + self.config.batch_size]
-                batch_users = users[batch_idx]
-                batch_pos = pos_items[batch_idx]
+                batch_users = train_users[batch_idx]
+                batch_pos = train_pos[batch_idx]
                 batch_neg = rng.integers(0, self.id_map.num_dst, size=batch_idx.shape[0], dtype=np.int32)
                 same = batch_neg == batch_pos
                 if np.any(same):
@@ -146,7 +161,13 @@ class GraphTower:
                 losses.append(float(loss.item()))
 
             mean_loss = float(np.mean(losses)) if losses else 0.0
-            log(f"[gnn:{name}] epoch={epoch} loss={mean_loss:.5f}", enabled=verbose)
+            val_loss = _compute_val_loss(model, val_users, val_pos, val_neg, self.config.batch_size)
+            log(f"[gnn:{name}] epoch={epoch} loss={mean_loss:.5f} val_loss={val_loss:.5f}", enabled=verbose)
+            stop_signal = val_loss if val_size > 0 else mean_loss
+            if stopper.update(epoch, stop_signal, model):
+                log(f"[gnn:{name}] early_stop epoch={epoch} best_epoch={stopper.best_epoch} best_val={stopper.best_loss:.5f}", enabled=verbose)
+                break
+        stopper.restore_best(model)
 
         with jt.no_grad():
             user_all, item_all = model.get_all_embeddings()
@@ -376,3 +397,21 @@ def _normalized_edge_weighting(value: str) -> str:
     if normalized in {"none", "repeat", "time_decay"}:
         return normalized
     raise ValueError(f"unsupported graph edge weighting: {value}")
+
+
+def _compute_val_loss(
+    model, val_users: np.ndarray, val_pos: np.ndarray, val_neg: np.ndarray, batch_size: int,
+) -> float:
+    if val_users.shape[0] == 0:
+        return 0.0
+    with jt.no_grad():
+        losses: list[float] = []
+        for start in range(0, val_users.shape[0], batch_size):
+            end = start + batch_size
+            loss = model(
+                jt.array(val_users[start:end], dtype=jt.int32),
+                jt.array(val_pos[start:end], dtype=jt.int32),
+                jt.array(val_neg[start:end], dtype=jt.int32),
+            )
+            losses.append(float(loss.item()))
+        return float(np.mean(losses)) if losses else 0.0

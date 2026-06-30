@@ -22,6 +22,7 @@ from .submission import expected_test_rows, validate_submission_file, write_zip
 ModelName = Literal["hybrid", "craft", "temporal-graph"]
 SelectionMetric = Literal["ap", "mrr"]
 GNNModel = Literal["xsimgcl", "lightgcn"]
+FusionMode = Literal["mlp", "lgbm", "ensemble"]
 GNNEdgeWeighting = Literal["none", "repeat", "time_decay"]
 CandidateProtocol = Literal["random", "test_like"]
 CandidateRecentFeatureGroup = Literal["none", "recency_rank"]
@@ -47,20 +48,22 @@ class CLIConfig:
     supervised_feature_memmap: bool = False
     num_negatives: int = 31
     max_fit_events: int = 0
-    epochs: int = 5
+    epochs: int = 15
     train_batch_size: int = 512
     lr: float = 0.001
     weight_decay: float = 0.0
     selection_metric: SelectionMetric = "ap"
-    early_stop: int = 10
+    early_stop: int = 3
     fusion_hidden_dim: int = 64
+    fusion_mode: FusionMode = "mlp"
     disable_gnn: bool = False
     gnn_model: GNNModel = "xsimgcl"
     gnn_edge_weighting: GNNEdgeWeighting = "none"
     gnn_time_decay_ratio: float = 0.05
     gnn_embedding_dim: int = 128
     gnn_layers: int = 2
-    gnn_epochs: int = 3
+    gnn_epochs: int = 50
+    gnn_early_stop_patience: int = 3
     gnn_batch_size: int = 2048
     gnn_max_graph_edges: int = 0
     gnn_max_train_edges: int = 40_000
@@ -68,7 +71,8 @@ class CLIConfig:
     gnn_reg_weight: float = 1e-5
     gnn_cl_rate: float = 1e-4
     disable_seq: bool = False
-    seq_epochs: int = 3
+    seq_epochs: int = 50
+    seq_early_stop_patience: int = 3
     seq_batch_size: int = 512
     seq_score_batch_size: int = 1024
     seq_max_samples: int = 50_000
@@ -80,7 +84,8 @@ class CLIConfig:
     disable_two_tower: bool = False
     two_tower_embedding_dim: int = 64
     two_tower_hidden_dim: int = 64
-    two_tower_epochs: int = 3
+    two_tower_epochs: int = 50
+    two_tower_early_stop_patience: int = 3
     two_tower_batch_size: int = 512
     two_tower_score_batch_size: int = 2048
     two_tower_max_samples: int = 50_000
@@ -113,16 +118,19 @@ class CLIConfig:
     disable_structure_cooccur: bool = False
     disable_structure_transition: bool = False
     structure_cooccur_history_limit: int = 128
+    structure_predict_neighbor_limit: int = 0
     disable_source_profile: bool = False
     disable_source_profile_deterministic: bool = False
     disable_source_profile_item2vec: bool = False
     source_profile_embedding_dim: int = 64
-    source_profile_epochs: int = 3
+    source_profile_epochs: int = 50
+    source_profile_early_stop_patience: int = 3
     source_profile_batch_size: int = 2048
     source_profile_score_batch_size: int = 8192
     source_profile_max_samples: int = 100_000
     source_profile_window_size: int = 16
     source_profile_recent_k: int = 32
+    source_profile_predict_history_limit: int = 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -257,16 +265,19 @@ def _ranker_config(args: CLIConfig):
         structure_cooccur_enabled=not args.disable_structure_cooccur,
         structure_transition_enabled=not args.disable_structure_transition,
         structure_cooccur_history_limit=args.structure_cooccur_history_limit,
+        structure_predict_neighbor_limit=args.structure_predict_neighbor_limit,
         source_profile_enabled=not args.disable_source_profile,
         source_profile_deterministic_enabled=not args.disable_source_profile_deterministic,
         source_profile_item2vec_enabled=not args.disable_source_profile_item2vec,
         source_profile_embedding_dim=args.source_profile_embedding_dim,
         source_profile_epochs=args.source_profile_epochs,
+        source_profile_early_stop_patience=args.source_profile_early_stop_patience,
         source_profile_batch_size=args.source_profile_batch_size,
         source_profile_score_batch_size=args.source_profile_score_batch_size,
         source_profile_max_samples=args.source_profile_max_samples,
         source_profile_window_size=args.source_profile_window_size,
         source_profile_recent_k=args.source_profile_recent_k,
+        source_profile_predict_history_limit=args.source_profile_predict_history_limit,
         gnn_enabled=not args.disable_gnn,
         gnn_model=args.gnn_model,
         gnn_edge_weighting=args.gnn_edge_weighting,
@@ -274,6 +285,7 @@ def _ranker_config(args: CLIConfig):
         gnn_embedding_dim=args.gnn_embedding_dim,
         gnn_layers=args.gnn_layers,
         gnn_epochs=args.gnn_epochs,
+        gnn_early_stop_patience=args.gnn_early_stop_patience,
         gnn_batch_size=args.gnn_batch_size,
         gnn_max_graph_edges=args.gnn_max_graph_edges,
         gnn_max_train_edges=args.gnn_max_train_edges,
@@ -282,6 +294,7 @@ def _ranker_config(args: CLIConfig):
         gnn_cl_rate=args.gnn_cl_rate,
         seq_enabled=not args.disable_seq,
         seq_epochs=args.seq_epochs,
+        seq_early_stop_patience=args.seq_early_stop_patience,
         seq_batch_size=args.seq_batch_size,
         seq_score_batch_size=args.seq_score_batch_size,
         seq_max_samples=args.seq_max_samples,
@@ -294,10 +307,12 @@ def _ranker_config(args: CLIConfig):
         two_tower_embedding_dim=args.two_tower_embedding_dim,
         two_tower_hidden_dim=args.two_tower_hidden_dim,
         two_tower_epochs=args.two_tower_epochs,
+        two_tower_early_stop_patience=args.two_tower_early_stop_patience,
         two_tower_batch_size=args.two_tower_batch_size,
         two_tower_score_batch_size=args.two_tower_score_batch_size,
         two_tower_max_samples=args.two_tower_max_samples,
         fusion_hidden_dim=args.fusion_hidden_dim,
+        fusion_mode=args.fusion_mode,
         hard_negative_ratio=args.hard_negative_ratio,
         popular_negative_ratio=args.popular_negative_ratio,
         negative_sampling_workers=args.negative_sampling_workers,
@@ -419,6 +434,8 @@ def _run_panel(run_dir: Path, zip_path: Path, args: CLIConfig, config) -> Panel:
         table.add_row("structure_cooccur", "on" if config.structure_cooccur_enabled else "off")
         table.add_row("structure_transition", "on" if config.structure_transition_enabled else "off")
         table.add_row("structure_cooccur_history_limit", str(config.structure_cooccur_history_limit))
+        table.add_row("structure_predict_neighbor_limit", str(config.structure_predict_neighbor_limit) if config.structure_predict_neighbor_limit else "off")
+        table.add_row("source_profile_predict_history_limit", str(config.source_profile_predict_history_limit) if config.source_profile_predict_history_limit else "off")
         table.add_row("max_fit_events", str(config.max_fit_events) if config.max_fit_events else "full")
         table.add_row("supervised_feature_batch_size", str(config.supervised_feature_batch_size))
         table.add_row("supervised_feature_memmap", "on" if config.supervised_feature_memmap else "off")
