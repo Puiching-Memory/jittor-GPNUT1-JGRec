@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from typing import Any
 
 import jittor as jt
 import numpy as np
 
+from jgrec.checkpoint import get_model_state, set_model_state
 from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log, track
@@ -31,6 +33,30 @@ class SequenceTower:
     @property
     def feature_names(self) -> tuple[str, ...]:
         return SEQUENCE_FEATURE_NAMES
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "config": self.config,
+            "src_sequences": dict(self.src_sequences),
+            "seen_items": self.seen_items,
+            "model_state": get_model_state(self.model) if self.model is not None else None,
+        }
+
+    def hydrate(self, snapshot: dict[str, Any]) -> None:
+        self.config = snapshot["config"]
+        self.src_sequences = dict(snapshot["src_sequences"])
+        self.seen_items = snapshot["seen_items"]
+        model_state = snapshot.get("model_state")
+        if model_state is not None:
+            self.model = GRUSequenceModel(
+                num_items=self.id_map.num_dst,
+                hidden_size=self.config.hidden_size,
+                layers=self.config.layers,
+                dropout=self.config.dropout,
+            )
+            set_model_state(self.model, model_state)
+        else:
+            self.model = None
 
     def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool = True) -> None:
         self.src_sequences, self.seen_items = _final_sequences(interactions, self.id_map, self.config.max_seq_len)

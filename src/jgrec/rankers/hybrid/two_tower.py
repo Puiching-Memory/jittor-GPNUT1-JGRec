@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import jittor as jt
 import numpy as np
 
+from jgrec.checkpoint import get_model_state, set_model_state
 from jgrec.core.memory import release_memory
 from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 from jgrec.idmap import NodeIdMap
@@ -81,6 +83,36 @@ class TwoTower:
     @property
     def feature_names(self) -> tuple[str, ...]:
         return TWO_TOWER_FEATURE_NAMES
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "config": self.config,
+            "model_state": get_model_state(self.model) if self.model is not None else None,
+            "index": self.index.snapshot() if hasattr(self.index, "snapshot") else {},
+            "min_time": self.min_time,
+            "max_time": self.max_time,
+            "graph_span": self.graph_span,
+        }
+
+    def hydrate(self, snapshot: dict[str, Any]) -> None:
+        self.config = snapshot["config"]
+        self.min_time = int(snapshot["min_time"])
+        self.max_time = int(snapshot["max_time"])
+        self.graph_span = int(snapshot["graph_span"])
+        self.index = TemporalInteractionIndex()
+        if snapshot.get("index"):
+            self.index.hydrate(snapshot["index"])
+        model_state = snapshot.get("model_state")
+        if model_state is not None:
+            self.model = _TwoTowerModel(
+                num_src=self.id_map.num_src,
+                num_dst=self.id_map.num_dst,
+                embedding_dim=self.config.embedding_dim,
+                hidden_dim=self.config.hidden_dim,
+            )
+            set_model_state(self.model, model_state)
+        else:
+            self.model = None
 
     def fit(
         self,

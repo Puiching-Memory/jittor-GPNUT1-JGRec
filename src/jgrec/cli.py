@@ -131,6 +131,13 @@ class CLIConfig:
     source_profile_window_size: int = 16
     source_profile_recent_k: int = 32
     source_profile_predict_history_limit: int = 0
+    save_checkpoint: bool = False
+    checkpoint_dir: Path | None = None
+    load_checkpoint_dir: Path | None = None
+    save_full_model_dir: Path | None = None
+    load_full_model_dir: Path | None = None
+    test_only: bool = False
+    recompute_test_profile: bool = False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -145,11 +152,12 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = Path("result") / run_name
     csv_dir = run_dir / "csv"
     zip_path = run_dir / "result.zip"
+    checkpoint_dir = args.checkpoint_dir or (run_dir / "checkpoints")
     configure_memory_log(run_dir / "memory.log")
     log_memory("cli_start", enabled=not args.quiet_ranker)
     console.print(_run_panel(run_dir, zip_path, args, ranker_config))
 
-    datasets = discover_datasets(args.data_dir)
+    datasets = discover_datasets(args.data_dir, allow_test_only=args.test_only)
     selected_datasets = _select_datasets(datasets, args.dataset)
     results = []
     result_table = _result_table()
@@ -177,6 +185,12 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             verbose=not args.quiet_ranker,
             limit_rows=args.limit_rows,
+            checkpoint_dir=checkpoint_dir if args.save_checkpoint else None,
+            load_checkpoint_dir=args.load_checkpoint_dir,
+            model_name=args.model,
+            full_model_dir=args.save_full_model_dir,
+            load_full_model_dir=args.load_full_model_dir,
+            recompute_test_profile=args.recompute_test_profile,
         )
         results.append(result)
 

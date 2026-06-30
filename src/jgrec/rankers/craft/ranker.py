@@ -11,6 +11,7 @@ from jittor_geometric.data import TemporalData
 from jittor_geometric.nn.models.craft import CRAFT
 from sklearn.metrics import average_precision_score, roc_auc_score
 
+from jgrec.checkpoint import get_model_state, load_model_state, save_model_state, set_model_state
 from jgrec.core.io import read_test_queries
 from jgrec.core.types import (
     FitContext,
@@ -107,6 +108,12 @@ class CRAFTBaselineRanker:
             skip_connection=True,
         )
         self.model.set_min_idx(src_min, dst_min)
+        if context.load_checkpoint_path is not None and context.load_checkpoint_path.exists():
+            log(
+                f"[craft] loading checkpoint from {context.load_checkpoint_path}",
+                enabled=context.verbose,
+            )
+            self.load_checkpoint(context.load_checkpoint_path)
         optimizer = jt.nn.Adam(list(self.model.parameters()), lr=self.config.lr)
 
         best_ap = 0.0
@@ -168,6 +175,12 @@ class CRAFTBaselineRanker:
                 break
 
         _load_state(self.model, best_state)
+        if context.save_checkpoint_path is not None:
+            log(
+                f"[craft] saving checkpoint to {context.save_checkpoint_path}",
+                enabled=context.verbose,
+            )
+            self.save_checkpoint(context.save_checkpoint_path)
         return TrainingReport(
             train_events=num_train,
             val_events=num_total - num_train,
@@ -178,6 +191,16 @@ class CRAFTBaselineRanker:
             model_name=self.name,
             metrics={"auc": best_auc},
         )
+
+    def save_checkpoint(self, path: Path) -> None:
+        if self.model is None:
+            raise RuntimeError("ranker is not fitted")
+        save_model_state(path, get_model_state(self.model))
+
+    def load_checkpoint(self, path: Path) -> None:
+        if self.model is None:
+            raise RuntimeError("ranker is not fitted")
+        set_model_state(self.model, load_model_state(path))
 
     def predict_batch(self, queries: TestQueryArray) -> np.ndarray:
         if len(queries) == 0:

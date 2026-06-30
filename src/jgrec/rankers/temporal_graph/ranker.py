@@ -5,6 +5,7 @@ from dataclasses import replace
 import jittor as jt
 import numpy as np
 
+from jgrec.checkpoint import get_model_state, load_model_state, save_model_state, set_model_state
 from jgrec.core.io import read_test_queries
 from jgrec.core.types import (
     FitContext,
@@ -74,6 +75,12 @@ class TemporalGraphRanker:
 
         rng = np.random.default_rng(training_config.seed)
         self.model = self._build_model(time_span)
+        if context.load_checkpoint_path is not None and context.load_checkpoint_path.exists():
+            log(
+                f"[temporal-graph] loading checkpoint from {context.load_checkpoint_path}",
+                enabled=training_config.verbose,
+            )
+            self.load_checkpoint(context.load_checkpoint_path)
         test_candidate_index = self._test_candidate_index(context)
         train_candidate_index = self._candidate_index_for_protocol(
             test_candidate_index,
@@ -178,7 +185,23 @@ class TemporalGraphRanker:
             },
         )
         self.training_report = report
+        if context.save_checkpoint_path is not None:
+            log(
+                f"[temporal-graph] saving checkpoint to {context.save_checkpoint_path}",
+                enabled=training_config.verbose,
+            )
+            self.save_checkpoint(context.save_checkpoint_path)
         return report
+
+    def save_checkpoint(self, path: Path) -> None:
+        if self.model is None:
+            raise RuntimeError("ranker is not fitted")
+        save_model_state(path, get_model_state(self.model))
+
+    def load_checkpoint(self, path: Path) -> None:
+        if self.model is None:
+            raise RuntimeError("ranker is not fitted")
+        set_model_state(self.model, load_model_state(path))
 
     def predict_batch(self, queries: TestQueryArray) -> np.ndarray:
         if len(queries) == 0:

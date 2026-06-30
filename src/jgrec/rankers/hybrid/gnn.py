@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from typing import Any
 
 import jittor as jt
 import numpy as np
@@ -41,6 +42,22 @@ class GraphTower:
     @property
     def feature_names(self) -> tuple[str, ...]:
         return GRAPH_WINDOW_NAMES
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "config": self.config,
+            "user_embeddings": dict(self.user_embeddings),
+            "item_embeddings": dict(self.item_embeddings),
+            "seen_users": dict(self.seen_users),
+            "seen_items": dict(self.seen_items),
+        }
+
+    def hydrate(self, snapshot: dict[str, Any]) -> None:
+        self.config = snapshot["config"]
+        self.user_embeddings = dict(snapshot["user_embeddings"])
+        self.item_embeddings = dict(snapshot["item_embeddings"])
+        self.seen_users = dict(snapshot["seen_users"])
+        self.seen_items = dict(snapshot["seen_items"])
 
     def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool = True) -> None:
         if not self.config.enabled or self.config.epochs < 1:

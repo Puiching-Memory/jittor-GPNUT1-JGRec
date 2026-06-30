@@ -9,8 +9,12 @@ import numpy as np
 from .types import DatasetPaths, InteractionTable, TestQueryArray
 
 
-def discover_datasets(data_dir: Path) -> list[DatasetPaths]:
-    """Find dataset directories containing train.csv and test.csv."""
+def discover_datasets(data_dir: Path, *, allow_test_only: bool = False) -> list[DatasetPaths]:
+    """Find dataset directories containing train.csv and test.csv.
+
+    When ``allow_test_only`` is True, directories with only ``test.csv`` are also
+    returned; their ``train_path`` is set to an empty path placeholder.
+    """
     if not data_dir.exists():
         raise FileNotFoundError(f"data directory not found: {data_dir}")
 
@@ -26,6 +30,15 @@ def discover_datasets(data_dir: Path) -> list[DatasetPaths]:
                     name=child.name,
                     root=child,
                     train_path=train_path,
+                    test_path=test_path,
+                )
+            )
+        elif allow_test_only and test_path.exists():
+            datasets.append(
+                DatasetPaths(
+                    name=child.name,
+                    root=child,
+                    train_path=child / "__no_train__.csv",
                     test_path=test_path,
                 )
             )
