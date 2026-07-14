@@ -1,8 +1,14 @@
 # jittor-GPNUT1-JGRec
 
-第六届计图人工智能挑战赛赛道一动态推荐项目。项目目标是在给定历史时序交互
-`(src, dst, time)` 和测试候选集合 `(src, time, c1...c100)` 的条件下，为每个候选目标输出
-可提交的交互概率分布。
+**第六届计图人工智能挑战赛 · 赛道一：基于图学习的动态推荐任务**
+
+- 战队名：GPNUT1
+- GitLink 仓库：https://gitlink.org.cn/Puiching-Memory/jittor-GPNUT1-JGRec
+- GitHub 仓库：https://github.com/Puiching-Memory/jittor-GPNUT1-JGRec
+- 开源协议：MIT
+
+项目目标是在给定历史时序交互 `(src, dst, time)` 和测试候选集合
+`(src, time, c1...c100)` 的条件下，为每个候选目标输出可提交的交互概率分布。
 
 当前主线模型是 `hybrid`：以时间因果切分训练融合器，将强统计记忆、候选先验、结构共现、
 Two-Tower 表示、图协同过滤和序列偏好组合为候选级特征，再用 Jittor MLP 在每行 100 个候选内
