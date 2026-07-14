@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
 
@@ -9,7 +10,7 @@ from jgrec.rankers.base import Ranker
 
 from .io import read_interactions, read_test_queries
 from .memory import log_event, log_memory, release_memory
-from .types import DatasetPaths, DatasetResult, FitContext, TestQueryArray
+from .types import DatasetPaths, DatasetResult, FitContext, TestQueryArray, TrainingReport
 
 PREDICT_PROGRESS_INTERVAL = 10_000
 
@@ -22,22 +23,31 @@ def build_dataset_submission(
     seed: int = 42,
     verbose: bool = True,
     limit_rows: int | None = None,
+    fit_ranker: bool = True,
+    after_fit: Callable[[Ranker], None] | None = None,
 ) -> DatasetResult:
-    log_memory(f"read_train_start:{dataset.name}", enabled=verbose)
-    interactions = _read_fit_interactions(dataset, ranker)
-    log_memory(f"read_train_done:{dataset.name}", enabled=verbose)
-    report = ranker.fit(
-        interactions,
-        FitContext(
-            dataset=dataset,
-            seed=seed,
-            limit_rows=limit_rows,
-            verbose=verbose,
-        ),
-    )
-    del interactions
-    release_memory()
-    log_memory(f"post_fit:{dataset.name}", enabled=verbose)
+    if fit_ranker:
+        log_memory(f"read_train_start:{dataset.name}", enabled=verbose)
+        interactions = _read_fit_interactions(dataset, ranker)
+        log_memory(f"read_train_done:{dataset.name}", enabled=verbose)
+        report = ranker.fit(
+            interactions,
+            FitContext(
+                dataset=dataset,
+                seed=seed,
+                limit_rows=limit_rows,
+                verbose=verbose,
+            ),
+        )
+        if after_fit is not None:
+            after_fit(ranker)
+        del interactions
+        release_memory()
+        log_memory(f"post_fit:{dataset.name}", enabled=verbose)
+    else:
+        report = getattr(ranker, "training_report", None)
+        if report is None:
+            report = TrainingReport(model_name=ranker.name)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{dataset.name}.csv"

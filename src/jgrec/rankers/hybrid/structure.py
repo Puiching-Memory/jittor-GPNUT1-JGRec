@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import math
-from collections import Counter, OrderedDict
+from collections import Counter
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from jgrec.core.types import Interaction, InteractionTable, TestQuery, TestQueryArray
+from jgrec.rankers.common.byte_budget_lru import ByteBudgetLRU
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
 
 from .config import StructureTowerConfig
@@ -37,6 +39,46 @@ DEFAULT_BRIDGE_OVERLAP_THRESHOLD = 0.50
 DEFAULT_BRIDGE_MIN_ROLE_DEGREE = 2
 
 
+@dataclass(frozen=True)
+class _CompactStructureSummary:
+    candidate_ids: np.ndarray
+    common_counts: np.ndarray
+    aa_scores: np.ndarray
+    ra_scores: np.ndarray
+
+    @property
+    def nbytes(self) -> int:
+        return sum(array.nbytes for array in (self.candidate_ids, self.common_counts, self.aa_scores, self.ra_scores))
+
+    def get(self, candidate: int) -> tuple[int, float, float]:
+        pos = int(np.searchsorted(self.candidate_ids, candidate))
+        if pos >= len(self.candidate_ids) or self.candidate_ids[pos] != candidate:
+            return 0, 0.0, 0.0
+        return int(self.common_counts[pos]), float(self.aa_scores[pos]), float(self.ra_scores[pos])
+
+
+@dataclass(frozen=True)
+class _CompactCountSummary:
+    candidate_ids: np.ndarray
+    counts: np.ndarray
+
+    @property
+    def nbytes(self) -> int:
+        return self.candidate_ids.nbytes + self.counts.nbytes
+
+    def lookup_many(self, candidate_ids: tuple[int, ...]) -> np.ndarray:
+        result = np.zeros(len(candidate_ids), dtype=np.int32)
+        if not candidate_ids or self.candidate_ids.size == 0:
+            return result
+        requested = np.asarray(candidate_ids, dtype=self.candidate_ids.dtype)
+        positions = np.searchsorted(self.candidate_ids, requested)
+        in_bounds = positions < len(self.candidate_ids)
+        rows = np.flatnonzero(in_bounds)
+        rows = rows[self.candidate_ids[positions[rows]] == requested[rows]]
+        result[rows] = self.counts[positions[rows]].astype(np.int32, copy=False)
+        return result
+
+
 class StructureFeatureTower:
     def __init__(self, config: StructureTowerConfig | None = None) -> None:
         self.config = config or StructureTowerConfig()
@@ -45,12 +87,26 @@ class StructureFeatureTower:
         self.max_time = 0
         self.graph_span = 1
         self.decay_windows: tuple[float, float, float] = (1.0, 1.0, 1.0)
-        self._full_src_neighbor_cache: OrderedDict[int, set[int]] = OrderedDict()
-        self._full_dst_source_cache: OrderedDict[int, set[int]] = OrderedDict()
-        self._full_src_structure_cache: OrderedDict[
-            int, tuple[dict[int, int], dict[int, float], dict[int, float]]
-        ] = OrderedDict()
-        self._full_src_cooccur_cache: OrderedDict[int, dict[int, int]] = OrderedDict()
+        total_cache_bytes = max(int(self.config.cache_max_bytes), 0)
+        small_cache_bytes = total_cache_bytes // 16
+        cooccur_cache_bytes = total_cache_bytes // 4
+        structure_cache_bytes = total_cache_bytes - small_cache_bytes * 2 - cooccur_cache_bytes
+        self._full_src_neighbor_cache: ByteBudgetLRU[int, np.ndarray] = ByteBudgetLRU(
+            max_bytes=small_cache_bytes,
+            max_entries=FULL_HISTORY_CACHE_LIMIT,
+        )
+        self._full_dst_source_cache: ByteBudgetLRU[int, np.ndarray] = ByteBudgetLRU(
+            max_bytes=small_cache_bytes,
+            max_entries=FULL_HISTORY_CACHE_LIMIT,
+        )
+        self._full_src_structure_cache: ByteBudgetLRU[int, _CompactStructureSummary] = ByteBudgetLRU(
+            max_bytes=structure_cache_bytes,
+            max_entries=FULL_COMMON_NEIGHBOR_CACHE_LIMIT,
+        )
+        self._full_src_cooccur_cache: ByteBudgetLRU[int, _CompactCountSummary] = ByteBudgetLRU(
+            max_bytes=cooccur_cache_bytes,
+            max_entries=FULL_COOCCUR_CACHE_LIMIT,
+        )
         self._bridge_overlap_ratio = 0.0
         self._bridge_min_role_degree = DEFAULT_BRIDGE_MIN_ROLE_DEGREE
         self._allow_global_id_bridge = False
@@ -58,6 +114,18 @@ class StructureFeatureTower:
     @property
     def feature_names(self) -> tuple[str, ...]:
         return STRUCTURE_FEATURE_NAMES
+
+    @property
+    def cache_bytes(self) -> int:
+        return sum(
+            cache.current_bytes
+            for cache in (
+                self._full_src_neighbor_cache,
+                self._full_dst_source_cache,
+                self._full_src_structure_cache,
+                self._full_src_cooccur_cache,
+            )
+        )
 
     def fit(
         self,
@@ -142,9 +210,7 @@ class StructureFeatureTower:
 
         features = np.zeros((len(queries), queries.candidate_count, STRUCTURE_FEATURE_DIM), dtype=np.float32)
         full_history_src_counts = Counter(
-            int(queries.src[row_idx])
-            for row_idx in range(len(queries))
-            if int(queries.time[row_idx]) > self.max_time
+            int(queries.src[row_idx]) for row_idx in range(len(queries)) if int(queries.time[row_idx]) > self.max_time
         )
         for row_idx, query in enumerate(queries):
             force_full_preaggregate = full_history_src_counts[int(query.src)] > 1
@@ -236,13 +302,11 @@ class StructureFeatureTower:
                 recent_unique[int(dst)] = None
                 if len(recent_unique) >= limit:
                     break
-            src_neighbors = set(recent_unique)
+            limited_set = set(recent_unique)
+            src_neighbors = np.fromiter(limited_set, dtype=np.int64, count=len(limited_set))
             src_neighbor_count = len(src_neighbors)
         candidate_ids = tuple(int(dst) for dst in query.candidates)
-        if src_neighbor_count:
-            common_counts, aa_scores, ra_scores = self._full_src_structure(query.src, src_neighbors)
-        else:
-            common_counts, aa_scores, ra_scores = {}, {}, {}
+        structure_summary = self._full_src_structure(query.src, src_neighbors) if src_neighbor_count else None
         cooccur_counts = (
             self._full_cooccur_counts(
                 query.src,
@@ -277,14 +341,13 @@ class StructureFeatureTower:
                 output[idx, 6] = math.exp(-max(query.time - reverse_last_time, 0) / self.graph_span)
 
             if src_neighbor_count and dst_source_count:
-                common = common_counts.get(dst_int, 0)
+                common, aa, ra = structure_summary.get(dst_int)
                 union = src_neighbor_count + dst_source_count - common
                 output[idx, 7] = math.log1p(common)
                 output[idx, 8] = common / max(union, 1)
-                aa = aa_scores.get(dst_int, 0.0)
                 aa_raw[idx] = aa
                 output[idx, 11] = math.log1p(aa)
-                output[idx, 12] = math.log1p(ra_scores.get(dst_int, 0.0))
+                output[idx, 12] = math.log1p(ra)
             output[idx, 13] = math.log1p(self._node_degree(dst_int))
 
             if self.config.cooccur_enabled:
@@ -304,34 +367,35 @@ class StructureFeatureTower:
 
         _write_descending_rank(output[:, 14], aa_raw)
 
-    def _full_src_neighbors(self, src: int) -> set[int]:
+    def _full_src_neighbors(self, src: int) -> np.ndarray:
         cached = self._full_src_neighbor_cache.get(src)
         if cached is not None:
-            self._full_src_neighbor_cache.move_to_end(src)
             return cached
 
         dsts = self.index.src_dsts.get(src)
-        neighbors = {int(dst) for dst in dsts} if dsts is not None else set()
-        self._cache_put(self._full_src_neighbor_cache, src, neighbors, FULL_HISTORY_CACHE_LIMIT)
+        neighbor_set = {int(dst) for dst in dsts} if dsts is not None else set()
+        neighbors = np.fromiter(neighbor_set, dtype=np.int64, count=len(neighbor_set))
+        self._full_src_neighbor_cache.put(src, neighbors, size_bytes=neighbors.nbytes)
         return neighbors
 
-    def _full_dst_sources(self, dst: int) -> set[int]:
+    def _full_dst_sources(self, dst: int) -> np.ndarray:
         cached = self._full_dst_source_cache.get(dst)
         if cached is not None:
-            self._full_dst_source_cache.move_to_end(dst)
             return cached
 
         srcs = self.index.dst_srcs.get(dst)
-        sources = {int(src) for src in srcs} if srcs is not None else set()
-        self._cache_put(self._full_dst_source_cache, dst, sources, FULL_HISTORY_CACHE_LIMIT)
+        source_set = {int(src) for src in srcs} if srcs is not None else set()
+        sources = np.fromiter(source_set, dtype=np.int64, count=len(source_set))
+        self._full_dst_source_cache.put(dst, sources, size_bytes=sources.nbytes)
         return sources
 
     def _full_src_structure(
-        self, src: int, src_neighbors: set[int],
-    ) -> tuple[dict[int, int], dict[int, float], dict[int, float]]:
+        self,
+        src: int,
+        src_neighbors: np.ndarray,
+    ) -> _CompactStructureSummary:
         cached = self._full_src_structure_cache.get(src)
         if cached is not None:
-            self._full_src_structure_cache.move_to_end(src)
             return cached
 
         chunks: list[np.ndarray] = []
@@ -351,7 +415,12 @@ class StructureFeatureTower:
             weights_aa.append(1.0 / math.log1p(deg))
             weights_ra.append(1.0 / deg)
         if not chunks:
-            result = ({}, {}, {})
+            result = _CompactStructureSummary(
+                candidate_ids=np.empty(0, dtype=np.int64),
+                common_counts=np.empty(0, dtype=np.int32),
+                aa_scores=np.empty(0, dtype=np.float64),
+                ra_scores=np.empty(0, dtype=np.float64),
+            )
         else:
             all_dsts = np.concatenate(chunks)
             unique, inverse = np.unique(all_dsts, return_inverse=True)
@@ -359,17 +428,17 @@ class StructureFeatureTower:
             np.add.at(counts_arr, inverse, 1)
             summed_aa = np.zeros(len(unique), dtype=np.float64)
             summed_ra = np.zeros(len(unique), dtype=np.float64)
-            w_aa = np.concatenate([np.full(len(c), w) for c, w in zip(chunks, weights_aa)])
-            w_ra = np.concatenate([np.full(len(c), w) for c, w in zip(chunks, weights_ra)])
+            w_aa = np.concatenate([np.full(len(c), w) for c, w in zip(chunks, weights_aa, strict=True)])
+            w_ra = np.concatenate([np.full(len(c), w) for c, w in zip(chunks, weights_ra, strict=True)])
             np.add.at(summed_aa, inverse, w_aa)
             np.add.at(summed_ra, inverse, w_ra)
-            ulist = unique.tolist()
-            result = (
-                dict(zip(ulist, counts_arr.tolist())),
-                dict(zip(ulist, summed_aa.tolist())),
-                dict(zip(ulist, summed_ra.tolist())),
+            result = _CompactStructureSummary(
+                candidate_ids=unique,
+                common_counts=counts_arr,
+                aa_scores=summed_aa,
+                ra_scores=summed_ra,
             )
-        self._cache_put(self._full_src_structure_cache, src, result, FULL_COMMON_NEIGHBOR_CACHE_LIMIT)
+        self._full_src_structure_cache.put(src, result, size_bytes=result.nbytes)
         return result
 
     def _node_degree(self, node: int) -> int:
@@ -427,22 +496,20 @@ class StructureFeatureTower:
     def _full_cooccur_counts(
         self,
         src: int,
-        src_neighbors: set[int],
+        src_neighbors: np.ndarray,
         candidate_ids: tuple[int, ...],
         *,
         force_preaggregate: bool = False,
     ) -> np.ndarray:
         counts = np.zeros(len(candidate_ids), dtype=np.int32)
-        if not src_neighbors or not candidate_ids:
+        if src_neighbors.size == 0 or not candidate_ids:
             return counts
 
         has_grouped_cooccurs = (
-            bool(self.index.future_cooccur_count_maps)
-            if self.index.future_only
-            else bool(self.index.cooccurs_by_left)
+            bool(self.index.future_cooccur_count_maps) if self.index.future_only else bool(self.index.cooccurs_by_left)
         )
         if force_preaggregate and has_grouped_cooccurs:
-            candidate_counts = self._full_src_cooccurs(src, src_neighbors)
+            return self._full_src_cooccurs(src, src_neighbors).lookup_many(candidate_ids)
         elif len(src_neighbors) <= FULL_COOCCUR_PREAGGREGATE_NEIGHBOR_THRESHOLD or not has_grouped_cooccurs:
             if self.index.future_only:
                 neighbor_arr = np.asarray(sorted(src_neighbors), dtype=np.int32)
@@ -460,46 +527,37 @@ class StructureFeatureTower:
                     for seen_dst in src_neighbors:
                         if seen_dst == candidate:
                             continue
-                        times = self.index.cooccur_times.get((seen_dst, candidate))
+                        times = self.index.cooccur_times.get((int(seen_dst), candidate))
                         if times is not None:
                             total += len(times)
                     candidate_counts[candidate] = total
         else:
-            candidate_counts = self._full_src_cooccurs(src, src_neighbors)
+            return self._full_src_cooccurs(src, src_neighbors).lookup_many(candidate_ids)
 
         for idx, candidate in enumerate(candidate_ids):
             counts[idx] = candidate_counts.get(candidate, 0)
         return counts
 
-    def _full_src_cooccurs(self, src: int, src_neighbors: set[int]) -> dict[int, int]:
+    def _full_src_cooccurs(self, src: int, src_neighbors: np.ndarray) -> _CompactCountSummary:
         cached = self._full_src_cooccur_cache.get(src)
         if cached is not None:
-            self._full_src_cooccur_cache.move_to_end(src)
             return cached
 
         if self.index.future_only:
-            neighbor_arr = np.asarray(sorted(src_neighbors), dtype=np.int32)
-            counts = self.index.future_cooccur_count_maps.sum_rows(neighbor_arr)
+            neighbor_arr = np.sort(src_neighbors).astype(np.int32, copy=False)
+            candidate_ids, count_values = self.index.future_cooccur_count_maps.sum_rows_arrays(neighbor_arr)
         else:
             counts: dict[int, int] = {}
             for seen_dst in src_neighbors:
-                for candidate, times_arr in self.index.cooccurs_by_left.get(seen_dst, ()):
+                for candidate, times_arr in self.index.cooccurs_by_left.get(int(seen_dst), ()):
                     candidate_int = int(candidate)
                     counts[candidate_int] = counts.get(candidate_int, 0) + len(times_arr)
-        self._cache_put(self._full_src_cooccur_cache, src, counts, FULL_COOCCUR_CACHE_LIMIT)
-        return counts
-
-    @staticmethod
-    def _cache_put(
-        cache: OrderedDict[int, set[int]] | OrderedDict[int, dict[int, int]],
-        key: int,
-        value,
-        limit: int,
-    ) -> None:
-        cache[key] = value
-        cache.move_to_end(key)
-        while len(cache) > limit:
-            cache.popitem(last=False)
+            ordered = sorted(counts)
+            candidate_ids = np.asarray(ordered, dtype=np.int64)
+            count_values = np.asarray([counts[candidate] for candidate in ordered], dtype=np.int64)
+        result = _CompactCountSummary(candidate_ids=candidate_ids, counts=count_values)
+        self._full_src_cooccur_cache.put(src, result, size_bytes=result.nbytes)
+        return result
 
 
 def _write_descending_rank(out_col: np.ndarray, values: np.ndarray) -> None:

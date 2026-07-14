@@ -108,3 +108,50 @@ def test_build_dataset_submission_logs_predict_progress_without_changing_output(
     assert "[predict] dataset=dataset1 rows=2 batch=2" in captured.out
     assert "[predict] dataset=dataset1 rows=4 batch=2" in captured.out
     validate_submission_file(result.output_path, expected_rows=5)
+
+
+def test_build_dataset_submission_can_predict_from_loaded_ranker_without_fitting(tmp_path):
+    dataset_root = tmp_path / "dataset1"
+    dataset_root.mkdir()
+    train_path = dataset_root / "train.csv"
+    test_path = dataset_root / "test.csv"
+    _write_train_csv(train_path)
+    _write_test_csv(test_path, row_count=2)
+    dataset = DatasetPaths("dataset1", dataset_root, train_path, test_path)
+    ranker = DummyRanker()
+    ranker.training_report = TrainingReport(model_name=ranker.name, train_events=99)
+
+    result = build_dataset_submission(
+        dataset=dataset,
+        ranker=ranker,
+        output_dir=tmp_path / "out",
+        batch_size=2,
+        verbose=False,
+        fit_ranker=False,
+    )
+
+    assert ranker.fit_interactions is None
+    assert result.training_report == ranker.training_report
+    assert result.rows == 2
+
+
+def test_build_dataset_submission_calls_after_fit_before_prediction(tmp_path):
+    dataset_root = tmp_path / "dataset1"
+    dataset_root.mkdir()
+    train_path = dataset_root / "train.csv"
+    test_path = dataset_root / "test.csv"
+    _write_train_csv(train_path)
+    _write_test_csv(test_path, row_count=1)
+    dataset = DatasetPaths("dataset1", dataset_root, train_path, test_path)
+    ranker = DummyRanker()
+    observations = []
+
+    build_dataset_submission(
+        dataset=dataset,
+        ranker=ranker,
+        output_dir=tmp_path / "out",
+        verbose=False,
+        after_fit=lambda fitted: observations.append((fitted is ranker, tuple(ranker.batch_sizes))),
+    )
+
+    assert observations == [(True, ())]

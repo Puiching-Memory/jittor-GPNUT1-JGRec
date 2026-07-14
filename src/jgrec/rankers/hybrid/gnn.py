@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from typing import Any
 
 import jittor as jt
 import numpy as np
@@ -41,6 +42,32 @@ class GraphTower:
     @property
     def feature_names(self) -> tuple[str, ...]:
         return GRAPH_WINDOW_NAMES
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "user_embeddings": {name: values.copy() for name, values in self.user_embeddings.items()},
+            "item_embeddings": {name: values.copy() for name, values in self.item_embeddings.items()},
+            "seen_users": {name: values.copy() for name, values in self.seen_users.items()},
+            "seen_items": {name: values.copy() for name, values in self.seen_items.items()},
+        }
+
+    def hydrate(self, snapshot: dict[str, Any]) -> None:
+        self.user_embeddings = {
+            name: np.asarray(values, dtype=np.float32).copy()
+            for name, values in snapshot["user_embeddings"].items()
+        }
+        self.item_embeddings = {
+            name: np.asarray(values, dtype=np.float32).copy()
+            for name, values in snapshot["item_embeddings"].items()
+        }
+        self.seen_users = {
+            name: np.asarray(values, dtype=bool).copy()
+            for name, values in snapshot["seen_users"].items()
+        }
+        self.seen_items = {
+            name: np.asarray(values, dtype=bool).copy()
+            for name, values in snapshot["seen_items"].items()
+        }
 
     def fit(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool = True) -> None:
         if not self.config.enabled or self.config.epochs < 1:

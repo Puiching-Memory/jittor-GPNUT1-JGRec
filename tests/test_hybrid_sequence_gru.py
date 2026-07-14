@@ -67,7 +67,7 @@ def test_gru_sequence_scores_have_expected_shape_and_signal():
         ]
     )
 
-    assert SEQUENCE_FEATURE_NAMES == ("gru_score",)
+    assert SEQUENCE_FEATURE_NAMES == ("gru_dot", "gru_cosine", "gru_decay_dot")
     assert scores.shape == (3, 3, len(SEQUENCE_FEATURE_NAMES))
     assert np.all(np.isfinite(scores))
     assert np.any(scores[:2, :2, 0] != 0.0)

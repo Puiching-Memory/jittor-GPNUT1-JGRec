@@ -29,17 +29,19 @@ FEATURE = {name: idx for idx, name in enumerate(SOURCE_PROFILE_FEATURE_NAMES)}
 
 
 def _interactions() -> InteractionTable:
-    return InteractionTable.from_events([
-        Interaction(src=1, dst=10, time=10),
-        Interaction(src=1, dst=20, time=20),
-        Interaction(src=2, dst=20, time=30),
-        Interaction(src=2, dst=30, time=40),
-        Interaction(src=3, dst=10, time=50),
-        Interaction(src=3, dst=30, time=60),
-        Interaction(src=1, dst=30, time=70),
-        Interaction(src=4, dst=40, time=80),
-        Interaction(src=4, dst=20, time=90),
-    ])
+    return InteractionTable.from_events(
+        [
+            Interaction(src=1, dst=10, time=10),
+            Interaction(src=1, dst=20, time=20),
+            Interaction(src=2, dst=20, time=30),
+            Interaction(src=2, dst=30, time=40),
+            Interaction(src=3, dst=10, time=50),
+            Interaction(src=3, dst=30, time=60),
+            Interaction(src=1, dst=30, time=70),
+            Interaction(src=4, dst=40, time=80),
+            Interaction(src=4, dst=20, time=90),
+        ]
+    )
 
 
 def _require_jittor() -> None:
@@ -54,10 +56,12 @@ def test_source_profile_scores_have_expected_shape_and_finite_values():
     )
 
     tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
-    scores = tower.scores_for_queries([
-        TestQuery(src=1, time=100, candidates=(10, 20, 30, 999)),
-        TestQuery(src=99, time=100, candidates=(10, 20, 30, 999)),
-    ])
+    scores = tower.scores_for_queries(
+        [
+            TestQuery(src=1, time=100, candidates=(10, 20, 30, 999)),
+            TestQuery(src=99, time=100, candidates=(10, 20, 30, 999)),
+        ]
+    )
 
     assert scores.shape == (2, 4, len(SOURCE_PROFILE_FEATURE_NAMES))
     assert np.all(np.isfinite(scores))
@@ -66,12 +70,14 @@ def test_source_profile_scores_have_expected_shape_and_finite_values():
 
 
 def test_source_profile_deterministic_features_match_manual_counts():
-    interactions = InteractionTable.from_events([
-        Interaction(src=1, dst=10, time=10),
-        Interaction(src=1, dst=20, time=20),
-        Interaction(src=2, dst=20, time=30),
-        Interaction(src=2, dst=30, time=40),
-    ])
+    interactions = InteractionTable.from_events(
+        [
+            Interaction(src=1, dst=10, time=10),
+            Interaction(src=1, dst=20, time=20),
+            Interaction(src=2, dst=20, time=30),
+            Interaction(src=2, dst=30, time=40),
+        ]
+    )
     tower = SourceProfileTower(
         id_map=NodeIdMap.from_interactions(interactions),
         config=SourceProfileConfig(item2vec_enabled=False, window_size=4, recent_k=1),
@@ -90,14 +96,16 @@ def test_source_profile_deterministic_features_match_manual_counts():
 
 
 def test_source_profile_recent_features_use_recent_k_history():
-    interactions = InteractionTable.from_events([
-        Interaction(src=1, dst=10, time=10),
-        Interaction(src=1, dst=20, time=20),
-        Interaction(src=2, dst=10, time=30),
-        Interaction(src=2, dst=30, time=40),
-        Interaction(src=3, dst=20, time=50),
-        Interaction(src=3, dst=40, time=60),
-    ])
+    interactions = InteractionTable.from_events(
+        [
+            Interaction(src=1, dst=10, time=10),
+            Interaction(src=1, dst=20, time=20),
+            Interaction(src=2, dst=10, time=30),
+            Interaction(src=2, dst=30, time=40),
+            Interaction(src=3, dst=20, time=50),
+            Interaction(src=3, dst=40, time=60),
+        ]
+    )
     tower = SourceProfileTower(
         id_map=NodeIdMap.from_interactions(interactions),
         config=SourceProfileConfig(item2vec_enabled=False, window_size=4, recent_k=1),
@@ -348,13 +356,49 @@ def test_source_profile_repeated_long_histories_use_cache_without_changing_score
     )
     cached.fit(interactions, rng=np.random.default_rng(0), verbose=False)
     direct.fit(interactions, rng=np.random.default_rng(0), verbose=False)
-    queries = [
-        TestQuery(src=1, time=time + row_idx, candidates=(5000, 5001, 9999))
-        for row_idx in range(3)
-    ]
+    queries = [TestQuery(src=1, time=time + row_idx, candidates=(5000, 5001, 9999)) for row_idx in range(3)]
 
     cached_scores = cached.scores_for_queries(queries)
     direct_scores = direct.scores_for_queries(queries)
 
     assert cached._deterministic_cache
     np.testing.assert_allclose(cached_scores, direct_scores, rtol=1e-6, atol=1e-6)
+
+
+def test_source_profile_cache_byte_budget_does_not_change_scores() -> None:
+    events: list[Interaction] = []
+    time = 1
+    history_items = tuple(1000 + idx for idx in range(40))
+    for dst in history_items:
+        events.append(Interaction(src=1, dst=dst, time=time))
+        time += 1
+    for idx, dst in enumerate(history_items):
+        helper_src = 100 + idx
+        events.append(Interaction(src=helper_src, dst=dst, time=time))
+        time += 1
+        events.append(Interaction(src=helper_src, dst=5000, time=time))
+        time += 1
+
+    interactions = InteractionTable.from_events(events)
+    regular = SourceProfileTower(
+        id_map=NodeIdMap.from_interactions(interactions),
+        config=SourceProfileConfig(item2vec_enabled=False, window_size=4, cache_max_bytes=1024 * 1024),
+    )
+    constrained = SourceProfileTower(
+        id_map=NodeIdMap.from_interactions(interactions),
+        config=SourceProfileConfig(item2vec_enabled=False, window_size=4, cache_max_bytes=1),
+    )
+    regular.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    constrained.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    queries = [TestQuery(src=1, time=time + row_idx, candidates=(5000, 9999)) for row_idx in range(3)]
+
+    expected = regular.scores_for_queries(queries)
+    actual = constrained.scores_for_queries(queries)
+
+    np.testing.assert_array_equal(actual, expected)
+    assert constrained.cache_bytes <= constrained.config.cache_max_bytes
+    summary = regular._deterministic_cache.get((1, len(history_items)))
+    assert isinstance(summary.full_candidate_ids, np.ndarray)
+    assert isinstance(summary.full_values, np.ndarray)
+    assert isinstance(summary.recent_candidate_ids, np.ndarray)
+    assert isinstance(summary.recent_values, np.ndarray)

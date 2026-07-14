@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import math
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -10,6 +11,7 @@ from jgrec.core.memory import release_memory
 from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log, track
+from jgrec.rankers.common.byte_budget_lru import ByteBudgetLRU
 from jgrec.rankers.common.early_stop import LossEarlyStopper
 from jgrec.rankers.common.sparse_counts import SparseCountMap
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
@@ -23,10 +25,45 @@ EPSILON = 1e-8
 SOURCE_PROFILE_CACHE_LIMIT = 256
 SOURCE_PROFILE_CACHE_MIN_HISTORY = 32
 
-DeterministicSummary = tuple[
-    dict[int, tuple[float, float, float, float]],
-    dict[int, tuple[float, float]],
-]
+
+@dataclass(frozen=True)
+class _CompactDeterministicSummary:
+    full_candidate_ids: np.ndarray
+    full_values: np.ndarray
+    recent_candidate_ids: np.ndarray
+    recent_values: np.ndarray
+
+    @classmethod
+    def from_dicts(
+        cls,
+        full_scores: dict[int, tuple[float, float, float, float]],
+        recent_scores: dict[int, tuple[float, float]],
+    ) -> _CompactDeterministicSummary:
+        full_ids = np.asarray(sorted(full_scores), dtype=np.int64)
+        recent_ids = np.asarray(sorted(recent_scores), dtype=np.int64)
+        full_values = np.asarray([full_scores[int(key)] for key in full_ids], dtype=np.float64).reshape((-1, 4))
+        recent_values = np.asarray([recent_scores[int(key)] for key in recent_ids], dtype=np.float64).reshape((-1, 2))
+        return cls(full_ids, full_values, recent_ids, recent_values)
+
+    @property
+    def nbytes(self) -> int:
+        return sum(
+            array.nbytes
+            for array in (self.full_candidate_ids, self.full_values, self.recent_candidate_ids, self.recent_values)
+        )
+
+    def full(self, candidate: int) -> np.ndarray | None:
+        return _lookup_row(self.full_candidate_ids, self.full_values, candidate)
+
+    def recent(self, candidate: int) -> np.ndarray | None:
+        return _lookup_row(self.recent_candidate_ids, self.recent_values, candidate)
+
+
+def _lookup_row(keys: np.ndarray, values: np.ndarray, key: int) -> np.ndarray | None:
+    pos = int(np.searchsorted(keys, key))
+    if pos >= len(keys) or keys[pos] != key:
+        return None
+    return values[pos]
 
 
 def _jt():
@@ -43,12 +80,25 @@ class SourceProfileTower:
         self.item_pair_counts_sparse: SparseCountMap = SparseCountMap.empty()
         self.item_degrees: dict[int, int] = {}
         self.embeddings: np.ndarray | None = None
-        self._deterministic_cache: OrderedDict[tuple[int, int], DeterministicSummary] = OrderedDict()
-        self._embedding_profile_cache: OrderedDict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = OrderedDict()
+        total_cache_bytes = max(int(self.config.cache_max_bytes), 0)
+        embedding_cache_bytes = total_cache_bytes // 8
+        deterministic_cache_bytes = total_cache_bytes - embedding_cache_bytes
+        self._deterministic_cache: ByteBudgetLRU[tuple[int, int], _CompactDeterministicSummary] = ByteBudgetLRU(
+            max_bytes=deterministic_cache_bytes,
+            max_entries=SOURCE_PROFILE_CACHE_LIMIT,
+        )
+        self._embedding_profile_cache: ByteBudgetLRU[tuple[int, int], tuple[np.ndarray, np.ndarray]] = ByteBudgetLRU(
+            max_bytes=embedding_cache_bytes,
+            max_entries=SOURCE_PROFILE_CACHE_LIMIT,
+        )
 
     @property
     def feature_names(self) -> tuple[str, ...]:
         return SOURCE_PROFILE_FEATURE_NAMES
+
+    @property
+    def cache_bytes(self) -> int:
+        return self._deterministic_cache.current_bytes + self._embedding_profile_cache.current_bytes
 
     def fit(
         self,
@@ -82,17 +132,19 @@ class SourceProfileTower:
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            "item_pair_counts": self.item_pair_counts_sparse.to_nested_dict(),
+            "index": self.index.shallow_copy(),
+            "item_pair_counts": self.item_pair_counts_sparse.snapshot(),
             "item_degrees": dict(self.item_degrees),
+            "embeddings": None if self.embeddings is None else self.embeddings.copy(),
         }
 
     def hydrate(self, snapshot: dict[str, Any]) -> None:
-        nested = {
-            int(left): {int(right): int(count) for right, count in counts.items()}
-            for left, counts in snapshot["item_pair_counts"].items()
-        }
-        self.item_pair_counts_sparse = SparseCountMap.from_nested_dict(nested)
+        index = snapshot.get("index")
+        self.index = TemporalInteractionIndex() if index is None else index.shallow_copy()
+        self.item_pair_counts_sparse = SparseCountMap.from_snapshot(snapshot["item_pair_counts"])
         self.item_degrees = {int(dst): int(count) for dst, count in snapshot["item_degrees"].items()}
+        embeddings = snapshot.get("embeddings")
+        self.embeddings = None if embeddings is None else np.asarray(embeddings, dtype=np.float32).copy()
         self._clear_score_caches()
 
     def fit_deterministic(self, interactions: InteractionTable) -> None:
@@ -173,7 +225,9 @@ class SourceProfileTower:
         train_idx = val_perm[val_size:]
         train_size = train_idx.shape[0]
         stopper = LossEarlyStopper(patience=self.config.early_stop_patience)
-        for epoch in track(range(1, self.config.epochs + 1), description="source-profile", total=self.config.epochs, enabled=verbose):
+        for epoch in track(
+            range(1, self.config.epochs + 1), description="source-profile", total=self.config.epochs, enabled=verbose
+        ):
             order = rng.permutation(train_size)
             losses: list[float] = []
             for start in range(0, train_size, max(int(self.config.batch_size), 1)):
@@ -187,7 +241,10 @@ class SourceProfileTower:
             release_memory()
             stop_signal = val_loss if val_size > 0 else mean_loss
             if stopper.update(epoch, stop_signal, model):
-                log(f"[source-profile] early_stop epoch={epoch} best_epoch={stopper.best_epoch} best_val={stopper.best_loss:.5f}", enabled=verbose)
+                log(
+                    f"[source-profile] early_stop epoch={epoch} best_epoch={stopper.best_epoch} best_val={stopper.best_loss:.5f}",
+                    enabled=verbose,
+                )
                 break
         stopper.restore_best(model)
 
@@ -248,7 +305,9 @@ class SourceProfileTower:
             if np.any(recent_mask):
                 recent_counts = counts[-recent_k:][recent_mask].astype(np.float32)
                 recent_seen = history[-recent_k:][recent_mask]
-                recent_degrees = np.array([max(self.item_degrees.get(int(s), 0), 1) for s in recent_seen], dtype=np.float32)
+                recent_degrees = np.array(
+                    [max(self.item_degrees.get(int(s), 0), 1) for s in recent_seen], dtype=np.float32
+                )
                 recent_cosines = recent_counts / np.sqrt(recent_degrees * candidate_degree)
                 output[col_idx, 4] = recent_cosines.sum()
                 output[col_idx, 5] = recent_cosines.max()
@@ -260,24 +319,27 @@ class SourceProfileTower:
         candidates: np.ndarray,
         output: np.ndarray,
     ) -> None:
-        full_scores, recent_scores = self._deterministic_summary(cache_key, history)
+        summary = self._deterministic_summary(cache_key, history)
         for col_idx, candidate in enumerate(candidates):
             candidate_int = int(candidate)
-            full = full_scores.get(candidate_int)
+            full = summary.full(candidate_int)
             if full is not None:
                 output[col_idx, 0] = np.float32(full[0])
                 output[col_idx, 1] = np.float32(full[1])
                 output[col_idx, 2] = np.float32(full[2])
                 output[col_idx, 3] = np.float32(full[3])
-            recent = recent_scores.get(candidate_int)
+            recent = summary.recent(candidate_int)
             if recent is not None:
                 output[col_idx, 4] = np.float32(recent[0])
                 output[col_idx, 5] = np.float32(recent[1])
 
-    def _deterministic_summary(self, cache_key: tuple[int, int], history: np.ndarray) -> DeterministicSummary:
+    def _deterministic_summary(
+        self,
+        cache_key: tuple[int, int],
+        history: np.ndarray,
+    ) -> _CompactDeterministicSummary:
         cached = self._deterministic_cache.get(cache_key)
         if cached is not None:
-            self._deterministic_cache.move_to_end(cache_key)
             return cached
 
         recent_k = max(int(self.config.recent_k), 1)
@@ -309,8 +371,8 @@ class SourceProfileTower:
                 if is_recent:
                     rt, rm = recent_scores.get(cand, (0.0, 0.0))
                     recent_scores[cand] = (rt + cos, max(rm, cos))
-        summary = (full_scores, recent_scores)
-        self._cache_put(self._deterministic_cache, cache_key, summary)
+        summary = _CompactDeterministicSummary.from_dicts(full_scores, recent_scores)
+        self._deterministic_cache.put(cache_key, summary, size_bytes=summary.nbytes)
         return summary
 
     def _fill_item2vec_features(
@@ -351,7 +413,6 @@ class SourceProfileTower:
         if use_cache and cache_key is not None:
             cached = self._embedding_profile_cache.get(cache_key)
             if cached is not None:
-                self._embedding_profile_cache.move_to_end(cache_key)
                 return cached
 
         history_ids = self.id_map.dst_ids(history)
@@ -369,7 +430,8 @@ class SourceProfileTower:
                 _mean_embedding(self.embeddings, recent_ids),
             )
         if use_cache and cache_key is not None:
-            self._cache_put(self._embedding_profile_cache, cache_key, profiles)
+            profile_bytes = profiles[0].nbytes + profiles[1].nbytes
+            self._embedding_profile_cache.put(cache_key, profiles, size_bytes=profile_bytes)
         return profiles
 
     def _cosine_from_count(self, cooccur: int, left: int, right: int, right_degree: int) -> float:
@@ -380,13 +442,6 @@ class SourceProfileTower:
     def _clear_score_caches(self) -> None:
         self._deterministic_cache.clear()
         self._embedding_profile_cache.clear()
-
-    @staticmethod
-    def _cache_put(cache: OrderedDict, key, value) -> None:
-        cache[key] = value
-        cache.move_to_end(key)
-        while len(cache) > SOURCE_PROFILE_CACHE_LIMIT:
-            cache.popitem(last=False)
 
 
 class _Item2VecModel:

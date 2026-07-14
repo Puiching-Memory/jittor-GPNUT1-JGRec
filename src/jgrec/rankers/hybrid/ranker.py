@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from jgrec.contest_checkpoint import get_model_state, set_model_state
 from jgrec.core.memory import log_event, log_memory, release_memory
 from jgrec.core.types import (
     FitContext,
@@ -215,6 +216,35 @@ class HybridFeatureEncoder:
     @property
     def feature_dim(self) -> int:
         return len(self.feature_names)
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "stats": self.stats.snapshot(),
+            "candidate_prior": self.candidate_prior.snapshot() if hasattr(self.candidate_prior, "snapshot") else {},
+            "target_window": self.target_window.snapshot() if hasattr(self.target_window, "snapshot") else {},
+            "structure": self.structure.snapshot() if hasattr(self.structure, "snapshot") else {},
+            "source_profile": self.source_profile.snapshot() if hasattr(self.source_profile, "snapshot") else {},
+            "two_tower": self.two_tower.snapshot() if hasattr(self.two_tower, "snapshot") else {},
+            "graph": self.graph.snapshot() if hasattr(self.graph, "snapshot") else {},
+            "sequence": self.sequence.snapshot() if hasattr(self.sequence, "snapshot") else {},
+        }
+
+    def hydrate(self, snapshot: dict[str, Any]) -> None:
+        self.stats.hydrate(snapshot["stats"])
+        for tower_name in (
+            "candidate_prior",
+            "target_window",
+            "structure",
+            "source_profile",
+            "two_tower",
+            "graph",
+            "sequence",
+        ):
+            tower = getattr(self, tower_name)
+            tower_snapshot = snapshot.get(tower_name)
+            hydrate = getattr(tower, "hydrate", None)
+            if tower_snapshot and callable(hydrate):
+                hydrate(tower_snapshot)
 
     def fit(
         self,
@@ -505,6 +535,68 @@ class TemporalHybridRanker:
         self.feature_names: tuple[str, ...] = ()
         self._fusion_hidden_dim = 64
         self.dataset_profile: DatasetProfile | None = None
+        self.config: TrainingConfig | None = None
+
+    def snapshot(self) -> dict[str, Any]:
+        if self.config is None or self.id_map is None or self.encoder is None:
+            raise RuntimeError("ranker is not fitted")
+        if self.fusion is None or self.fusion_result is None:
+            raise RuntimeError("ranker fusion is not fitted")
+        return {
+            "config": self.config,
+            "id_map": {
+                "src_values": self.id_map.src_values,
+                "dst_values": self.id_map.dst_values,
+            },
+            "recent_window": self.recent_window,
+            "feature_names": self.feature_names,
+            "fusion_hidden_dim": self._fusion_hidden_dim,
+            "dataset_profile": self.dataset_profile,
+            "encoder": self.encoder.snapshot(),
+            "fusion_state": get_model_state(self.fusion),
+            "fusion_result": self.fusion_result,
+            "lgbm_result": self.lgbm_result,
+            "training_report": self.training_report,
+        }
+
+    def hydrate(self, snapshot: dict[str, Any]) -> None:
+        from .fusion import FusionMLP  # noqa: PLC0415
+
+        self.config = snapshot["config"]
+        self.recent_window = int(snapshot["recent_window"])
+        self.feature_names = tuple(snapshot["feature_names"])
+        self._fusion_hidden_dim = int(snapshot["fusion_hidden_dim"])
+        self.dataset_profile = snapshot.get("dataset_profile")
+        id_map_state = snapshot["id_map"]
+        src_values = tuple(int(value) for value in id_map_state["src_values"])
+        dst_values = tuple(int(value) for value in id_map_state["dst_values"])
+        self.id_map = NodeIdMap(
+            src_to_id={value: idx for idx, value in enumerate(src_values)},
+            dst_to_id={value: idx for idx, value in enumerate(dst_values)},
+            src_values=src_values,
+            dst_values=dst_values,
+        )
+        self.encoder = HybridFeatureEncoder(
+            id_map=self.id_map,
+            recent_window=self.recent_window,
+            graph_config=self.config.graph_config(),
+            sequence_config=self.config.sequence_config(),
+            candidate_prior_config=self.config.candidate_prior_config(),
+            target_window_config=self.config.target_window_config(),
+            dataset_profile=self.dataset_profile,
+            two_tower_config=self.config.two_tower_config(),
+            source_profile_config=self.config.source_profile_config(),
+            structure_config=self.config.structure_config(),
+        )
+        self.encoder.hydrate(snapshot["encoder"])
+        self.fusion_result = snapshot["fusion_result"]
+        self.fusion = FusionMLP(
+            input_dim=len(self.fusion_result.feature_indices),
+            hidden_dim=self._fusion_hidden_dim,
+        )
+        set_model_state(self.fusion, snapshot["fusion_state"])
+        self.lgbm_result = snapshot.get("lgbm_result")
+        self.training_report = snapshot.get("training_report")
 
     def fit(self, interactions: InteractionTable, training_config: TrainingConfig) -> TrainingReport:
         if len(interactions) == 0:
@@ -527,6 +619,7 @@ class TemporalHybridRanker:
         self._fusion_hidden_dim = training_config.fusion_hidden_dim
 
         training_config = self._apply_auto_strategy(interactions, training_config)
+        self.config = training_config
         log_memory("hybrid_fit_start", enabled=training_config.verbose)
         log(f"[hybrid-fit] start events={len(interactions)}", enabled=training_config.verbose)
         fusion, fusion_result, lgbm_result, report, encoder_cache, cache_config = self._learn_fusion(
@@ -1638,3 +1731,15 @@ class HybridRankerAdapter:
 
     def predict_batch(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         return self.impl.predict_batch(queries)
+
+    @property
+    def training_report(self) -> TrainingReport | None:
+        return self.impl.training_report
+
+    def snapshot(self) -> dict[str, Any]:
+        return self.impl.snapshot()
+
+    def hydrate(self, snapshot: dict[str, Any]) -> None:
+        self.impl.hydrate(snapshot)
+        if self.impl.config is not None:
+            self.config = self.impl.config
