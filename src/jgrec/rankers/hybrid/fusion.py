@@ -391,7 +391,7 @@ def _initialize_fusion_mlp_from_rng(model: FusionMLP, rng: np.random.Generator) 
 
 
 def _seed_from_rng_state(rng: np.random.Generator, *, salt: str) -> int:
-    state_bytes = f"{salt}:{rng.bit_generator.state!r}".encode("utf-8")
+    state_bytes = f"{salt}:{rng.bit_generator.state!r}".encode()
     return int.from_bytes(hashlib.blake2b(state_bytes, digest_size=4).digest(), "little")
 
 

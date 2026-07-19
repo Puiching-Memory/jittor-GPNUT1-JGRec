@@ -1,8 +1,10 @@
 import sys
+
 sys.path.insert(0, "/desay120T/ct/dev/uid01954/jittor-GPNUT1-JGRec/src")
 
 import jittor as jt
 import numpy as np
+
 from jgrec.rankers.temporal_graph.model import (
     EndToEndTemporalGraphModel,
     TemporalGraphModelConfig,
@@ -10,6 +12,8 @@ from jgrec.rankers.temporal_graph.model import (
 
 # Enable CUDA for test
 jt.flags.use_cuda = 1
+
+rng = np.random.default_rng(0)
 
 config = TemporalGraphModelConfig(
     num_nodes=100,
@@ -41,7 +45,7 @@ candidate_neighbor_times = jt.array([
     [[1, 2, 0, 0, 0], [2, 3, 4, 0, 0], [3, 4, 5, 6, 0]],
     [[4, 5, 0, 0, 0], [5, 6, 7, 0, 0], [6, 7, 8, 9, 0]]
 ], dtype=jt.int32)
-candidate_features = jt.array(np.random.randn(batch_size, candidate_count, 6).astype(np.float32))
+candidate_features = jt.array(rng.standard_normal((batch_size, candidate_count, 6), dtype=np.float32))
 
 logits = model(
     src_ids=src_ids,

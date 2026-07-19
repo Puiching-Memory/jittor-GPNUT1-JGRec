@@ -19,8 +19,6 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-import numpy as np
-
 # Ensure src is on path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -34,10 +32,10 @@ from jgrec.rankers.temporal_graph.model import (
     EndToEndTemporalGraphModel,
     TemporalGraphModelConfig,
 )
+from jgrec.rankers.temporal_graph.ranker import TemporalGraphRanker
 from jgrec.rankers.temporal_graph.trainer import (
     CANDIDATE_PRIOR_FEATURE_DIM,
 )
-from jgrec.rankers.temporal_graph.ranker import TemporalGraphRanker
 
 # ---------------------------------------------------------------------------
 # Ablation grid

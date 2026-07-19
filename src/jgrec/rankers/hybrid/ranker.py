@@ -1195,12 +1195,12 @@ def _selected_report_metric(result: FusionResult, metric: str) -> float:
 
 
 def _find_ensemble_weight(
-    mlp_model: "FusionMLP | None",
-    mlp_result: "FusionResult | None",
-    lgbm_result: "LGBMFusionResult",
+    mlp_model: FusionMLP | None,
+    mlp_result: FusionResult | None,
+    lgbm_result: LGBMFusionResult,
     val_features: np.ndarray,
     feature_indices: tuple[int, ...],
-    config: "TrainingConfig",
+    config: TrainingConfig,
 ) -> float:
     if mlp_model is None or mlp_result is None:
         return 0.5
@@ -1213,7 +1213,7 @@ def _find_ensemble_weight(
 
     metric = config.selection_metric.lower()
     best_w, best_score = 0.5, -1.0
-    for w_int in range(0, 11):
+    for w_int in range(11):
         w = w_int / 10.0
         blended = w * mlp_probs + (1.0 - w) * lgbm_probs
         score = _mrr_from_probs(blended) if metric == "mrr" else _ap_from_probs(blended)

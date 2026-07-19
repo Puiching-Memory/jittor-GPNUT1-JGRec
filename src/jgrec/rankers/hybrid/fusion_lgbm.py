@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import numpy as np
 from sklearn.metrics import average_precision_score
 
-from jgrec.core.memory import log_memory
 from jgrec.logging import log
 
 

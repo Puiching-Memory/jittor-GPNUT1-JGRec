@@ -30,7 +30,7 @@ def top5_overlap(a: np.ndarray, b: np.ndarray) -> float:
     top_a = np.argpartition(-a, 5, axis=1)[:, :5]
     top_b = np.argpartition(-b, 5, axis=1)[:, :5]
     overlaps = []
-    for ra, rb in zip(top_a, top_b):
+    for ra, rb in zip(top_a, top_b, strict=True):
         overlaps.append(len(set(ra.tolist()) & set(rb.tolist())) / 5.0)
     return float(np.mean(overlaps))
 

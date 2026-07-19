@@ -181,7 +181,7 @@ def test_target_window_future_query_array_uses_dense_cache_not_scalar_dst_lookup
     tower = TargetWindowTower(TargetWindowConfig(window_fractions=(0.1, 0.3, 0.6, 1.0)))
     tower.fit(interactions)
 
-    def fail_scalar_lookup(dst: int):  # noqa: ARG001
+    def fail_scalar_lookup(dst: int):
         raise AssertionError("future target-window queries should use dense batch lookup")
 
     monkeypatch.setattr(tower, "_dst_times", fail_scalar_lookup)

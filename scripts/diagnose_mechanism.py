@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -27,8 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import jittor as jt
 
-from jgrec.core.io import discover_datasets, read_interactions, read_test_queries
-from jgrec.core.types import FitContext
+from jgrec.core.io import read_interactions, read_test_queries
 from jgrec.rankers.temporal_graph.config import TemporalGraphTrainingConfig
 from jgrec.rankers.temporal_graph.index import (
     TemporalNodeMap,
@@ -40,17 +38,16 @@ from jgrec.rankers.temporal_graph.model import (
     EndToEndTemporalGraphModel,
     TemporalGraphModelConfig,
 )
-from jgrec.rankers.temporal_graph.ranker import TemporalGraphRanker
 from jgrec.rankers.temporal_graph.trainer import (
     CANDIDATE_PRIOR_FEATURE_DIM,
     CandidatePriorIndex,
     TestCandidateIndex,
+    _batch_to_jittor,
+    _event_batches,
+    _sample_events,
     build_evaluation_batch,
     load_state,
-    predict_logits,
-    snapshot_state,
     train_listwise,
-    _batch_to_jittor,
 )
 
 
@@ -142,7 +139,7 @@ def main() -> int:
 
     if args.load_state is not None and args.load_state.exists():
         print(f"[diagnose] loading model state from {args.load_state}", flush=True)
-        state = {k: v for k, v in np.load(str(args.load_state)).items()}
+        state = dict(np.load(str(args.load_state)).items())
         load_state(model, state)
     else:
         print(f"[diagnose] training model for {args.epochs} epochs", flush=True)
@@ -281,12 +278,9 @@ def run_diagnosis(
     model.eval()
     collector = DiagnosisCollector()
 
-    from jgrec.rankers.temporal_graph.trainer import _event_batches, _sample_events
-
     val_events = _sample_events(val_events, max_batches * batch_size, rng)
-    batch_count = 0
-    for batch_events in _event_batches(val_events, batch_size):
-        if batch_count >= max_batches:
+    for batch_count, batch_events in enumerate(_event_batches(val_events, batch_size), start=1):
+        if batch_count > max_batches:
             break
         batch = build_evaluation_batch(
             events=batch_events,
@@ -308,7 +302,6 @@ def run_diagnosis(
         bsz = batch.src_ids.shape[0]
         cand_count = batch.candidates.shape[1]
         collector.add(trace, bsz, cand_count)
-        batch_count += 1
         print(f"  [diagnose] batch {batch_count}/{max_batches} done", flush=True)
 
     return collector
@@ -358,7 +351,7 @@ def analyze_gates(collector: DiagnosisCollector) -> dict:
     def gate_stats(values: np.ndarray, label: str) -> dict:
         hist_bins = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
         hist, _ = np.histogram(values, bins=hist_bins)
-        total = max(len(values), 1)
+        _ = max(len(values), 1)  # sample count; kept for future diagnostics
         polarization_low = float(np.mean(values < 0.2))
         polarization_high = float(np.mean(values > 0.8))
         polarization_ratio = polarization_low + polarization_high
@@ -391,9 +384,9 @@ def analyze_attention(collector: DiagnosisCollector) -> dict:
     Key layout: [src_self(1), dst_self(1), src_hist(history_len), dst_hist(candidate_history_len)]
     """
     all_attn = np.concatenate(collector.attention_weights, axis=0)  # [N, heads, 1, key_len]
-    all_masks = np.concatenate(collector.attention_key_masks, axis=0)  # [N, key_len]
+    _ = np.concatenate(collector.attention_key_masks, axis=0)  # [N, key_len]; kept for future mask-aware analysis
 
-    n_samples, n_heads, _, key_len = all_attn.shape
+    _, n_heads, _, key_len = all_attn.shape
 
     # Average attention weight per position across all samples and heads
     # Shape: [N, heads, key_len] (squeeze the query dim)
@@ -505,13 +498,10 @@ def analyze_time_projection(collector: DiagnosisCollector) -> dict:
     # Correlation between delta difference and (1 - cosine similarity)
     # Higher correlation means time encoding is more monotonic
     dissimilarities = 1.0 - cos_sims
-    if len(cos_sims) > 2:
-        correlation = float(np.corrcoef(delta_diffs, dissimilarities)[0, 1])
-    else:
-        correlation = 0.0
+    correlation = float(np.corrcoef(delta_diffs, dissimilarities)[0, 1]) if len(cos_sims) > 2 else 0.0
 
     return {
-        "valid_samples": int(len(valid_deltas)),
+        "valid_samples": len(valid_deltas),
         "delta_range": [float(sorted_deltas.min()), float(sorted_deltas.max())],
         "encoding_norm_mean": round(float(np.linalg.norm(valid_encodings, axis=1).mean()), 4),
         "encoding_norm_std": round(float(np.linalg.norm(valid_encodings, axis=1).std()), 4),
@@ -620,7 +610,7 @@ def print_report_summary(report: dict) -> None:
 
     # Time projection
     tp = report["time_projection"]
-    print(f"\n[3] TIME PROJECTION DIAGNOSIS")
+    print("\n[3] TIME PROJECTION DIAGNOSIS")
     if "error" in tp:
         print(f"  ERROR: {tp['error']}")
     else:
@@ -632,14 +622,14 @@ def print_report_summary(report: dict) -> None:
 
     # Scorer signals
     ss = report["scorer_signals"]
-    print(f"\n[4] SCORER INPUT SIGNALS")
+    print("\n[4] SCORER INPUT SIGNALS")
     for name, stats in sorted(ss.items(), key=lambda x: -x[1].get("relative_share", 0)):
         share = stats.get("relative_share", 0)
         print(f"  {name:20s}: mean_norm={stats['mean']:.4f}  std={stats['std']:.4f}  share={share:.1%}")
 
     # Pair stats
     ps = report["pair_stats"]
-    print(f"\n[5] PAIR STATISTICS DISTRIBUTION")
+    print("\n[5] PAIR STATISTICS DISTRIBUTION")
     for name, stats in ps.items():
         print(f"  {name:25s}: mean={stats['mean']:.4f}  std={stats['std']:.4f}  "
               f"zero_pct={stats['zero_pct']:.1%}")

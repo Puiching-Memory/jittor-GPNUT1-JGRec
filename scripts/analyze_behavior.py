@@ -25,7 +25,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import jittor as jt
 
 from jgrec.core.io import read_interactions, read_test_queries
-from jgrec.rankers.temporal_graph.config import TemporalGraphTrainingConfig
 from jgrec.rankers.temporal_graph.index import (
     TemporalNodeMap,
     safe_neighbor_sampler,
@@ -40,13 +39,12 @@ from jgrec.rankers.temporal_graph.trainer import (
     CANDIDATE_PRIOR_FEATURE_DIM,
     CandidatePriorIndex,
     TestCandidateIndex,
-    build_evaluation_batch,
-    load_state,
-    predict_logits,
-    train_listwise,
     _batch_to_jittor,
     _event_batches,
     _sample_events,
+    build_evaluation_batch,
+    load_state,
+    train_listwise,
 )
 
 
@@ -137,7 +135,7 @@ def main() -> int:
 
     if args.load_state is not None and args.load_state.exists():
         print(f"[behavior] loading model state from {args.load_state}", flush=True)
-        state = {k: v for k, v in np.load(str(args.load_state)).items()}
+        state = dict(np.load(str(args.load_state)).items())
         load_state(model, state)
     else:
         print(f"[behavior] training model for {args.epochs} epochs", flush=True)
@@ -237,7 +235,7 @@ def build_history_index(interactions, node_map: TemporalNodeMap) -> HistoryIndex
     dst_ids = node_map.dst_ids(interactions.dst)
     times = interactions.time
 
-    for src, dst, t in zip(src_ids, dst_ids, times):
+    for src, dst, t in zip(src_ids, dst_ids, times, strict=True):
         src, dst, t = int(src), int(dst), int(t)
         if src == 0 or dst == 0:
             continue
@@ -347,9 +345,8 @@ def run_behavioral_analysis(
     collector = BehaviorCollector()
 
     val_events = _sample_events(val_events, max_batches * batch_size, rng)
-    batch_count = 0
-    for batch_events in _event_batches(val_events, batch_size):
-        if batch_count >= max_batches:
+    for batch_count, batch_events in enumerate(_event_batches(val_events, batch_size), start=1):
+        if batch_count > max_batches:
             break
         batch = build_evaluation_batch(
             events=batch_events,
@@ -369,7 +366,6 @@ def run_behavioral_analysis(
         logits_np = np.asarray(logits.numpy(), dtype=np.float32)
 
         collector.add_batch(batch, logits_np, history_index, node_map)
-        batch_count += 1
         print(f"  [behavior] batch {batch_count}/{max_batches} done", flush=True)
 
     return collector
@@ -538,7 +534,7 @@ def print_report_summary(report: dict) -> None:
 
     # Success vs failure
     sf = report["success_vs_failure"]
-    print(f"\n[2] SUCCESS vs FAILURE COMPARISON")
+    print("\n[2] SUCCESS vs FAILURE COMPARISON")
     for group in ("success", "failure"):
         g = sf[group]
         print(f"  {group} (n={g['count']}):")
@@ -553,7 +549,7 @@ def print_report_summary(report: dict) -> None:
     cc = report["candidate_competition"]
     print(f"\n[3] CANDIDATE COMPETITION (failed cases, n={cc['total_comparisons']})")
     if cc["total_comparisons"] > 0:
-        print(f"  top candidate beats positive by:")
+        print("  top candidate beats positive by:")
         print(f"    repeat history: {cc['repeat_wins']} ({cc['repeat_win_share']:.1%})")
         print(f"    recency:        {cc['recency_wins']} ({cc['recency_win_share']:.1%})")
         print(f"    in src history: {cc['history_wins']} ({cc['history_win_share']:.1%})")
@@ -561,7 +557,7 @@ def print_report_summary(report: dict) -> None:
 
     # Cold start
     cs = report["cold_start"]
-    print(f"\n[4] COLD START ANALYSIS")
+    print("\n[4] COLD START ANALYSIS")
     print(f"  src cold ({cs['cold_src']['count']}) acc={cs['cold_src']['accuracy']:.1%}  "
           f"warm ({cs['warm_src']['count']}) acc={cs['warm_src']['accuracy']:.1%}  "
           f"gap={cs['src_gap']:+.1%}")

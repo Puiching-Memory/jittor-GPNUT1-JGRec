@@ -209,7 +209,7 @@ class TwoTower:
         training_context,
         *,
         train: bool,
-    ) -> "jt.Var":
+    ) -> jt.Var:
         samples = _build_training_batch_for_events(
             events=sampled_events.take(batch_idx),
             negative_seeds=negative_seeds[batch_idx],
