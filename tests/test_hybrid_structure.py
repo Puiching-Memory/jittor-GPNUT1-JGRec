@@ -4,6 +4,7 @@ import numpy as np
 
 from jgrec.core.types import Interaction, InteractionTable
 from jgrec.core.types import TestQuery as Query
+from jgrec.rankers.common.sparse_counts import SparseCountMap
 from jgrec.rankers.hybrid.candidate_prior import CANDIDATE_PRIOR_FEATURE_NAMES
 from jgrec.rankers.hybrid.config import (
     GRAPH_WINDOW_NAMES,
@@ -15,13 +16,47 @@ from jgrec.rankers.hybrid.config import (
 )
 from jgrec.rankers.hybrid.ranker import _feature_masks
 from jgrec.rankers.hybrid.stats import STAT_FEATURE_NAMES
-from jgrec.rankers.hybrid.structure import STRUCTURE_FEATURE_NAMES, StructureFeatureTower
+from jgrec.rankers.hybrid.structure import STRUCTURE_FEATURE_NAMES, StructureFeatureTower, _CompactStructureSummary
 
 FEATURE = {name: idx for idx, name in enumerate(STRUCTURE_FEATURE_NAMES)}
 
 
 def _table(events: list[Interaction]) -> InteractionTable:
     return InteractionTable.from_events(events)
+
+
+def test_sparse_count_map_sums_many_candidate_counts_across_rows():
+    counts = SparseCountMap.from_nested_dict(
+        {
+            10: {10: 99, 20: 2, 30: 1},
+            20: {20: 88, 30: 4},
+        }
+    )
+    left_keys = np.asarray([10, 20, 999], dtype=np.int32)
+    candidate_ids = np.asarray([20, 30, 20, 40], dtype=np.int64)
+
+    actual = counts.sum_row_counts_for_candidates(
+        left_keys,
+        candidate_ids,
+        exclude_equal=True,
+    )
+
+    np.testing.assert_array_equal(actual, np.asarray([2, 5, 2, 0], dtype=np.int64))
+
+
+def test_compact_structure_summary_looks_up_many_candidates_in_order():
+    summary = _CompactStructureSummary(
+        candidate_ids=np.asarray([10, 30], dtype=np.int64),
+        common_counts=np.asarray([2, 4], dtype=np.int32),
+        aa_scores=np.asarray([0.25, 0.75], dtype=np.float64),
+        ra_scores=np.asarray([0.5, 1.5], dtype=np.float64),
+    )
+
+    common, aa, ra = summary.lookup_many(np.asarray([30, 20, 10, 30], dtype=np.int64))
+
+    np.testing.assert_array_equal(common, np.asarray([4, 0, 2, 4], dtype=np.int32))
+    np.testing.assert_array_equal(aa, np.asarray([0.75, 0.0, 0.25, 0.75], dtype=np.float64))
+    np.testing.assert_array_equal(ra, np.asarray([1.5, 0.0, 0.5, 1.5], dtype=np.float64))
 
 
 def test_structure_features_use_temporal_cutoff():
@@ -218,6 +253,54 @@ def test_future_only_structure_preaggregates_repeated_source_cooccurs():
 
     assert 1 in future_tower._full_src_cooccur_cache
     assert np.isfinite(actual).all()
+
+
+def test_future_only_structure_vectorizes_candidate_cooccur_lookup(monkeypatch):
+    interactions = [
+        Interaction(src=1, dst=10, time=10),
+        Interaction(src=1, dst=20, time=20),
+        Interaction(src=10, dst=30, time=30),
+        Interaction(src=10, dst=40, time=40),
+        Interaction(src=20, dst=30, time=50),
+        Interaction(src=20, dst=50, time=60),
+    ]
+    query = Query(src=1, time=100, candidates=(20, 30, 40, 30, 999))
+    tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
+    tower.fit(_table(interactions), rng=np.random.default_rng(0), verbose=False)
+    expected = tower.features_for_queries([query])
+
+    def fail_scalar_lookup(*args, **kwargs):
+        raise AssertionError("candidate cooccurs must be looked up in one vectorized pass")
+
+    monkeypatch.setattr(SparseCountMap, "batch_get_counts", fail_scalar_lookup)
+
+    actual = tower.features_for_queries([query])
+
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_future_only_structure_vectorizes_compact_summary_lookup(monkeypatch):
+    interactions = [
+        Interaction(src=1, dst=10, time=10),
+        Interaction(src=1, dst=20, time=20),
+        Interaction(src=10, dst=30, time=30),
+        Interaction(src=10, dst=40, time=40),
+        Interaction(src=20, dst=30, time=50),
+        Interaction(src=20, dst=50, time=60),
+    ]
+    query = Query(src=1, time=100, candidates=(30, 999, 40, 30))
+    tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
+    tower.fit(_table(interactions), rng=np.random.default_rng(0), verbose=False)
+    expected = tower.features_for_queries([query])
+
+    def fail_scalar_lookup(*args, **kwargs):
+        raise AssertionError("structure summaries must be looked up in one vectorized pass")
+
+    monkeypatch.setattr(_CompactStructureSummary, "get", fail_scalar_lookup)
+
+    actual = tower.features_for_queries([query])
+
+    np.testing.assert_array_equal(actual, expected)
 
 
 def test_structure_cache_byte_budget_does_not_change_features() -> None:

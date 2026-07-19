@@ -39,6 +39,13 @@ DEFAULT_BRIDGE_OVERLAP_THRESHOLD = 0.50
 DEFAULT_BRIDGE_MIN_ROLE_DEGREE = 2
 
 
+def _matching_rows(sorted_ids: np.ndarray, requested_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    positions = np.searchsorted(sorted_ids, requested_ids)
+    matched = np.flatnonzero(positions < len(sorted_ids))
+    matched = matched[sorted_ids[positions[matched]] == requested_ids[matched]]
+    return matched, positions[matched]
+
+
 @dataclass(frozen=True)
 class _CompactStructureSummary:
     candidate_ids: np.ndarray
@@ -56,6 +63,18 @@ class _CompactStructureSummary:
             return 0, 0.0, 0.0
         return int(self.common_counts[pos]), float(self.aa_scores[pos]), float(self.ra_scores[pos])
 
+    def lookup_many(self, candidate_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        common = np.zeros(len(candidate_ids), dtype=self.common_counts.dtype)
+        aa = np.zeros(len(candidate_ids), dtype=self.aa_scores.dtype)
+        ra = np.zeros(len(candidate_ids), dtype=self.ra_scores.dtype)
+        if candidate_ids.size == 0 or self.candidate_ids.size == 0:
+            return common, aa, ra
+        matched, source_rows = _matching_rows(self.candidate_ids, candidate_ids)
+        common[matched] = self.common_counts[source_rows]
+        aa[matched] = self.aa_scores[source_rows]
+        ra[matched] = self.ra_scores[source_rows]
+        return common, aa, ra
+
 
 @dataclass(frozen=True)
 class _CompactCountSummary:
@@ -66,16 +85,13 @@ class _CompactCountSummary:
     def nbytes(self) -> int:
         return self.candidate_ids.nbytes + self.counts.nbytes
 
-    def lookup_many(self, candidate_ids: tuple[int, ...]) -> np.ndarray:
+    def lookup_many(self, candidate_ids: np.ndarray | tuple[int, ...]) -> np.ndarray:
         result = np.zeros(len(candidate_ids), dtype=np.int32)
-        if not candidate_ids or self.candidate_ids.size == 0:
+        if len(candidate_ids) == 0 or self.candidate_ids.size == 0:
             return result
         requested = np.asarray(candidate_ids, dtype=self.candidate_ids.dtype)
-        positions = np.searchsorted(self.candidate_ids, requested)
-        in_bounds = positions < len(self.candidate_ids)
-        rows = np.flatnonzero(in_bounds)
-        rows = rows[self.candidate_ids[positions[rows]] == requested[rows]]
-        result[rows] = self.counts[positions[rows]].astype(np.int32, copy=False)
+        matched, source_rows = _matching_rows(self.candidate_ids, requested)
+        result[matched] = self.counts[source_rows].astype(np.int32, copy=False)
         return result
 
 
@@ -306,20 +322,29 @@ class StructureFeatureTower:
             src_neighbors = np.fromiter(limited_set, dtype=np.int64, count=len(limited_set))
             src_neighbor_count = len(src_neighbors)
         candidate_ids = tuple(int(dst) for dst in query.candidates)
+        candidate_arr = np.asarray(candidate_ids, dtype=np.int64)
         structure_summary = self._full_src_structure(query.src, src_neighbors) if src_neighbor_count else None
+        if structure_summary is None:
+            common_counts = np.zeros(len(candidate_ids), dtype=np.int32)
+            aa_scores = np.zeros(len(candidate_ids), dtype=np.float64)
+            ra_scores = np.zeros(len(candidate_ids), dtype=np.float64)
+        else:
+            common_counts, aa_scores, ra_scores = structure_summary.lookup_many(candidate_arr)
         cooccur_counts = (
             self._full_cooccur_counts(
                 query.src,
                 src_neighbors,
-                candidate_ids,
+                candidate_arr,
                 force_preaggregate=force_cooccur_preaggregate,
             )
             if self.config.cooccur_enabled
             else np.zeros(len(candidate_ids), dtype=np.int32)
         )
-        transition_row = None
+        transition_counts = None
         if self.config.transition_enabled and last_visible_dst is not None and self.index.future_only:
             transition_row = self.index.future_transition_count_maps.get_row(last_visible_dst)
+            if transition_row is not None:
+                transition_counts = _CompactCountSummary(*transition_row).lookup_many(candidate_arr)
 
         aa_raw = np.zeros(len(candidate_ids), dtype=np.float64)
         for idx, dst_int in enumerate(candidate_ids):
@@ -341,7 +366,9 @@ class StructureFeatureTower:
                 output[idx, 6] = math.exp(-max(query.time - reverse_last_time, 0) / self.graph_span)
 
             if src_neighbor_count and dst_source_count:
-                common, aa, ra = structure_summary.get(dst_int)
+                common = int(common_counts[idx])
+                aa = float(aa_scores[idx])
+                ra = float(ra_scores[idx])
                 union = src_neighbor_count + dst_source_count - common
                 output[idx, 7] = math.log1p(common)
                 output[idx, 8] = common / max(union, 1)
@@ -356,10 +383,8 @@ class StructureFeatureTower:
                     output[idx, 9] = math.log1p(cooccur)
 
             if self.config.transition_enabled and last_visible_dst is not None:
-                if transition_row is not None:
-                    cols, vals = transition_row
-                    pos = int(np.searchsorted(cols, dst_int))
-                    transition = int(vals[pos]) if pos < len(cols) and cols[pos] == dst_int else 0
+                if transition_counts is not None:
+                    transition = int(transition_counts[idx])
                 else:
                     transition = self.index.transition_count(last_visible_dst, dst_int, query.time)
                 if transition:
@@ -497,12 +522,12 @@ class StructureFeatureTower:
         self,
         src: int,
         src_neighbors: np.ndarray,
-        candidate_ids: tuple[int, ...],
+        candidate_ids: np.ndarray | tuple[int, ...],
         *,
         force_preaggregate: bool = False,
     ) -> np.ndarray:
         counts = np.zeros(len(candidate_ids), dtype=np.int32)
-        if src_neighbors.size == 0 or not candidate_ids:
+        if src_neighbors.size == 0 or len(candidate_ids) == 0:
             return counts
 
         has_grouped_cooccurs = (
@@ -512,13 +537,13 @@ class StructureFeatureTower:
             return self._full_src_cooccurs(src, src_neighbors).lookup_many(candidate_ids)
         elif len(src_neighbors) <= FULL_COOCCUR_PREAGGREGATE_NEIGHBOR_THRESHOLD or not has_grouped_cooccurs:
             if self.index.future_only:
-                neighbor_arr = np.asarray(sorted(src_neighbors), dtype=np.int32)
-                unique_candidates = tuple(dict.fromkeys(candidate_ids))
-                candidate_counts: dict[int, int] = {}
-                for candidate in unique_candidates:
-                    per_neighbor = self.index.future_cooccur_count_maps.batch_get_counts(neighbor_arr, candidate)
-                    mask = neighbor_arr != candidate
-                    candidate_counts[candidate] = int(per_neighbor[mask].sum())
+                neighbor_arr = np.sort(src_neighbors).astype(np.int32, copy=False)
+                candidate_arr = np.asarray(candidate_ids, dtype=np.int64)
+                return self.index.future_cooccur_count_maps.sum_row_counts_for_candidates(
+                    neighbor_arr,
+                    candidate_arr,
+                    exclude_equal=True,
+                ).astype(np.int32, copy=False)
             else:
                 unique_candidates = tuple(dict.fromkeys(candidate_ids))
                 candidate_counts: dict[int, int] = {}

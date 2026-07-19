@@ -1,4 +1,6 @@
 import csv
+import tempfile
+from pathlib import Path
 
 import numpy as np
 
@@ -27,6 +29,25 @@ class DummyRanker:
         return np.tile(row, (len(queries), 1))
 
 
+class SourceValueRanker(DummyRanker):
+    def __init__(self, *, fail_after_batches: int | None = None) -> None:
+        super().__init__()
+        self.seen_sources: list[int] = []
+        self.fail_after_batches = fail_after_batches
+
+    def predict_batch(self, queries: TestQueryArray) -> np.ndarray:
+        self.batch_sizes.append(len(queries))
+        self.seen_sources.extend(int(src) for src in queries.src)
+        if self.fail_after_batches is not None and len(self.batch_sizes) > self.fail_after_batches:
+            raise RuntimeError("scheduled prediction failed")
+        return np.repeat((queries.src.astype(np.float64) / 100.0)[:, None], queries.candidate_count, axis=1)
+
+
+class SourceScheduledRanker(SourceValueRanker):
+    def prediction_order(self, queries: TestQueryArray) -> np.ndarray:
+        return np.argsort(queries.src, kind="stable")
+
+
 def _write_train_csv(path) -> None:
     with path.open("w", newline="") as f:
         writer = csv.writer(f)
@@ -45,6 +66,29 @@ def _write_test_csv(path, row_count: int) -> None:
         writer.writerow(["src", "time", *(f"c{idx}" for idx in range(1, 101))])
         for row_idx in range(row_count):
             writer.writerow([str(row_idx), str(row_idx + 1000), *(str(value) for value in range(100))])
+
+
+def _write_test_sources(path, sources: list[int]) -> None:
+    with path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["src", "time", *(f"c{idx}" for idx in range(1, 101))])
+        for row_idx, src in enumerate(sources):
+            writer.writerow([str(src), str(row_idx + 1000), *(str(value) for value in range(100))])
+
+
+def _capture_prediction_memmaps(tmp_path, monkeypatch) -> list[Path]:
+    temp_dir = tmp_path / "prediction-temp"
+    temp_dir.mkdir()
+    created_paths: list[Path] = []
+    real_mkstemp = tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        fd, path = real_mkstemp(*args, dir=temp_dir, **kwargs)
+        created_paths.append(Path(path))
+        return fd, path
+
+    monkeypatch.setattr(tempfile, "mkstemp", recording_mkstemp)
+    return created_paths
 
 
 def test_build_dataset_submission_limits_rows_and_clips_predictions(tmp_path):
@@ -155,3 +199,65 @@ def test_build_dataset_submission_calls_after_fit_before_prediction(tmp_path):
     )
 
     assert observations == [(True, ())]
+
+
+def test_build_dataset_submission_schedules_prediction_but_writes_original_order(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "PREDICTION_MEMMAP_FLUSH_INTERVAL", 1)
+    dataset_root = tmp_path / "dataset1"
+    dataset_root.mkdir()
+    train_path = dataset_root / "train.csv"
+    test_path = dataset_root / "test.csv"
+    _write_train_csv(train_path)
+    original_sources = [30, 10, 30, 20, 10]
+    _write_test_sources(test_path, original_sources)
+    dataset = DatasetPaths("dataset1", dataset_root, train_path, test_path)
+    ranker = SourceScheduledRanker()
+    memmap_paths = _capture_prediction_memmaps(tmp_path, monkeypatch)
+
+    result = build_dataset_submission(
+        dataset=dataset,
+        ranker=ranker,
+        output_dir=tmp_path / "out",
+        batch_size=2,
+        verbose=False,
+    )
+
+    assert ranker.batch_sizes == [2, 2, 1]
+    assert ranker.seen_sources == [10, 10, 20, 30, 30]
+    predictions = np.loadtxt(result.output_path, delimiter=",")
+    np.testing.assert_array_equal(predictions[:, 0], np.asarray(original_sources, dtype=np.float64) / 100.0)
+    assert len(memmap_paths) == 1
+    assert not memmap_paths[0].exists()
+
+    reference = build_dataset_submission(
+        dataset=dataset,
+        ranker=SourceValueRanker(),
+        output_dir=tmp_path / "reference",
+        batch_size=2,
+        verbose=False,
+    )
+    assert result.output_path.read_bytes() == reference.output_path.read_bytes()
+
+
+def test_build_dataset_submission_removes_prediction_memmap_after_failure(tmp_path, monkeypatch):
+    dataset_root = tmp_path / "dataset1"
+    dataset_root.mkdir()
+    train_path = dataset_root / "train.csv"
+    test_path = dataset_root / "test.csv"
+    _write_train_csv(train_path)
+    _write_test_sources(test_path, [30, 10, 20])
+    dataset = DatasetPaths("dataset1", dataset_root, train_path, test_path)
+    ranker = SourceScheduledRanker(fail_after_batches=1)
+    memmap_paths = _capture_prediction_memmaps(tmp_path, monkeypatch)
+
+    with np.testing.assert_raises_regex(RuntimeError, "scheduled prediction failed"):
+        build_dataset_submission(
+            dataset=dataset,
+            ranker=ranker,
+            output_dir=tmp_path / "out",
+            batch_size=2,
+            verbose=False,
+        )
+
+    assert len(memmap_paths) == 1
+    assert not memmap_paths[0].exists()

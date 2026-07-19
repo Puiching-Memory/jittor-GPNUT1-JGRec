@@ -52,18 +52,24 @@ class _CompactDeterministicSummary:
             for array in (self.full_candidate_ids, self.full_values, self.recent_candidate_ids, self.recent_values)
         )
 
-    def full(self, candidate: int) -> np.ndarray | None:
-        return _lookup_row(self.full_candidate_ids, self.full_values, candidate)
-
-    def recent(self, candidate: int) -> np.ndarray | None:
-        return _lookup_row(self.recent_candidate_ids, self.recent_values, candidate)
+    def fill_candidates(self, candidates: np.ndarray, output: np.ndarray) -> None:
+        _fill_matching_rows(self.full_candidate_ids, self.full_values, candidates, output[:, :4])
+        _fill_matching_rows(self.recent_candidate_ids, self.recent_values, candidates, output[:, 4:6])
 
 
-def _lookup_row(keys: np.ndarray, values: np.ndarray, key: int) -> np.ndarray | None:
-    pos = int(np.searchsorted(keys, key))
-    if pos >= len(keys) or keys[pos] != key:
-        return None
-    return values[pos]
+def _fill_matching_rows(
+    keys: np.ndarray,
+    values: np.ndarray,
+    candidates: np.ndarray,
+    output: np.ndarray,
+) -> None:
+    if keys.size == 0 or candidates.size == 0:
+        return
+    positions = np.searchsorted(keys, candidates)
+    in_bounds = positions < len(keys)
+    rows = np.flatnonzero(in_bounds)
+    rows = rows[keys[positions[rows]] == candidates[rows]]
+    output[rows] = values[positions[rows]]
 
 
 def _jt():
@@ -78,7 +84,9 @@ class SourceProfileTower:
         self.config = config
         self.index = TemporalInteractionIndex()
         self.item_pair_counts_sparse: SparseCountMap = SparseCountMap.empty()
-        self.item_degrees: dict[int, int] = {}
+        self._candidate_ids = np.asarray(self.id_map.dst_values, dtype=np.int64)
+        self._item_degree_values = np.zeros(self._candidate_ids.size, dtype=np.int32)
+        self._seen_candidate_mask = np.zeros(self._candidate_ids.size, dtype=bool)
         self.embeddings: np.ndarray | None = None
         total_cache_bytes = max(int(self.config.cache_max_bytes), 0)
         embedding_cache_bytes = total_cache_bytes // 8
@@ -120,10 +128,11 @@ class SourceProfileTower:
                 build_transitions=False,
                 build_cooccurs=False,
             )
+        self._refresh_seen_candidates()
         if self.config.deterministic_enabled and not deterministic_ready:
             self.fit_deterministic(interactions)
         elif not self.config.deterministic_enabled:
-            self.item_degrees = {}
+            self._item_degree_values.fill(0)
         if self.config.item2vec_enabled and self.config.epochs > 0 and self.id_map.num_dst >= 2:
             self._fit_item2vec(interactions, rng=rng, verbose=verbose)
         else:
@@ -131,18 +140,24 @@ class SourceProfileTower:
         self._clear_score_caches()
 
     def snapshot(self) -> dict[str, Any]:
+        item_degrees = {
+            int(candidate): int(degree)
+            for candidate, degree in zip(self._candidate_ids, self._item_degree_values, strict=True)
+            if degree > 0
+        }
         return {
             "index": self.index.shallow_copy(),
             "item_pair_counts": self.item_pair_counts_sparse.snapshot(),
-            "item_degrees": dict(self.item_degrees),
+            "item_degrees": item_degrees,
             "embeddings": None if self.embeddings is None else self.embeddings.copy(),
         }
 
     def hydrate(self, snapshot: dict[str, Any]) -> None:
         index = snapshot.get("index")
         self.index = TemporalInteractionIndex() if index is None else index.shallow_copy()
+        self._refresh_seen_candidates()
         self.item_pair_counts_sparse = SparseCountMap.from_snapshot(snapshot["item_pair_counts"])
-        self.item_degrees = {int(dst): int(count) for dst, count in snapshot["item_degrees"].items()}
+        self._set_item_degrees(snapshot["item_degrees"])
         embeddings = snapshot.get("embeddings")
         self.embeddings = None if embeddings is None else np.asarray(embeddings, dtype=np.float32).copy()
         self._clear_score_caches()
@@ -206,7 +221,7 @@ class SourceProfileTower:
                     pair_counts[right_int][left_int] = pair_counts[right_int].get(left_int, 0) + 1
         nested = {left: dict(counts) for left, counts in pair_counts.items()}
         self.item_pair_counts_sparse = SparseCountMap.from_nested_dict(nested)
-        self.item_degrees = degrees
+        self._set_item_degrees(degrees)
 
     def _fit_item2vec(self, interactions: InteractionTable, rng: np.random.Generator, verbose: bool) -> None:
         samples = _item2vec_samples(interactions, self.id_map, self.config, rng)
@@ -285,17 +300,19 @@ class SourceProfileTower:
 
         recent_k = max(int(self.config.recent_k), 1)
         sparse = self.item_pair_counts_sparse
+        history_int32 = history.astype(np.int32, copy=False)
+        history_degrees = self._degrees_for(history_int32)
+        candidate_degrees = self._degrees_for(candidates)
         for col_idx, candidate in enumerate(candidates):
             candidate_int = int(candidate)
-            candidate_degree = max(self.item_degrees.get(candidate_int, 0), 1)
-            counts = sparse.batch_get_counts(history.astype(np.int32, copy=False), candidate_int)
+            candidate_degree = candidate_degrees[col_idx]
+            counts = sparse.batch_get_counts(history_int32, candidate_int)
             mask = (counts > 0) & (history != candidate_int)
             if not np.any(mask):
                 continue
             valid_counts = counts[mask].astype(np.float32)
-            valid_history = history[mask]
             values = np.log1p(valid_counts)
-            seen_degrees = np.array([max(self.item_degrees.get(int(s), 0), 1) for s in valid_history], dtype=np.float32)
+            seen_degrees = history_degrees[mask]
             cosines = valid_counts / np.sqrt(seen_degrees * candidate_degree)
             output[col_idx, 0] = values.sum()
             output[col_idx, 1] = values.max()
@@ -304,10 +321,7 @@ class SourceProfileTower:
             recent_mask = mask[-recent_k:]
             if np.any(recent_mask):
                 recent_counts = counts[-recent_k:][recent_mask].astype(np.float32)
-                recent_seen = history[-recent_k:][recent_mask]
-                recent_degrees = np.array(
-                    [max(self.item_degrees.get(int(s), 0), 1) for s in recent_seen], dtype=np.float32
-                )
+                recent_degrees = history_degrees[-recent_k:][recent_mask]
                 recent_cosines = recent_counts / np.sqrt(recent_degrees * candidate_degree)
                 output[col_idx, 4] = recent_cosines.sum()
                 output[col_idx, 5] = recent_cosines.max()
@@ -320,18 +334,7 @@ class SourceProfileTower:
         output: np.ndarray,
     ) -> None:
         summary = self._deterministic_summary(cache_key, history)
-        for col_idx, candidate in enumerate(candidates):
-            candidate_int = int(candidate)
-            full = summary.full(candidate_int)
-            if full is not None:
-                output[col_idx, 0] = np.float32(full[0])
-                output[col_idx, 1] = np.float32(full[1])
-                output[col_idx, 2] = np.float32(full[2])
-                output[col_idx, 3] = np.float32(full[3])
-            recent = summary.recent(candidate_int)
-            if recent is not None:
-                output[col_idx, 4] = np.float32(recent[0])
-                output[col_idx, 5] = np.float32(recent[1])
+        summary.fill_candidates(candidates, output)
 
     def _deterministic_summary(
         self,
@@ -342,10 +345,27 @@ class SourceProfileTower:
         if cached is not None:
             return cached
 
+        summary = self._build_deterministic_summary(history)
+        self._deterministic_cache.put(cache_key, summary, size_bytes=summary.nbytes)
+        return summary
+
+    def _build_deterministic_summary(self, history: np.ndarray) -> _CompactDeterministicSummary:
         recent_k = max(int(self.config.recent_k), 1)
         recent_start = max(history.size - recent_k, 0)
-        full_scores: dict[int, tuple[float, float, float, float]] = {}
-        recent_scores: dict[int, tuple[float, float]] = {}
+        candidate_ids = self._candidate_ids
+        if candidate_ids.size == 0:
+            return _CompactDeterministicSummary(
+                full_candidate_ids=np.empty(0, dtype=np.int64),
+                full_values=np.empty((0, 4), dtype=np.float64),
+                recent_candidate_ids=np.empty(0, dtype=np.int64),
+                recent_values=np.empty((0, 2), dtype=np.float64),
+            )
+
+        candidate_degrees = np.maximum(self._item_degree_values, 1).astype(np.float32)
+        full_values = np.zeros((candidate_ids.size, 4), dtype=np.float64)
+        recent_values = np.zeros((candidate_ids.size, 2), dtype=np.float64)
+        full_touched = np.zeros(candidate_ids.size, dtype=bool)
+        recent_touched = np.zeros(candidate_ids.size, dtype=bool)
         sparse = self.item_pair_counts_sparse
         for history_idx, seen in enumerate(history):
             seen_int = int(seen)
@@ -357,23 +377,33 @@ class SourceProfileTower:
             if not np.any(mask):
                 continue
             cols, cooccurs = cols[mask], cooccurs[mask]
-            values = np.log1p(cooccurs.astype(np.float32))
-            seen_degree = max(self.item_degrees.get(seen_int, 0), 1)
-            cand_degrees = np.array([max(self.item_degrees.get(int(c), 0), 1) for c in cols], dtype=np.float32)
-            cosines = cooccurs.astype(np.float32) / np.sqrt(seen_degree * cand_degrees)
-            is_recent = history_idx >= recent_start
-            for i in range(len(cols)):
-                cand = int(cols[i])
-                val = float(values[i])
-                cos = float(cosines[i])
-                t, mx, ct, cm = full_scores.get(cand, (0.0, 0.0, 0.0, 0.0))
-                full_scores[cand] = (t + val, max(mx, val), ct + cos, max(cm, cos))
-                if is_recent:
-                    rt, rm = recent_scores.get(cand, (0.0, 0.0))
-                    recent_scores[cand] = (rt + cos, max(rm, cos))
-        summary = _CompactDeterministicSummary.from_dicts(full_scores, recent_scores)
-        self._deterministic_cache.put(cache_key, summary, size_bytes=summary.nbytes)
-        return summary
+            positions = np.searchsorted(candidate_ids, cols)
+            valid = positions < candidate_ids.size
+            valid_rows = np.flatnonzero(valid)
+            valid[valid_rows] &= candidate_ids[positions[valid_rows]] == cols[valid_rows]
+            if not np.all(valid):
+                positions = positions[valid]
+                cooccurs = cooccurs[valid]
+            cooccurs_float = cooccurs.astype(np.float32)
+            values = np.log1p(cooccurs_float)
+            seen_degree = self._degree_for(seen_int)
+            cosines = cooccurs_float / np.sqrt(seen_degree * candidate_degrees[positions])
+            np.add.at(full_values[:, 0], positions, values)
+            np.maximum.at(full_values[:, 1], positions, values)
+            np.add.at(full_values[:, 2], positions, cosines)
+            np.maximum.at(full_values[:, 3], positions, cosines)
+            full_touched[positions] = True
+            if history_idx >= recent_start:
+                np.add.at(recent_values[:, 0], positions, cosines)
+                np.maximum.at(recent_values[:, 1], positions, cosines)
+                recent_touched[positions] = True
+
+        return _CompactDeterministicSummary(
+            full_candidate_ids=candidate_ids[full_touched],
+            full_values=full_values[full_touched],
+            recent_candidate_ids=candidate_ids[recent_touched],
+            recent_values=recent_values[recent_touched],
+        )
 
     def _fill_item2vec_features(
         self,
@@ -386,14 +416,12 @@ class SourceProfileTower:
         if self.embeddings is None:
             return
         full_profile, recent_profile = self._embedding_profiles(history, cache_key, use_cache)
-        dst_ids = self.id_map.dst_ids(candidates)
-        valid = dst_ids >= 0
-        if np.any(valid):
-            valid &= np.asarray([int(candidate) in self.index.dst_times for candidate in candidates], dtype=bool)
-        if not np.any(valid):
+        dst_ids, valid = self._candidate_positions(candidates)
+        valid_rows = np.flatnonzero(valid)
+        valid_rows = valid_rows[self._seen_candidate_mask[dst_ids[valid_rows]]]
+        if valid_rows.size == 0:
             return
 
-        valid_rows = np.flatnonzero(valid)
         item_vectors = self.embeddings[dst_ids[valid_rows]]
         scale = math.sqrt(self.embeddings.shape[1])
         output[valid_rows, 6] = np.asarray(item_vectors @ full_profile / scale, dtype=np.float32)
@@ -415,8 +443,8 @@ class SourceProfileTower:
             if cached is not None:
                 return cached
 
-        history_ids = self.id_map.dst_ids(history)
-        history_ids = history_ids[history_ids >= 0]
+        history_ids, valid = self._candidate_positions(history)
+        history_ids = history_ids[valid]
         if history_ids.size == 0:
             profiles = (
                 np.zeros(self.embeddings.shape[1], dtype=np.float32),
@@ -435,9 +463,53 @@ class SourceProfileTower:
         return profiles
 
     def _cosine_from_count(self, cooccur: int, left: int, right: int, right_degree: int) -> float:
-        left_degree = self.item_degrees.get(int(left), 0)
+        left_degree = self._degree_for(left)
         denominator = math.sqrt(max(left_degree, 1) * max(right_degree, 1))
         return float(cooccur) / max(denominator, EPSILON)
+
+    def _set_item_degrees(self, item_degrees: dict[int, int]) -> None:
+        self._item_degree_values.fill(0)
+        if not item_degrees or self._candidate_ids.size == 0:
+            return
+        raw_ids = np.fromiter(item_degrees, dtype=np.int64, count=len(item_degrees))
+        degrees = np.fromiter(item_degrees.values(), dtype=np.int32, count=len(item_degrees))
+        positions = np.searchsorted(self._candidate_ids, raw_ids)
+        valid = positions < self._candidate_ids.size
+        rows = np.flatnonzero(valid)
+        rows = rows[self._candidate_ids[positions[rows]] == raw_ids[rows]]
+        self._item_degree_values[positions[rows]] = degrees[rows]
+
+    def _refresh_seen_candidates(self) -> None:
+        self._seen_candidate_mask.fill(False)
+        if not self.index.dst_times or self._candidate_ids.size == 0:
+            return
+        raw_ids = np.fromiter(self.index.dst_times, dtype=np.int64, count=len(self.index.dst_times))
+        positions, valid = self._candidate_positions(raw_ids)
+        self._seen_candidate_mask[positions[valid]] = True
+
+    def _candidate_positions(self, raw_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        raw_ids = np.asarray(raw_ids)
+        positions = np.searchsorted(self._candidate_ids, raw_ids)
+        valid = positions < self._candidate_ids.size
+        rows = np.flatnonzero(valid)
+        valid[rows] &= self._candidate_ids[positions[rows]] == raw_ids[rows]
+        return positions, valid
+
+    def _degrees_for(self, raw_ids: np.ndarray) -> np.ndarray:
+        raw_ids = np.asarray(raw_ids)
+        degrees = np.ones(raw_ids.shape, dtype=np.float32)
+        if raw_ids.size == 0 or self._candidate_ids.size == 0:
+            return degrees
+        positions, valid = self._candidate_positions(raw_ids)
+        rows = np.flatnonzero(valid)
+        degrees[rows] = np.maximum(self._item_degree_values[positions[rows]], 1)
+        return degrees
+
+    def _degree_for(self, raw_id: int) -> int:
+        position = int(np.searchsorted(self._candidate_ids, raw_id))
+        if position >= self._candidate_ids.size or self._candidate_ids[position] != raw_id:
+            return 1
+        return max(int(self._item_degree_values[position]), 1)
 
     def _clear_score_caches(self) -> None:
         self._deterministic_cache.clear()

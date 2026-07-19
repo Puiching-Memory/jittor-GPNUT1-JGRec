@@ -739,6 +739,13 @@ class TemporalHybridRanker:
     def predict(self, query: TestQuery) -> np.ndarray:
         return self.predict_batch([query])[0]
 
+    def prediction_order(self, queries: TestQueryArray) -> np.ndarray | None:
+        if self.encoder is None or not queries:
+            return None
+        if not np.all(queries.time > self.encoder.stats.max_time):
+            return None
+        return np.argsort(queries.src, kind="stable")
+
     def predict_batch(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 100), dtype=np.float64)
@@ -1731,6 +1738,9 @@ class HybridRankerAdapter:
 
     def predict_batch(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         return self.impl.predict_batch(queries)
+
+    def prediction_order(self, queries: TestQueryArray) -> np.ndarray | None:
+        return self.impl.prediction_order(queries)
 
     @property
     def training_report(self) -> TrainingReport | None:

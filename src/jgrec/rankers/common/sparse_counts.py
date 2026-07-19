@@ -161,6 +161,32 @@ class SparseCountMap:
                 result[i] = int(self.values[abs_pos])
         return result
 
+    def sum_row_counts_for_candidates(
+        self,
+        left_keys: np.ndarray,
+        candidate_ids: np.ndarray,
+        *,
+        exclude_equal: bool = False,
+    ) -> np.ndarray:
+        result = np.zeros(len(candidate_ids), dtype=np.int64)
+        if left_keys.size == 0 or candidate_ids.size == 0 or len(self.row_keys) == 0:
+            return result
+
+        row_indices = np.searchsorted(self.row_keys, left_keys)
+        valid_rows = np.flatnonzero(row_indices < len(self.row_keys))
+        valid_rows = valid_rows[self.row_keys[row_indices[valid_rows]] == left_keys[valid_rows]]
+        for left_row in valid_rows:
+            row_idx = row_indices[left_row]
+            start, end = int(self.row_offsets[row_idx]), int(self.row_offsets[row_idx + 1])
+            columns = self.col_indices[start:end]
+            positions = np.searchsorted(columns, candidate_ids)
+            matched = np.flatnonzero(positions < len(columns))
+            matched = matched[columns[positions[matched]] == candidate_ids[matched]]
+            if exclude_equal:
+                matched = matched[candidate_ids[matched] != left_keys[left_row]]
+            result[matched] += self.values[start + positions[matched]]
+        return result
+
     def __bool__(self) -> bool:
         return len(self.row_keys) > 0
 
