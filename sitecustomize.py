@@ -189,3 +189,15 @@ if "nvcc_path" not in os.environ:
                 os.environ["nvcc_path"] = ""
         elif not any(candidate.exists() for candidate in cudnn_candidates):
             os.environ["nvcc_path"] = ""
+
+# CUDA 11.8 nvcc does not recognise GCC 13 builtins (__builtin_dynamic_object_size)
+# on Ubuntu 24.04, which breaks JIT compilation. Prefer g++-11 when available so
+# both the host compiler and nvcc's -ccbin use a CUDA 11.8-compatible GCC.
+if "cc_path" not in os.environ:
+    for _gcc_candidate in (
+        "/usr/bin/g++-11",
+        "/usr/bin/g++-12",
+    ):
+        if Path(_gcc_candidate).exists():
+            os.environ["cc_path"] = _gcc_candidate
+            break

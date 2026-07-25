@@ -70,8 +70,16 @@ def ensure_builtin_rankers() -> None:
             config if isinstance(config, TemporalGraphTrainingConfig) else TemporalGraphTrainingConfig()
         )
 
+    def hybrid_heuristic_factory(config: Any) -> Ranker:
+        from .hybrid_heuristic.config import TrainingConfig  # noqa: PLC0415
+        from .hybrid_heuristic.ranker import HybridRankerAdapter  # noqa: PLC0415
+
+        return HybridRankerAdapter(config if isinstance(config, TrainingConfig) else TrainingConfig())
+
     if "hybrid" not in registered:
         registry.register("hybrid", hybrid_factory)
+    if "hybrid-heuristic" not in registered:
+        registry.register("hybrid-heuristic", hybrid_heuristic_factory)
     if "craft" not in registered:
         registry.register("craft", craft_factory)
     if "temporal-graph" not in registered:

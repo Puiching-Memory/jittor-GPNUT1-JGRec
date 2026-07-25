@@ -1,0 +1,294 @@
+from __future__ import annotations
+
+import math
+from collections import Counter, defaultdict, deque
+from dataclasses import dataclass
+
+import numpy as np
+
+from jgrec.core.types import InteractionTable
+from jgrec.idmap import NodeIdMap
+from jgrec.logging import log
+from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
+
+from .candidate_prior import CandidatePriorTower
+from .config import CandidatePriorConfig, SourceProfileConfig, StructureTowerConfig, TargetWindowConfig
+from .stats import SrcHistory, TemporalStats
+from .structure import StructureFeatureTower
+
+
+@dataclass(frozen=True)
+class HybridDeterministicSnapshot:
+    prefix_end: int
+    stats: dict
+    candidate_prior: dict
+    target_window: dict
+    structure: dict
+    source_profile: dict
+    heuristic: dict | None = None
+
+
+class HybridPrefixStateCache:
+    def __init__(
+        self,
+        interactions: InteractionTable,
+        *,
+        recent_window: int,
+        candidate_prior_config: CandidatePriorConfig,
+        structure_config: StructureTowerConfig,
+        target_window_config: TargetWindowConfig | None = None,
+        source_profile_config: SourceProfileConfig | None = None,
+        test_candidate_counts: Counter[int] | None = None,
+        verbose: bool = True,
+    ) -> None:
+        if not interactions:
+            raise ValueError("training interactions are empty")
+        self.interactions = interactions
+        self.recent_window = int(recent_window)
+        self.candidate_prior_config = candidate_prior_config
+        self.target_window_config = target_window_config or TargetWindowConfig(enabled=False)
+        self.structure_config = structure_config
+        self.source_profile_config = source_profile_config or SourceProfileConfig(enabled=False)
+        self.test_candidate_counts = Counter(test_candidate_counts or {})
+        self.verbose = verbose
+        self._cursor = 0
+        self._snapshots: dict[int, HybridDeterministicSnapshot] = {}
+
+        self._src_times: dict[int, list[int]] = defaultdict(list)
+        self._src_dsts: dict[int, list[int]] = defaultdict(list)
+        self._dst_times: dict[int, list[int]] = defaultdict(list)
+        self._dst_srcs: dict[int, list[int]] = defaultdict(list)
+        self._pair_times: dict[tuple[int, int], list[int]] = defaultdict(list)
+        self._event_times: list[int] = []
+        self._histories: dict[int, SrcHistory] = defaultdict(
+            lambda: SrcHistory(recent_dsts=deque(maxlen=self.recent_window))
+        )
+        self._dst_counts: Counter[int] = Counter()
+        self._dst_recent_time: dict[int, int] = {}
+
+    def snapshot_for_prefix(self, prefix_end: int) -> HybridDeterministicSnapshot:
+        prefix_end = int(prefix_end)
+        if prefix_end <= 0 or prefix_end > len(self.interactions):
+            raise ValueError(f"invalid encoder cache prefix: {prefix_end}")
+        if prefix_end < self._cursor:
+            cached = self._snapshots.get(prefix_end)
+            if cached is None:
+                raise ValueError("encoder cache prefixes must be requested in ascending order")
+            log(f"[encoder-cache] hit prefix={prefix_end}", enabled=self.verbose)
+            return cached
+        if prefix_end > self._cursor:
+            self._advance(prefix_end)
+        snapshot = self._build_snapshot(prefix_end)
+        self._snapshots[prefix_end] = snapshot
+        log(f"[encoder-cache] build prefix={prefix_end}", enabled=self.verbose)
+        return snapshot
+
+    def release_except(self, prefix_end: int | None = None) -> None:
+        if prefix_end is None:
+            self._snapshots.clear()
+            return
+        keep = self._snapshots.get(int(prefix_end))
+        self._snapshots.clear()
+        if keep is not None:
+            self._snapshots[int(prefix_end)] = keep
+
+    def release_builder_state(self) -> None:
+        self.interactions = InteractionTable.empty()
+        self._src_times.clear()
+        self._src_dsts.clear()
+        self._dst_times.clear()
+        self._dst_srcs.clear()
+        self._pair_times.clear()
+        self._event_times.clear()
+        self._histories.clear()
+        self._dst_counts.clear()
+        self._dst_recent_time.clear()
+
+    def clear(self) -> None:
+        self._snapshots.clear()
+        self.release_builder_state()
+
+    def _advance(self, prefix_end: int) -> None:
+        window = self.interactions[self._cursor : prefix_end]
+        for src, dst, time in zip(window.src, window.dst, window.time, strict=True):
+            src_int = int(src)
+            dst_int = int(dst)
+            time_int = int(time)
+            self._event_times.append(time_int)
+            self._src_times[src_int].append(time_int)
+            self._src_dsts[src_int].append(dst_int)
+            self._dst_times[dst_int].append(time_int)
+            self._dst_srcs[dst_int].append(src_int)
+            self._pair_times[(src_int, dst_int)].append(time_int)
+
+            history = self._histories[src_int]
+            history.total += 1
+            history.last_time = time_int
+            history.dst_counts[dst_int] += 1
+            history.pair_recent_time[dst_int] = time_int
+            history.recent_dsts.append(dst_int)
+
+            self._dst_counts[dst_int] += 1
+            self._dst_recent_time[dst_int] = time_int
+        self._cursor = prefix_end
+
+    def _build_snapshot(self, prefix_end: int) -> HybridDeterministicSnapshot:
+        stats = self._build_stats(prefix_end)
+        candidate_prior = CandidatePriorTower(self.candidate_prior_config)
+        candidate_prior.fit_from_counts(set(self._dst_counts), self.test_candidate_counts)
+        target_window = self._build_target_window(prefix_end)
+        structure = StructureFeatureTower(self.structure_config)
+        structure.index = self._build_structure_index(prefix_end)
+        structure.fit_bridge_policy_from_values(
+            src_values={int(src) for src in self._src_times},
+            dst_values={int(dst) for dst in self._dst_times},
+        )
+        structure.min_time = int(self.interactions.time[0])
+        structure.max_time = int(self.interactions.time[prefix_end - 1])
+        structure.graph_span = max(structure.max_time - structure.min_time, 1)
+        structure.decay_windows = (
+            max(structure.graph_span * 0.05, 1.0),
+            max(structure.graph_span * 0.20, 1.0),
+            max(structure.graph_span * 0.50, 1.0),
+        )
+        source_profile = {"item_pair_counts": {}, "item_degrees": {}}
+        if self.source_profile_config.enabled and self.source_profile_config.deterministic_enabled:
+            from .source_profile import SourceProfileTower  # noqa: PLC0415
+
+            profile_tower = SourceProfileTower(
+                id_map=NodeIdMap.from_interactions(self.interactions[:prefix_end]),
+                config=self.source_profile_config,
+            )
+            profile_tower.index = structure.index
+            profile_tower.fit_deterministic(self.interactions[:prefix_end])
+            source_profile = profile_tower.snapshot()
+        heuristic_snapshot = None
+        try:
+            from .heuristic import HeuristicTower  # noqa: PLC0415
+
+            heuristic_tower = HeuristicTower()
+            heuristic_tower.index = structure.index
+            heuristic_tower.min_time = structure.min_time
+            heuristic_tower.max_time = structure.max_time
+            heuristic_tower.graph_span = structure.graph_span
+            heuristic_tower.total_edges = prefix_end
+            heuristic_tower.windows = structure.decay_windows
+            heuristic_snapshot = heuristic_tower.snapshot()
+        except Exception:  # noqa: BLE001
+            heuristic_snapshot = None
+        return HybridDeterministicSnapshot(
+            prefix_end=prefix_end,
+            stats=stats.snapshot(),
+            candidate_prior=candidate_prior.snapshot(),
+            target_window=target_window.snapshot(),
+            structure=structure.snapshot(),
+            source_profile=source_profile,
+            heuristic=heuristic_snapshot,
+        )
+
+    def _build_stats(self, prefix_end: int) -> TemporalStats:
+        stats = TemporalStats(recent_window=self.recent_window)
+        stats.event_times = _compact_int_array(self._event_times)
+        stats.total_edges = int(prefix_end)
+        stats.min_time = int(self.interactions.time[0])
+        stats.max_time = int(self.interactions.time[prefix_end - 1])
+        stats.graph_span = max(stats.max_time - stats.min_time, 1)
+        stats.log_total_edges = math.log1p(max(stats.total_edges, 1))
+        stats.src_histories = {
+            int(src): _finalize_history(history, stats.log_total_edges)
+            for src, history in self._histories.items()
+        }
+        stats.src_event_times = {int(src): _compact_int_array(times) for src, times in self._src_times.items()}
+        stats.src_event_dsts = {int(src): _compact_int_array(dsts) for src, dsts in self._src_dsts.items()}
+        stats.dst_event_times = {int(dst): _compact_int_array(times) for dst, times in self._dst_times.items()}
+        stats.pair_event_times = {pair: _compact_int_array(times) for pair, times in self._pair_times.items()}
+        stats.dst_counts = Counter(self._dst_counts)
+        stats.dst_recent_time = dict(self._dst_recent_time)
+        stats.dst_popularity = {
+            int(dst): math.log1p(count) / stats.log_total_edges
+            for dst, count in stats.dst_counts.items()
+        }
+        stats._build_dense_dst_features()
+        return stats
+
+    def _build_target_window(self, prefix_end: int):
+        from .target_window import TargetWindowTower  # noqa: PLC0415
+
+        target_window = TargetWindowTower(self.target_window_config)
+        target_window.fit_from_grouped(
+            dst_event_times=self._dst_times,
+            event_times=self._event_times,
+            min_time=int(self.interactions.time[0]),
+            max_time=int(self.interactions.time[prefix_end - 1]),
+        )
+        return target_window
+
+    def _build_structure_index(self, prefix_end: int) -> TemporalInteractionIndex:
+        index = TemporalInteractionIndex()
+        index.fit_grouped(
+            src_times=self._src_times,
+            src_dsts=self._src_dsts,
+            dst_times=self._dst_times,
+            dst_srcs=self._dst_srcs,
+            pair_times=self._pair_times,
+            max_time=int(self.interactions.time[prefix_end - 1]),
+            total_edges=prefix_end,
+            build_transitions=self.structure_config.transition_enabled,
+            build_cooccurs=self.structure_config.cooccur_enabled,
+            cooccur_history_limit=self.structure_config.cooccur_history_limit,
+            future_only_transition_cooccur=self.structure_config.future_only_transition_cooccur,
+        )
+        return index
+
+
+def hydrate_deterministic_state(
+    *,
+    snapshot: HybridDeterministicSnapshot,
+    stats: TemporalStats,
+    candidate_prior,
+    structure,
+    target_window=None,
+    source_profile=None,
+    heuristic=None,
+) -> None:
+    stats.hydrate(snapshot.stats)
+    prior_hydrate = getattr(candidate_prior, "hydrate", None)
+    if callable(prior_hydrate):
+        prior_hydrate(snapshot.candidate_prior)
+    target_window_hydrate = getattr(target_window, "hydrate", None)
+    if callable(target_window_hydrate):
+        target_window_hydrate(snapshot.target_window)
+    structure_hydrate = getattr(structure, "hydrate", None)
+    if callable(structure_hydrate):
+        structure_hydrate(snapshot.structure)
+    source_profile_hydrate = getattr(source_profile, "hydrate", None)
+    if callable(source_profile_hydrate):
+        source_profile_hydrate(snapshot.source_profile)
+    if heuristic is not None and snapshot.heuristic is not None:
+        heuristic_hydrate = getattr(heuristic, "hydrate", None)
+        if callable(heuristic_hydrate):
+            heuristic_hydrate(snapshot.heuristic)
+
+
+def _finalize_history(source: SrcHistory, log_total_edges: float) -> SrcHistory:
+    history = SrcHistory(recent_dsts=deque(source.recent_dsts, maxlen=source.recent_dsts.maxlen))
+    history.total = int(source.total)
+    history.last_time = int(source.last_time)
+    history.activity = math.log1p(history.total) / log_total_edges
+    history.dst_counts = Counter(source.dst_counts)
+    history.pair_recent_time = dict(source.pair_recent_time)
+    ranks: dict[int, int] = {}
+    for rank, dst in enumerate(reversed(history.recent_dsts), start=1):
+        ranks.setdefault(int(dst), rank)
+    history.recent_ranks = ranks
+    return history
+
+
+def _compact_int_array(values: list[int]) -> np.ndarray:
+    if not values:
+        return np.empty(0, dtype=np.int32)
+    min_value = min(values)
+    max_value = max(values)
+    int32 = np.iinfo(np.int32)
+    dtype = np.int32 if int32.min <= min_value <= max_value <= int32.max else np.int64
+    return np.asarray(values, dtype=dtype)
