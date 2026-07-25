@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from jgrec.core.types import InteractionTable, TestQueryArray
+from jgrec.core.types import InteractionTable
 
 
 class VectorizedHeuristicIndex:
@@ -151,7 +151,7 @@ class VectorizedHeuristicIndex:
             # 聚合每个 dst 的权重（重复交互累计）
             def _agg(weights: np.ndarray) -> dict[int, float]:
                 agg: dict[int, float] = {}
-                for d, w in zip(vis_dst.tolist(), weights.tolist()):
+                for d, w in zip(vis_dst.tolist(), weights.tolist(), strict=True):
                     agg[d] = agg.get(d, 0.0) + w
                 return agg
 
@@ -177,7 +177,7 @@ class VectorizedHeuristicIndex:
         long_set = set(vis_dst[vis_tim >= long_cut].tolist())
         decay_w = np.exp(-np.maximum(qt - vis_tim, 0) / w_medium)
         decay_by_dst: dict[int, float] = {}
-        for d, w in zip(vis_dst.tolist(), decay_w.tolist()):
+        for d, w in zip(vis_dst.tolist(), decay_w.tolist(), strict=True):
             decay_by_dst[d] = decay_by_dst.get(d, 0.0) + w
 
         for j in range(n):
@@ -231,7 +231,7 @@ class VectorizedHeuristicIndex:
         # 等价于：构建 (a_seq,b_seq) 的稀疏共现，查询 (h,c) 命中。
         # 用字典按 (a,b) 聚合 decay，再对 (h,c) 网格查询。
         pair_w: dict[tuple[int, int], float] = {}
-        for a, b, w in zip(a_seq.tolist(), b_seq.tolist(), decay.tolist()):
+        for a, b, w in zip(a_seq.tolist(), b_seq.tolist(), decay.tolist(), strict=True):
             key = (a, b)
             pair_w[key] = pair_w.get(key, 0.0) + w
         hist_list = src_hist.tolist()
@@ -281,7 +281,7 @@ class VectorizedHeuristicIndex:
         if len(self.co_keys) == 0:
             return out.astype(np.float32)
 
-        vis_dst, vis_tim = self._src_visible(src, qt)
+        vis_dst, _vis_tim = self._src_visible(src, qt)
         if vis_dst.size == 0:
             return out.astype(np.float32)
         z = int(vis_dst[-1])

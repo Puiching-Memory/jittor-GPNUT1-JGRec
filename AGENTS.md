@@ -35,7 +35,22 @@ You can run any command or script within the context of the virtual environment 
   uv run jgrec-build --help
   ```
 
-### 3. Managing Dependencies
+### 3. Linting (Required Habit)
+
+Run ruff after any code change and before considering a task done:
+
+```bash
+uv run ruff check          # 检查
+uv run ruff check --fix    # 自动修复安全项
+```
+
+Configuration lives in `pyproject.toml` under `[tool.ruff]` (line-length 120, py312). Notes:
+
+* `RUF001/RUF002/RUF003` are intentionally ignored — project comments and docstrings are in Chinese, full-width punctuation is deliberate.
+* `E501` is ignored; line width is left to the formatter.
+* Intentional deviating code should carry a scoped `noqa` comment (e.g. deferred imports guarded by `pytest.importorskip` use `# noqa: PLC0415`).
+
+### 4. Managing Dependencies
 
 To add or remove dependencies, use `uv add` or `uv remove`. This will automatically update `pyproject.toml` and regenerate `uv.lock`.
 
@@ -52,7 +67,7 @@ To add or remove dependencies, use `uv add` or `uv remove`. This will automatica
   uv remove package-name
   ```
 
-### 4. Activating the Environment (Optional)
+### 5. Activating the Environment (Optional)
 
 If you prefer traditional virtual environment activation, you can activate the `.venv` created by `uv`:
 

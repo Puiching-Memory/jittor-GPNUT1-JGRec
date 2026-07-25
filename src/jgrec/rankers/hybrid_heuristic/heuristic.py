@@ -137,9 +137,7 @@ class HeuristicTower:
 
         src_view = self.index.source_view(src, qt)
         src_dsts = src_view.visible_dsts  # 时间升序
-        src_times = src_view.visible_times
         src_total = len(src_dsts)
-        last_visible_dst = int(src_dsts[-1]) if src_total else None
 
         # src 侧局部记忆：候选 v 的 (u,v) 次数、最近一次时间
         lr_freq = np.zeros(n, dtype=np.float32)
@@ -209,9 +207,9 @@ class HeuristicTower:
             short_cut = qt - w_short
             medium_cut = qt - w_medium
             long_cut = qt - w_long
-            short_set = set(int(d) for d, t in zip(src_dsts, src_times, strict=True) if t >= short_cut)
-            medium_set = set(int(d) for d, t in zip(src_dsts, src_times, strict=True) if t >= medium_cut)
-            long_set = set(int(d) for d, t in zip(src_dsts, src_times, strict=True) if t >= long_cut)
+            short_set = {int(d) for d, t in zip(src_dsts, src_times, strict=True) if t >= short_cut}
+            medium_set = {int(d) for d, t in zip(src_dsts, src_times, strict=True) if t >= medium_cut}
+            long_set = {int(d) for d, t in zip(src_dsts, src_times, strict=True) if t >= long_cut}
             # 衰减用 src 全历史带权
             decay_weight_by_dst: dict[int, float] = {}
             for d, t in zip(src_dsts, src_times, strict=True):
@@ -224,7 +222,7 @@ class HeuristicTower:
                 dst_srcs = dst_view.visible_srcs
                 if dst_srcs.size == 0:
                     continue
-                dst_src_set = set(int(s) for s in dst_srcs)
+                dst_src_set = {int(s) for s in dst_srcs}
                 if short_set:
                     cn_short[j] = math.log1p(len(short_set & dst_src_set))
                 if medium_set:
@@ -261,7 +259,7 @@ class HeuristicTower:
                 # 候选与 src 历史各项的加权共现：sum over i in history of w(i, cand)
                 s_f = 0.0
                 s_b = 0.0
-                for h in set(int(d) for d in src_dsts):
+                for h in {int(d) for d in src_dsts}:
                     s_f += fwd.get((h, dst_int), 0.0)
                     s_b += bwd.get((h, dst_int), 0.0)
                 cooccur_fwd[j] = math.log1p(s_f)
@@ -288,7 +286,7 @@ class HeuristicTower:
                     # 直接从 z 出发的转移
                     score += edge_w.get((z, dst_int), 0.0)
                     # 经由 z 邻居的二跳（z->m->cand），限于最近若干
-                    for m in set(int(d) for d in z_dsts[-64:]):
+                    for m in {int(d) for d in z_dsts[-64:]}:
                         m_view = self.index.source_view(m, qt)
                         m_dsts = m_view.visible_dsts
                         if m_dsts.size == 0:

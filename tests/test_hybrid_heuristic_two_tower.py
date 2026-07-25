@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 
 from jgrec.core.types import Interaction, InteractionTable, TestQuery
 from jgrec.idmap import NodeIdMap

@@ -75,7 +75,9 @@ select = [
 	"PERF",
 	"PLC0415",
 ]
-ignore = ["E501"]
+# E501: 行宽交由 formatter 处理
+# RUF001/002/003: 项目注释与文档为中文，全角标点属有意使用
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.per-file-ignores]
 "sitecustomize.py" = ["SIM112"]

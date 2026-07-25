@@ -73,7 +73,7 @@ class InterpolationScorer:
         for s, seq in by_src.items():
             seen: dict[int, int] = {}
             for d, t in seq:
-                for prev_d, prev_t in seen.items():
+                for prev_t in seen.values():
                     w = math.exp(-max(t - prev_t, 0) / decay)
                     key = (s, d)
                     self._comem[key] = self._comem.get(key, 0.0) + w
@@ -84,10 +84,7 @@ class InterpolationScorer:
                     del seen[oldest]
 
     def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
-        if isinstance(queries, TestQueryArray):
-            query_list = list(queries)
-        else:
-            query_list = queries
+        query_list = list(queries) if isinstance(queries, TestQueryArray) else queries
         if not query_list:
             return np.empty((0, 0), dtype=np.float32)
         n_cand = len(query_list[0].candidates)
@@ -138,10 +135,7 @@ def fit_weights_on_validation(
 
     ``val_targets`` 为每行正例在候选中的列索引（shape=(n_rows,)）。
     """
-    if isinstance(val_queries, TestQueryArray):
-        query_list = list(val_queries)
-    else:
-        query_list = val_queries
+    query_list = list(val_queries) if isinstance(val_queries, TestQueryArray) else val_queries
     if not query_list:
         return scorer.weights
 

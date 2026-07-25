@@ -51,7 +51,8 @@ def test_csr_topk_matches_sparse_map_get_row():
 
 def test_csr_topk_cuda_matches_numpy():
     jt = pytest.importorskip("jittor")
-    from jgrec.rankers.common.csr_topk import csr_topk
+    # 延迟导入：依赖 jittor，需在 importorskip 之后
+    from jgrec.rankers.common.csr_topk import csr_topk  # noqa: PLC0415
 
     jt.flags.use_cuda = 1
     m = _map()

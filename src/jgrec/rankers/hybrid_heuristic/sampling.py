@@ -130,11 +130,13 @@ def sample_mixed_negatives_batch(
     results_by_chunk: list[tuple[tuple[int, ...], ...] | None] = [None] * len(chunks)
     completed = 0
     next_progress = PARALLEL_PROGRESS_INTERVAL
+    show_progress = verbose and len(jobs) >= PARALLEL_PROGRESS_INTERVAL
 
-    log(
-        f"[negative-sampling] {label} workers={worker_count} jobs={len(jobs)} chunks={len(chunks)}",
-        enabled=verbose,
-    )
+    if show_progress:
+        log(
+            f"[negative-sampling] {label} workers={worker_count} jobs={len(jobs)} chunks={len(chunks)}",
+            enabled=True,
+        )
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = [
             executor.submit(
@@ -154,10 +156,10 @@ def sample_mixed_negatives_batch(
             chunk_index, chunk_results = future.result()
             results_by_chunk[chunk_index] = chunk_results
             completed += len(chunk_results)
-            if completed >= next_progress:
+            if show_progress and completed >= next_progress:
                 log(
                     f"[negative-sampling] {label} completed={completed}/{len(jobs)}",
-                    enabled=verbose,
+                    enabled=True,
                 )
                 while completed >= next_progress:
                     next_progress += PARALLEL_PROGRESS_INTERVAL
@@ -167,7 +169,8 @@ def sample_mixed_negatives_batch(
         if chunk_results is None:
             raise RuntimeError("negative sampling worker did not return a chunk")
         results.extend(chunk_results)
-    log(f"[negative-sampling] {label} done jobs={len(results)}", enabled=verbose)
+    if show_progress:
+        log(f"[negative-sampling] {label} done jobs={len(results)}", enabled=True)
     return results
 
 

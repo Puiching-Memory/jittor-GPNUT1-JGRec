@@ -112,13 +112,13 @@ csr_topk_kernel<<<blocks, threads>>>(row_keys_p, R, row_offsets_p, col_indices_p
 
 
 def csr_topk(
-    row_keys: "jt.Var",
-    row_offsets: "jt.Var",
-    col_indices: "jt.Var",
-    values: "jt.Var",
-    query_keys: "jt.Var",
+    row_keys: jt.Var,
+    row_offsets: jt.Var,
+    col_indices: jt.Var,
+    values: jt.Var,
+    query_keys: jt.Var,
     k: int,
-) -> tuple["jt.Var", "jt.Var"]:
+) -> tuple[jt.Var, jt.Var]:
     """对每个 query key 返回 top-k (col, value)。shape=(Q,k)。"""
     if jt is None:
         raise RuntimeError("jittor is required for csr_topk")

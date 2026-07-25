@@ -15,7 +15,9 @@ def track(
     total: int | None = None,
     enabled: bool = True,
 ) -> Iterator[int]:
-    if not enabled:
+    # 非 TTY（重定向到文件 / tee）时不渲染进度条，避免 ANSI 控制字符与 \r
+    # 覆盖写入形成乱码；直接静默透传迭代（进度由上层结构化日志体现）。
+    if not enabled or not console.is_terminal:
         yield from sequence
         return
 

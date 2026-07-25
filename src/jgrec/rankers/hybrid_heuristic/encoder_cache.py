@@ -174,7 +174,7 @@ class HybridPrefixStateCache:
             heuristic_tower.total_edges = prefix_end
             heuristic_tower.windows = structure.decay_windows
             heuristic_snapshot = heuristic_tower.snapshot()
-        except Exception:  # noqa: BLE001
+        except Exception:
             heuristic_snapshot = None
         return HybridDeterministicSnapshot(
             prefix_end=prefix_end,

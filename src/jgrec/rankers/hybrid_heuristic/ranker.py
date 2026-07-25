@@ -1552,37 +1552,12 @@ class SupervisedFeatureBuilder:
     ) -> tuple[np.ndarray, int]:
         row_end = len(positives) if row_end is None else row_end
         total_rows = row_end if total_rows is None else total_rows
-        progress = _supervised_progress_label(
-            self.label,
-            batch_id=batch_id,
-            total_batches=total_batches,
-            row_start=row_start,
-            row_end=row_end,
-            total_rows=total_rows,
-        )
-        if self.config.verbose:
-            log_event(f"[hybrid-fit] {progress} sample_start", enabled=True)
-        sample_before = self.sample_elapsed
         batch = self.batch_for_events(positives, rng)
-        if self.config.verbose:
-            log_event(
-                f"[hybrid-fit] {progress} sample_done elapsed={self.sample_elapsed - sample_before:.1f}s "
-                f"sample_total={self.sample_elapsed:.1f}s",
-                enabled=True,
-            )
         self.negative_checksum += _candidate_tail_checksum(batch.candidates[:, 1:])
-        if self.config.verbose:
-            log_event(f"[hybrid-fit] {progress} encode_start", enabled=True)
         encode_start = perf_counter()
         features = self.encoder.features_for_query_array(batch)
         encode_elapsed = perf_counter() - encode_start
         self.encode_elapsed += encode_elapsed
-        if self.config.verbose:
-            log_event(
-                f"[hybrid-fit] {progress} encode_done elapsed={encode_elapsed:.1f}s "
-                f"encode_total={self.encode_elapsed:.1f}s",
-                enabled=True,
-            )
         return features, _candidate_matrix_checksum(batch.candidates)
 
 
@@ -1674,38 +1649,23 @@ def _build_supervised_features(
             row_end=end,
             total_rows=len(positives),
         )
-        progress = _supervised_progress_label(
-            label,
-            batch_id=batch_id,
-            total_batches=total_batches,
-            row_start=start,
-            row_end=end,
-            total_rows=len(positives),
-        )
-        if config.verbose:
-            log_event(f"[hybrid-fit] {progress} write_start", enabled=True)
         write_start = perf_counter()
         features[start:end] = batch_features
-        write_elapsed = perf_counter() - write_start
-        builder.write_elapsed += write_elapsed
-        if config.verbose:
-            log_event(
-                f"[hybrid-fit] {progress} write_done elapsed={write_elapsed:.1f}s "
-                f"write_total={builder.write_elapsed:.1f}s",
-                enabled=True,
-            )
+        builder.write_elapsed += perf_counter() - write_start
         candidate_checksum += batch_candidate_checksum
         del batch_features
         encoder.clear_batch_caches()
-        if isinstance(features, np.memmap) and (start // batch_size + 1) % FEATURE_MEMMAP_FLUSH_INTERVAL == 0:
+        if isinstance(features, np.memmap) and batch_id % FEATURE_MEMMAP_FLUSH_INTERVAL == 0:
             features.flush()
         release_memory()
-        if config.verbose and (end == len(positives) or end % max(batch_size * 4, 1) == 0):
+        if config.verbose:
+            elapsed = perf_counter() - start_time
+            done = end / len(positives)
+            eta = elapsed / done * (1 - done) if done > 0 else 0.0
             log_event(
-                f"[hybrid-fit] {label} rows={end}/{len(positives)} "
-                f"batch={len(batch_events)} sample={builder.sample_elapsed:.1f}s "
-                f"encode={builder.encode_elapsed:.1f}s write={builder.write_elapsed:.1f}s "
-                f"elapsed={perf_counter() - start_time:.1f}s",
+                f"[hybrid-fit] {label} batch {batch_id}/{total_batches} rows={end}/{len(positives)} "
+                f"sample={builder.sample_elapsed:.1f}s encode={builder.encode_elapsed:.1f}s "
+                f"write={builder.write_elapsed:.1f}s elapsed={elapsed:.1f}s eta={eta:.1f}s",
                 enabled=True,
             )
     if isinstance(features, np.memmap):
