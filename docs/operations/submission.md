@@ -32,6 +32,31 @@ result/hybrid_perfcheck_d1d2_50k20k_mrr_r100_ch32_seed60/result.zip
 
 提交时只上传 `result.zip`。压缩包根目录应直接包含 `dataset1.csv` 和 `dataset2.csv`。
 
+## 比赛 checkpoint
+
+完整训练并自动保存双数据集 checkpoint：
+
+```bash
+uv run jgrec-build --save-checkpoint checkpoints/checkpoint1.pkl
+```
+
+分开训练两个数据集时，两次命令必须使用同一路径：
+
+```bash
+uv run jgrec-build --dataset dataset2 --save-checkpoint checkpoints/checkpoint1.pkl
+uv run jgrec-build --dataset dataset1 --save-checkpoint checkpoints/checkpoint1.pkl
+```
+
+第一轮只产生 `checkpoint1.pkl.tmp`；两个数据集状态齐全后才原子发布 `checkpoint1.pkl`。保存发生在各数据集训练结束、测试集推理开始之前，因此长时间推理失败不会丢失已经训练好的模型。
+
+加载复核：
+
+```bash
+uv run jgrec-build --load-checkpoint checkpoints/checkpoint1.pkl --run-name checkpoint1_verify
+```
+
+加载模式跳过训练，只恢复 checkpoint 中对应数据集的 Hybrid 状态并生成 CSV。复核产物必须与原训练 run 的 CSV 做逐行概率或至少候选排序一致性比较。
+
 ## 提交前检查
 
 确认 zip 内容：

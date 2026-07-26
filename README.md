@@ -86,6 +86,31 @@ result/<run_id>/
 
 `result.zip` 根目录直接包含 `dataset1.csv`、`dataset2.csv`，不包含额外目录层级。
 
+## 训练后保存 checkpoint
+
+为完整 Hybrid 训练增加 `--save-checkpoint`，每个数据集的 `fit()` 结束后会立即写入模型状态：
+
+```bash
+uv run jgrec-build --save-checkpoint checkpoints/checkpoint1.pkl
+```
+
+也可以沿用分数据集冲分流程。第一次运行会保留 `checkpoint1.pkl.tmp`，第二个数据集训练完成后自动发布正式文件：
+
+```bash
+uv run jgrec-build --dataset dataset2 --save-checkpoint checkpoints/checkpoint1.pkl
+uv run jgrec-build --dataset dataset1 --save-checkpoint checkpoints/checkpoint1.pkl
+```
+
+正式 checkpoint 同时包含 `dataset1` 和 `dataset2` 状态。`.tmp` 表示仍缺少数据集，不能提交。已有正式文件不会被覆盖，新的模型应使用新的 checkpoint 路径。
+
+只加载 checkpoint 推理，不再读取训练集或调用 `fit()`：
+
+```bash
+uv run jgrec-build --load-checkpoint checkpoints/checkpoint1.pkl --run-name checkpoint1_verify
+```
+
+checkpoint 和 `result.zip` 是两个独立产物；比赛材料要求 checkpoint 时单独提交 `.pkl`。
+
 ## 冲分运行建议
 
 当前本地 8G 显存、24G 内存环境下，建议优先单独重跑 `dataset2`，确认改动收益后再与稳定的

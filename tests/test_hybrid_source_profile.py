@@ -8,6 +8,7 @@ import pytest
 
 from jgrec.core.types import Interaction, InteractionTable, TestQuery, TestQueryArray
 from jgrec.idmap import NodeIdMap
+from jgrec.rankers.common.sparse_counts import SparseCountMap
 from jgrec.rankers.hybrid.candidate_prior import CANDIDATE_PRIOR_FEATURE_NAMES
 from jgrec.rankers.hybrid.config import (
     GRAPH_WINDOW_NAMES,
@@ -21,25 +22,176 @@ from jgrec.rankers.hybrid.config import (
 )
 from jgrec.rankers.hybrid.encoder_cache import HybridPrefixStateCache, hydrate_deterministic_state
 from jgrec.rankers.hybrid.ranker import _config_for_selected_features, _feature_masks
-from jgrec.rankers.hybrid.source_profile import SourceProfileTower
+from jgrec.rankers.hybrid.source_profile import SourceProfileTower, _CompactDeterministicSummary
 from jgrec.rankers.hybrid.stats import STAT_FEATURE_NAMES, TemporalStats
 from jgrec.rankers.hybrid.structure import STRUCTURE_FEATURE_NAMES, StructureFeatureTower
 
 FEATURE = {name: idx for idx, name in enumerate(SOURCE_PROFILE_FEATURE_NAMES)}
 
 
+def test_compact_source_profile_summary_fills_candidates_in_one_batch() -> None:
+    summary = _CompactDeterministicSummary(
+        full_candidate_ids=np.asarray([10, 30], dtype=np.int64),
+        full_values=np.asarray(
+            [
+                [1.0, 2.0, 3.0, 4.0],
+                [5.0, 6.0, 7.0, 8.0],
+            ],
+            dtype=np.float64,
+        ),
+        recent_candidate_ids=np.asarray([20, 30], dtype=np.int64),
+        recent_values=np.asarray(
+            [
+                [9.0, 10.0],
+                [11.0, 12.0],
+            ],
+            dtype=np.float64,
+        ),
+    )
+    candidates = np.asarray([30, 999, 10, 20, 30], dtype=np.int64)
+    output = np.zeros((len(candidates), 6), dtype=np.float32)
+
+    summary.fill_candidates(candidates, output)
+
+    np.testing.assert_array_equal(
+        output,
+        np.asarray(
+            [
+                [5.0, 6.0, 7.0, 8.0, 11.0, 12.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [1.0, 2.0, 3.0, 4.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 9.0, 10.0],
+                [5.0, 6.0, 7.0, 8.0, 11.0, 12.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
+
+
+def test_source_profile_vectorized_summary_matches_scalar_aggregation() -> None:
+    degrees = {10: 4, 20: 3, 30: 5, 40: 2}
+    sparse = SparseCountMap.from_nested_dict(
+        {
+            10: {10: 99, 20: 2, 30: 4},
+            20: {10: 2, 30: 3, 40: 0},
+            30: {10: 4, 20: 3, 40: 2},
+        }
+    )
+    history = np.asarray([10, 20, 10, 30], dtype=np.int32)
+    tower = SourceProfileTower(
+        id_map=NodeIdMap(
+            src_to_id={1: 0},
+            dst_to_id={10: 0, 20: 1, 30: 2, 40: 3},
+            src_values=(1,),
+            dst_values=(10, 20, 30, 40),
+        ),
+        config=SourceProfileConfig(item2vec_enabled=False, recent_k=2),
+    )
+    tower.hydrate(
+        {
+            "item_pair_counts": sparse.snapshot(),
+            "item_degrees": degrees,
+            "embeddings": None,
+        }
+    )
+    expected = _scalar_deterministic_summary(sparse, degrees, history, recent_k=2)
+
+    actual = tower._build_deterministic_summary(history)
+
+    np.testing.assert_array_equal(actual.full_candidate_ids, expected.full_candidate_ids)
+    np.testing.assert_array_equal(actual.full_values, expected.full_values)
+    np.testing.assert_array_equal(actual.recent_candidate_ids, expected.recent_candidate_ids)
+    np.testing.assert_array_equal(actual.recent_values, expected.recent_values)
+
+
+def test_source_profile_item2vec_uses_vectorized_id_mapping(monkeypatch) -> None:
+    interactions = InteractionTable.from_events(
+        [
+            Interaction(src=1, dst=10, time=1),
+            Interaction(src=1, dst=20, time=2),
+        ]
+    )
+    id_map = NodeIdMap(
+        src_to_id={1: 0},
+        dst_to_id={10: 0, 20: 1, 30: 2},
+        src_values=(1,),
+        dst_values=(10, 20, 30),
+    )
+    tower = SourceProfileTower(id_map, SourceProfileConfig(deterministic_enabled=False, item2vec_enabled=True))
+    tower.index.fit(interactions, build_transitions=False, build_cooccurs=False)
+    tower.embeddings = np.asarray([[1.0, 0.0], [0.0, 1.0], [2.0, 2.0]], dtype=np.float32)
+    restored = SourceProfileTower(id_map, tower.config)
+    restored.hydrate(tower.snapshot())
+    queries = [TestQuery(src=1, time=3, candidates=(10, 20, 30, 999))]
+    expected = restored.scores_for_queries(queries)
+    restored._clear_score_caches()
+
+    def fail_scalar_mapping(*_args, **_kwargs):
+        raise AssertionError("source-profile scoring should use vectorized ID mapping")
+
+    monkeypatch.setattr(NodeIdMap, "dst_ids", fail_scalar_mapping)
+    actual = restored.scores_for_queries(queries)
+
+    np.testing.assert_array_equal(actual, expected)
+    assert np.all(actual[0, 2:] == 0.0)
+
+
+def _scalar_deterministic_summary(
+    sparse: SparseCountMap,
+    degrees: dict[int, int],
+    history: np.ndarray,
+    *,
+    recent_k: int,
+) -> _CompactDeterministicSummary:
+    recent_start = max(history.size - recent_k, 0)
+    full_scores: dict[int, tuple[float, float, float, float]] = {}
+    recent_scores: dict[int, tuple[float, float]] = {}
+    for history_idx, seen in enumerate(history):
+        seen_int = int(seen)
+        row = sparse.get_row(seen_int)
+        if row is None:
+            continue
+        cols, cooccurs = row
+        mask = (cols != seen_int) & (cooccurs > 0)
+        cols, cooccurs = cols[mask], cooccurs[mask]
+        values = np.log1p(cooccurs.astype(np.float32))
+        seen_degree = max(degrees.get(seen_int, 0), 1)
+        candidate_degrees = np.asarray([max(degrees.get(int(col), 0), 1) for col in cols], dtype=np.float32)
+        cosines = cooccurs.astype(np.float32) / np.sqrt(seen_degree * candidate_degrees)
+        for col, value, cosine in zip(cols, values, cosines, strict=True):
+            candidate = int(col)
+            value_float = float(value)
+            cosine_float = float(cosine)
+            total, maximum, cosine_total, cosine_maximum = full_scores.get(candidate, (0.0, 0.0, 0.0, 0.0))
+            full_scores[candidate] = (
+                total + value_float,
+                max(maximum, value_float),
+                cosine_total + cosine_float,
+                max(cosine_maximum, cosine_float),
+            )
+            if history_idx >= recent_start:
+                recent_total, recent_maximum = recent_scores.get(candidate, (0.0, 0.0))
+                recent_scores[candidate] = (
+                    recent_total + cosine_float,
+                    max(recent_maximum, cosine_float),
+                )
+    return _CompactDeterministicSummary.from_dicts(full_scores, recent_scores)
+
+
 def _interactions() -> InteractionTable:
-    return InteractionTable.from_events([
-        Interaction(src=1, dst=10, time=10),
-        Interaction(src=1, dst=20, time=20),
-        Interaction(src=2, dst=20, time=30),
-        Interaction(src=2, dst=30, time=40),
-        Interaction(src=3, dst=10, time=50),
-        Interaction(src=3, dst=30, time=60),
-        Interaction(src=1, dst=30, time=70),
-        Interaction(src=4, dst=40, time=80),
-        Interaction(src=4, dst=20, time=90),
-    ])
+    return InteractionTable.from_events(
+        [
+            Interaction(src=1, dst=10, time=10),
+            Interaction(src=1, dst=20, time=20),
+            Interaction(src=2, dst=20, time=30),
+            Interaction(src=2, dst=30, time=40),
+            Interaction(src=3, dst=10, time=50),
+            Interaction(src=3, dst=30, time=60),
+            Interaction(src=1, dst=30, time=70),
+            Interaction(src=4, dst=40, time=80),
+            Interaction(src=4, dst=20, time=90),
+        ]
+    )
 
 
 def _require_jittor() -> None:
@@ -54,10 +206,12 @@ def test_source_profile_scores_have_expected_shape_and_finite_values():
     )
 
     tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
-    scores = tower.scores_for_queries([
-        TestQuery(src=1, time=100, candidates=(10, 20, 30, 999)),
-        TestQuery(src=99, time=100, candidates=(10, 20, 30, 999)),
-    ])
+    scores = tower.scores_for_queries(
+        [
+            TestQuery(src=1, time=100, candidates=(10, 20, 30, 999)),
+            TestQuery(src=99, time=100, candidates=(10, 20, 30, 999)),
+        ]
+    )
 
     assert scores.shape == (2, 4, len(SOURCE_PROFILE_FEATURE_NAMES))
     assert np.all(np.isfinite(scores))
@@ -66,12 +220,14 @@ def test_source_profile_scores_have_expected_shape_and_finite_values():
 
 
 def test_source_profile_deterministic_features_match_manual_counts():
-    interactions = InteractionTable.from_events([
-        Interaction(src=1, dst=10, time=10),
-        Interaction(src=1, dst=20, time=20),
-        Interaction(src=2, dst=20, time=30),
-        Interaction(src=2, dst=30, time=40),
-    ])
+    interactions = InteractionTable.from_events(
+        [
+            Interaction(src=1, dst=10, time=10),
+            Interaction(src=1, dst=20, time=20),
+            Interaction(src=2, dst=20, time=30),
+            Interaction(src=2, dst=30, time=40),
+        ]
+    )
     tower = SourceProfileTower(
         id_map=NodeIdMap.from_interactions(interactions),
         config=SourceProfileConfig(item2vec_enabled=False, window_size=4, recent_k=1),
@@ -90,14 +246,16 @@ def test_source_profile_deterministic_features_match_manual_counts():
 
 
 def test_source_profile_recent_features_use_recent_k_history():
-    interactions = InteractionTable.from_events([
-        Interaction(src=1, dst=10, time=10),
-        Interaction(src=1, dst=20, time=20),
-        Interaction(src=2, dst=10, time=30),
-        Interaction(src=2, dst=30, time=40),
-        Interaction(src=3, dst=20, time=50),
-        Interaction(src=3, dst=40, time=60),
-    ])
+    interactions = InteractionTable.from_events(
+        [
+            Interaction(src=1, dst=10, time=10),
+            Interaction(src=1, dst=20, time=20),
+            Interaction(src=2, dst=10, time=30),
+            Interaction(src=2, dst=30, time=40),
+            Interaction(src=3, dst=20, time=50),
+            Interaction(src=3, dst=40, time=60),
+        ]
+    )
     tower = SourceProfileTower(
         id_map=NodeIdMap.from_interactions(interactions),
         config=SourceProfileConfig(item2vec_enabled=False, window_size=4, recent_k=1),
@@ -348,13 +506,49 @@ def test_source_profile_repeated_long_histories_use_cache_without_changing_score
     )
     cached.fit(interactions, rng=np.random.default_rng(0), verbose=False)
     direct.fit(interactions, rng=np.random.default_rng(0), verbose=False)
-    queries = [
-        TestQuery(src=1, time=time + row_idx, candidates=(5000, 5001, 9999))
-        for row_idx in range(3)
-    ]
+    queries = [TestQuery(src=1, time=time + row_idx, candidates=(5000, 5001, 9999)) for row_idx in range(3)]
 
     cached_scores = cached.scores_for_queries(queries)
     direct_scores = direct.scores_for_queries(queries)
 
     assert cached._deterministic_cache
     np.testing.assert_allclose(cached_scores, direct_scores, rtol=1e-6, atol=1e-6)
+
+
+def test_source_profile_cache_byte_budget_does_not_change_scores() -> None:
+    events: list[Interaction] = []
+    time = 1
+    history_items = tuple(1000 + idx for idx in range(40))
+    for dst in history_items:
+        events.append(Interaction(src=1, dst=dst, time=time))
+        time += 1
+    for idx, dst in enumerate(history_items):
+        helper_src = 100 + idx
+        events.append(Interaction(src=helper_src, dst=dst, time=time))
+        time += 1
+        events.append(Interaction(src=helper_src, dst=5000, time=time))
+        time += 1
+
+    interactions = InteractionTable.from_events(events)
+    regular = SourceProfileTower(
+        id_map=NodeIdMap.from_interactions(interactions),
+        config=SourceProfileConfig(item2vec_enabled=False, window_size=4, cache_max_bytes=1024 * 1024),
+    )
+    constrained = SourceProfileTower(
+        id_map=NodeIdMap.from_interactions(interactions),
+        config=SourceProfileConfig(item2vec_enabled=False, window_size=4, cache_max_bytes=1),
+    )
+    regular.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    constrained.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    queries = [TestQuery(src=1, time=time + row_idx, candidates=(5000, 9999)) for row_idx in range(3)]
+
+    expected = regular.scores_for_queries(queries)
+    actual = constrained.scores_for_queries(queries)
+
+    np.testing.assert_array_equal(actual, expected)
+    assert constrained.cache_bytes <= constrained.config.cache_max_bytes
+    summary = regular._deterministic_cache.get((1, len(history_items)))
+    assert isinstance(summary.full_candidate_ids, np.ndarray)
+    assert isinstance(summary.full_values, np.ndarray)
+    assert isinstance(summary.recent_candidate_ids, np.ndarray)
+    assert isinstance(summary.recent_values, np.ndarray)

@@ -437,10 +437,10 @@ def _top_sparse_items(sparse: SparseCountMap, left: int, limit: int) -> tuple[tu
     cols, vals = row
     if len(cols) <= limit:
         order = np.argsort(-vals, kind="stable")
-        return tuple(zip(cols[order].tolist(), vals[order].tolist()))
+        return tuple(zip(cols[order].tolist(), vals[order].tolist(), strict=True))
     top_idx = np.argpartition(-vals, limit)[:limit]
     top_idx = top_idx[np.argsort(-vals[top_idx], kind="stable")]
-    return tuple(zip(cols[top_idx].tolist(), vals[top_idx].tolist()))
+    return tuple(zip(cols[top_idx].tolist(), vals[top_idx].tolist(), strict=True))
 
 
 def _top_count_candidates(counts: dict[int, int], limit: int) -> tuple[int, ...]:

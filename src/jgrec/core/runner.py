@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import mmap as mmap_module
+import os
+import tempfile
+from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from time import perf_counter
 
@@ -12,6 +17,7 @@ from .memory import log_event, log_memory, release_memory
 from .types import DatasetPaths, DatasetResult, FitContext, TestQueryArray, TrainingReport
 
 PREDICT_PROGRESS_INTERVAL = 10_000
+PREDICTION_MEMMAP_FLUSH_INTERVAL = 8
 
 
 def build_dataset_submission(
@@ -22,30 +28,13 @@ def build_dataset_submission(
     seed: int = 42,
     verbose: bool = True,
     limit_rows: int | None = None,
-    checkpoint_dir: Path | None = None,
-    load_checkpoint_dir: Path | None = None,
-    model_name: str = "",
-    full_model_dir: Path | None = None,
-    load_full_model_dir: Path | None = None,
-    recompute_test_profile: bool = False,
+    fit_ranker: bool = True,
+    after_fit: Callable[[Ranker], None] | None = None,
 ) -> DatasetResult:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{dataset.name}.csv"
-
-    if dataset.train_path.exists() and dataset.train_path.stat().st_size > 0:
+    if fit_ranker:
         log_memory(f"read_train_start:{dataset.name}", enabled=verbose)
         interactions = _read_fit_interactions(dataset, ranker)
         log_memory(f"read_train_done:{dataset.name}", enabled=verbose)
-
-        save_checkpoint_path = None
-        if checkpoint_dir is not None:
-            name = model_name or ranker.name
-            save_checkpoint_path = checkpoint_dir / f"{dataset.name}_{name}.npz"
-        load_checkpoint_path = None
-        if load_checkpoint_dir is not None:
-            name = model_name or ranker.name
-            load_checkpoint_path = load_checkpoint_dir / f"{dataset.name}_{name}.npz"
-
         report = ranker.fit(
             interactions,
             FitContext(
@@ -53,52 +42,52 @@ def build_dataset_submission(
                 seed=seed,
                 limit_rows=limit_rows,
                 verbose=verbose,
-                load_checkpoint_path=load_checkpoint_path,
-                save_checkpoint_path=save_checkpoint_path,
             ),
         )
-        if full_model_dir is not None:
-            model_out = full_model_dir / dataset.name
-            _save_full_model(ranker, model_out, verbose=verbose)
+        if after_fit is not None:
+            after_fit(ranker)
         del interactions
+        release_memory()
+        log_memory(f"post_fit:{dataset.name}", enabled=verbose)
     else:
-        log_event(f"[test-only] {dataset.name}: no train.csv, loading full model", enabled=verbose)
-        if load_full_model_dir is None:
-            raise FileNotFoundError(f"train.csv missing for {dataset.name} and --load-full-model-dir not provided")
-        model_in = load_full_model_dir / dataset.name
-        _load_full_model(ranker, model_in, verbose=verbose)
-        report = TrainingReport(
-            train_events=0,
-            val_events=0,
-            best_val_ap=0.0,
-            best_val_mrr=0.0,
-            feature_names=(),
-            selected_fusion="test-only",
-            model_name=model_name or ranker.name,
-        )
+        report = getattr(ranker, "training_report", None)
+        if report is None:
+            report = TrainingReport(model_name=ranker.name)
 
-    if recompute_test_profile:
-        _recompute_test_profile_for_ranker(ranker, dataset.test_path, verbose=verbose)
-
-    release_memory()
-    log_memory(f"post_fit:{dataset.name}", enabled=verbose)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{dataset.name}.csv"
 
     row_count = 0
     predict_start = perf_counter()
     next_progress_row = PREDICT_PROGRESS_INTERVAL
     log_memory(f"predict_start:{dataset.name}", enabled=verbose)
     queries = read_test_queries(dataset.test_path, max_rows=limit_rows)
+    prediction_order = _prediction_order(ranker, queries)
     with output_path.open("w", newline="") as f:
-        for start in range(0, len(queries), batch_size):
-            batch = queries[start : start + batch_size]
-            batch_rows = _write_batch(f, ranker, batch)
-            row_count += batch_rows
-            next_progress_row = _log_predict_progress(
+        if prediction_order is None:
+            for start in range(0, len(queries), batch_size):
+                batch = queries[start : start + batch_size]
+                batch_rows = _write_batch(f, ranker, batch)
+                row_count += batch_rows
+                next_progress_row = _log_predict_progress(
+                    dataset=dataset,
+                    output_path=output_path,
+                    row_count=row_count,
+                    batch_rows=batch_rows,
+                    elapsed=perf_counter() - predict_start,
+                    next_progress_row=next_progress_row,
+                    verbose=verbose,
+                )
+        else:
+            row_count = _write_scheduled_batches(
+                output_file=f,
+                ranker=ranker,
+                queries=queries,
+                prediction_order=prediction_order,
+                batch_size=batch_size,
                 dataset=dataset,
                 output_path=output_path,
-                row_count=row_count,
-                batch_rows=batch_rows,
-                elapsed=perf_counter() - predict_start,
+                predict_start=predict_start,
                 next_progress_row=next_progress_row,
                 verbose=verbose,
             )
@@ -121,6 +110,12 @@ def _read_fit_interactions(dataset: DatasetPaths, ranker: Ranker):
 
 
 def _write_batch(output_file, ranker: Ranker, batch: TestQueryArray) -> int:
+    probs_batch = _predict_batch(ranker, batch)
+    _write_probabilities(output_file, probs_batch)
+    return len(batch)
+
+
+def _predict_batch(ranker: Ranker, batch: TestQueryArray) -> np.ndarray:
     probs_batch = ranker.predict_batch(batch)
     if probs_batch.shape != (len(batch), batch.candidate_count):
         raise ValueError(
@@ -128,8 +123,105 @@ def _write_batch(output_file, ranker: Ranker, batch: TestQueryArray) -> int:
             f"{probs_batch.shape}, expected {(len(batch), batch.candidate_count)}"
         )
     np.clip(probs_batch, 0.0, 1.0, out=probs_batch)
-    np.savetxt(output_file, probs_batch, delimiter=",", fmt="%.8f")
-    return len(batch)
+    return probs_batch
+
+
+def _write_probabilities(output_file, probabilities: np.ndarray) -> None:
+    np.savetxt(output_file, probabilities, delimiter=",", fmt="%.8f")
+
+
+def _prediction_order(ranker: Ranker, queries: TestQueryArray) -> np.ndarray | None:
+    if not queries:
+        return None
+    order_for_queries = getattr(ranker, "prediction_order", None)
+    if not callable(order_for_queries):
+        return None
+    order = order_for_queries(queries)
+    if order is None:
+        return None
+
+    order = np.asarray(order)
+    if order.shape != (len(queries),) or not np.issubdtype(order.dtype, np.integer):
+        raise ValueError("ranker prediction order must be a one-dimensional integer permutation")
+    order = order.astype(np.intp, copy=False)
+    if np.any(order < 0) or np.any(order >= len(queries)):
+        raise ValueError("ranker prediction order contains an out-of-range row index")
+    seen = np.zeros(len(queries), dtype=bool)
+    seen[order] = True
+    if not np.all(seen):
+        raise ValueError("ranker prediction order must contain every row exactly once")
+    return order
+
+
+def _write_scheduled_batches(
+    output_file,
+    ranker: Ranker,
+    queries: TestQueryArray,
+    prediction_order: np.ndarray,
+    batch_size: int,
+    dataset: DatasetPaths,
+    output_path: Path,
+    predict_start: float,
+    next_progress_row: int,
+    verbose: bool,
+) -> int:
+    fd, temp_name = tempfile.mkstemp(prefix="jgrec-predictions-", suffix=".dat")
+    os.close(fd)
+    probabilities: np.memmap | None = None
+    row_count = 0
+    try:
+        probabilities = np.memmap(
+            temp_name,
+            mode="w+",
+            dtype=np.float64,
+            shape=(len(queries), queries.candidate_count),
+        )
+        for start in range(0, len(queries), batch_size):
+            row_indices = prediction_order[start : start + batch_size]
+            probs_batch = _predict_batch(ranker, queries[row_indices])
+            probabilities[row_indices] = probs_batch
+            batch_id = start // batch_size + 1
+            if batch_id % PREDICTION_MEMMAP_FLUSH_INTERVAL == 0:
+                _flush_and_release_memmap_pages(probabilities)
+            batch_rows = len(row_indices)
+            row_count += batch_rows
+            next_progress_row = _log_predict_progress(
+                dataset=dataset,
+                output_path=output_path,
+                row_count=row_count,
+                batch_rows=batch_rows,
+                elapsed=perf_counter() - predict_start,
+                next_progress_row=next_progress_row,
+                verbose=verbose,
+            )
+        _flush_and_release_memmap_pages(probabilities)
+        for start in range(0, len(queries), batch_size):
+            _write_probabilities(output_file, probabilities[start : start + batch_size])
+            batch_id = start // batch_size + 1
+            if batch_id % PREDICTION_MEMMAP_FLUSH_INTERVAL == 0:
+                _release_memmap_pages(probabilities)
+        return row_count
+    finally:
+        if probabilities is not None:
+            mmap = getattr(probabilities, "_mmap", None)
+            if mmap is not None:
+                mmap.close()
+        Path(temp_name).unlink(missing_ok=True)
+
+
+def _flush_and_release_memmap_pages(matrix: np.memmap) -> None:
+    matrix.flush()
+    _release_memmap_pages(matrix)
+
+
+def _release_memmap_pages(matrix: np.memmap) -> None:
+    mapping = getattr(matrix, "_mmap", None)
+    madvise = getattr(mapping, "madvise", None)
+    dont_need = getattr(mmap_module, "MADV_DONTNEED", None)
+    if not callable(madvise) or dont_need is None:
+        return
+    with suppress(OSError, ValueError):
+        madvise(dont_need)
 
 
 def _log_predict_progress(
@@ -152,49 +244,3 @@ def _log_predict_progress(
     while row_count >= next_progress_row:
         next_progress_row += PREDICT_PROGRESS_INTERVAL
     return next_progress_row
-
-
-def _save_full_model(ranker: Ranker, model_out: Path, *, verbose: bool = True) -> None:
-    save_fn = getattr(ranker, "save_full_model", None)
-    if save_fn is None:
-        log_event(f"[full-model] ranker {ranker.name} does not support full model save", enabled=verbose)
-        return
-    save_fn(model_out)
-    log_event(f"[full-model] saved {model_out}", enabled=verbose)
-
-
-def _load_full_model(ranker: Ranker, model_in: Path, *, verbose: bool = True) -> None:
-    load_fn = getattr(ranker, "load_full_model", None)
-    if load_fn is None:
-        raise RuntimeError(f"ranker {ranker.name} does not support full model loading")
-    load_fn(model_in)
-    log_event(f"[full-model] loaded {model_in}", enabled=verbose)
-
-
-def _recompute_test_profile_for_ranker(ranker: Ranker, test_path: Path, *, verbose: bool = True) -> None:
-    """Recompute test-candidate-specific signals from a new test set.
-
-    Only supported for hybrid rankers at the moment.
-    """
-    impl = getattr(ranker, "impl", None)
-    if impl is None:
-        return
-    encoder = getattr(impl, "encoder", None)
-    if encoder is None:
-        return
-    prior = getattr(encoder, "candidate_prior", None)
-    if prior is None or not getattr(prior, "config", None) or not prior.config.enabled:
-        return
-
-    from collections import Counter
-
-    from jgrec.core.io import read_test_queries
-
-    queries = read_test_queries(test_path)
-    if len(queries) == 0:
-        return
-    candidates = queries.candidates.astype(np.int64, copy=False).reshape(-1)
-    values, counts = np.unique(candidates, return_counts=True)
-    test_counts = Counter({int(value): int(count) for value, count in zip(values, counts, strict=True)})
-    prior.fit_from_counts(set(prior.train_dst), test_counts)
-    log_event(f"[test-profile] recomputed candidate_prior for {test_path}", enabled=verbose)

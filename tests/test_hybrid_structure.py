@@ -4,6 +4,7 @@ import numpy as np
 
 from jgrec.core.types import Interaction, InteractionTable
 from jgrec.core.types import TestQuery as Query
+from jgrec.rankers.common.sparse_counts import SparseCountMap
 from jgrec.rankers.hybrid.candidate_prior import CANDIDATE_PRIOR_FEATURE_NAMES
 from jgrec.rankers.hybrid.config import (
     GRAPH_WINDOW_NAMES,
@@ -15,7 +16,7 @@ from jgrec.rankers.hybrid.config import (
 )
 from jgrec.rankers.hybrid.ranker import _feature_masks
 from jgrec.rankers.hybrid.stats import STAT_FEATURE_NAMES
-from jgrec.rankers.hybrid.structure import STRUCTURE_FEATURE_NAMES, StructureFeatureTower
+from jgrec.rankers.hybrid.structure import STRUCTURE_FEATURE_NAMES, StructureFeatureTower, _CompactStructureSummary
 
 FEATURE = {name: idx for idx, name in enumerate(STRUCTURE_FEATURE_NAMES)}
 
@@ -24,17 +25,53 @@ def _table(events: list[Interaction]) -> InteractionTable:
     return InteractionTable.from_events(events)
 
 
+def test_sparse_count_map_sums_many_candidate_counts_across_rows():
+    counts = SparseCountMap.from_nested_dict(
+        {
+            10: {10: 99, 20: 2, 30: 1},
+            20: {20: 88, 30: 4},
+        }
+    )
+    left_keys = np.asarray([10, 20, 999], dtype=np.int32)
+    candidate_ids = np.asarray([20, 30, 20, 40], dtype=np.int64)
+
+    actual = counts.sum_row_counts_for_candidates(
+        left_keys,
+        candidate_ids,
+        exclude_equal=True,
+    )
+
+    np.testing.assert_array_equal(actual, np.asarray([2, 5, 2, 0], dtype=np.int64))
+
+
+def test_compact_structure_summary_looks_up_many_candidates_in_order():
+    summary = _CompactStructureSummary(
+        candidate_ids=np.asarray([10, 30], dtype=np.int64),
+        common_counts=np.asarray([2, 4], dtype=np.int32),
+        aa_scores=np.asarray([0.25, 0.75], dtype=np.float64),
+        ra_scores=np.asarray([0.5, 1.5], dtype=np.float64),
+    )
+
+    common, aa, ra = summary.lookup_many(np.asarray([30, 20, 10, 30], dtype=np.int64))
+
+    np.testing.assert_array_equal(common, np.asarray([4, 0, 2, 4], dtype=np.int32))
+    np.testing.assert_array_equal(aa, np.asarray([0.75, 0.0, 0.25, 0.75], dtype=np.float64))
+    np.testing.assert_array_equal(ra, np.asarray([1.5, 0.0, 0.5, 1.5], dtype=np.float64))
+
+
 def test_structure_features_use_temporal_cutoff():
     tower = StructureFeatureTower()
     tower.fit(
-        _table([
-            Interaction(src=1, dst=10, time=10),
-            Interaction(src=10, dst=1, time=25),
-            Interaction(src=2, dst=10, time=30),
-            Interaction(src=10, dst=20, time=32),
-            Interaction(src=2, dst=20, time=40),
-            Interaction(src=1, dst=10, time=50),
-        ]),
+        _table(
+            [
+                Interaction(src=1, dst=10, time=10),
+                Interaction(src=10, dst=1, time=25),
+                Interaction(src=2, dst=10, time=30),
+                Interaction(src=10, dst=20, time=32),
+                Interaction(src=2, dst=20, time=40),
+                Interaction(src=1, dst=10, time=50),
+            ]
+        ),
         rng=np.random.default_rng(0),
         verbose=False,
     )
@@ -67,12 +104,14 @@ def test_structure_features_use_temporal_cutoff():
 def test_structure_features_after_training_window_include_full_history():
     tower = StructureFeatureTower()
     tower.fit(
-        _table([
-            Interaction(src=1, dst=10, time=10),
-            Interaction(src=2, dst=10, time=30),
-            Interaction(src=10, dst=20, time=35),
-            Interaction(src=2, dst=20, time=40),
-        ]),
+        _table(
+            [
+                Interaction(src=1, dst=10, time=10),
+                Interaction(src=2, dst=10, time=30),
+                Interaction(src=10, dst=20, time=35),
+                Interaction(src=2, dst=20, time=40),
+            ]
+        ),
         rng=np.random.default_rng(0),
         verbose=False,
     )
@@ -88,12 +127,14 @@ def test_structure_features_after_training_window_include_full_history():
 def test_structure_common_neighbors_ignore_numeric_id_collisions_in_bipartite_graph():
     tower = StructureFeatureTower()
     tower.fit(
-        _table([
-            Interaction(src=1, dst=10, time=10),
-            Interaction(src=2, dst=20, time=20),
-            Interaction(src=10, dst=20, time=30),
-            Interaction(src=99, dst=30, time=50),
-        ]),
+        _table(
+            [
+                Interaction(src=1, dst=10, time=10),
+                Interaction(src=2, dst=20, time=20),
+                Interaction(src=10, dst=20, time=30),
+                Interaction(src=99, dst=30, time=50),
+            ]
+        ),
         rng=np.random.default_rng(0),
         verbose=False,
     )
@@ -112,14 +153,16 @@ def test_structure_common_neighbors_ignore_numeric_id_collisions_in_bipartite_gr
 def test_structure_common_neighbors_keep_supported_bridge_nodes_in_mixed_graph():
     tower = StructureFeatureTower()
     tower.fit(
-        _table([
-            Interaction(src=1, dst=10, time=10),
-            Interaction(src=10, dst=30, time=20),
-            Interaction(src=10, dst=20, time=30),
-            Interaction(src=3, dst=10, time=40),
-            Interaction(src=4, dst=10, time=50),
-            Interaction(src=5, dst=20, time=60),
-        ]),
+        _table(
+            [
+                Interaction(src=1, dst=10, time=10),
+                Interaction(src=10, dst=30, time=20),
+                Interaction(src=10, dst=20, time=30),
+                Interaction(src=3, dst=10, time=40),
+                Interaction(src=4, dst=10, time=50),
+                Interaction(src=5, dst=20, time=60),
+            ]
+        ),
         rng=np.random.default_rng(0),
         verbose=False,
     )
@@ -184,10 +227,7 @@ def test_future_only_structure_build_preserves_full_history_features_without_tim
 
 
 def test_future_only_structure_preaggregates_large_source_cooccurs():
-    interactions = [
-        Interaction(src=1, dst=1000 + idx, time=idx)
-        for idx in range(1, 310)
-    ]
+    interactions = [Interaction(src=1, dst=1000 + idx, time=idx) for idx in range(1, 310)]
     query = Query(src=1, time=400, candidates=(1001, 1050, 1128, 1309))
     full_tower = StructureFeatureTower()
     future_tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
@@ -203,18 +243,9 @@ def test_future_only_structure_preaggregates_large_source_cooccurs():
 
 
 def test_future_only_structure_preaggregates_repeated_source_cooccurs():
-    interactions = [
-        Interaction(src=1, dst=1000 + idx, time=idx)
-        for idx in range(1, 40)
-    ]
-    interactions.extend(
-        Interaction(src=1000 + idx, dst=2000 + (idx % 5), time=100 + idx)
-        for idx in range(1, 40)
-    )
-    queries = [
-        Query(src=1, time=500 + idx, candidates=(2000, 2001, 2002, 9999))
-        for idx in range(3)
-    ]
+    interactions = [Interaction(src=1, dst=1000 + idx, time=idx) for idx in range(1, 40)]
+    interactions.extend(Interaction(src=1000 + idx, dst=2000 + (idx % 5), time=100 + idx) for idx in range(1, 40))
+    queries = [Query(src=1, time=500 + idx, candidates=(2000, 2001, 2002, 9999)) for idx in range(3)]
     future_tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
     future_tower.fit(_table(interactions), rng=np.random.default_rng(0), verbose=False)
 
@@ -224,12 +255,84 @@ def test_future_only_structure_preaggregates_repeated_source_cooccurs():
     assert np.isfinite(actual).all()
 
 
+def test_future_only_structure_vectorizes_candidate_cooccur_lookup(monkeypatch):
+    interactions = [
+        Interaction(src=1, dst=10, time=10),
+        Interaction(src=1, dst=20, time=20),
+        Interaction(src=10, dst=30, time=30),
+        Interaction(src=10, dst=40, time=40),
+        Interaction(src=20, dst=30, time=50),
+        Interaction(src=20, dst=50, time=60),
+    ]
+    query = Query(src=1, time=100, candidates=(20, 30, 40, 30, 999))
+    tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
+    tower.fit(_table(interactions), rng=np.random.default_rng(0), verbose=False)
+    expected = tower.features_for_queries([query])
+
+    def fail_scalar_lookup(*args, **kwargs):
+        raise AssertionError("candidate cooccurs must be looked up in one vectorized pass")
+
+    monkeypatch.setattr(SparseCountMap, "batch_get_counts", fail_scalar_lookup)
+
+    actual = tower.features_for_queries([query])
+
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_future_only_structure_vectorizes_compact_summary_lookup(monkeypatch):
+    interactions = [
+        Interaction(src=1, dst=10, time=10),
+        Interaction(src=1, dst=20, time=20),
+        Interaction(src=10, dst=30, time=30),
+        Interaction(src=10, dst=40, time=40),
+        Interaction(src=20, dst=30, time=50),
+        Interaction(src=20, dst=50, time=60),
+    ]
+    query = Query(src=1, time=100, candidates=(30, 999, 40, 30))
+    tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
+    tower.fit(_table(interactions), rng=np.random.default_rng(0), verbose=False)
+    expected = tower.features_for_queries([query])
+
+    def fail_scalar_lookup(*args, **kwargs):
+        raise AssertionError("structure summaries must be looked up in one vectorized pass")
+
+    monkeypatch.setattr(_CompactStructureSummary, "get", fail_scalar_lookup)
+
+    actual = tower.features_for_queries([query])
+
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_structure_cache_byte_budget_does_not_change_features() -> None:
+    interactions = [Interaction(src=1, dst=1000 + idx, time=idx) for idx in range(1, 40)]
+    interactions.extend(Interaction(src=1000 + idx, dst=2000 + (idx % 5), time=100 + idx) for idx in range(1, 40))
+    queries = [Query(src=1, time=500 + idx, candidates=(2000, 2001, 2002, 9999)) for idx in range(3)]
+    regular = StructureFeatureTower(
+        StructureTowerConfig(future_only_transition_cooccur=True, cache_max_bytes=1024 * 1024)
+    )
+    constrained = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True, cache_max_bytes=1))
+    table = _table(interactions)
+    regular.fit(table, rng=np.random.default_rng(0), verbose=False)
+    constrained.fit(table, rng=np.random.default_rng(0), verbose=False)
+
+    expected = regular.features_for_queries(queries)
+    actual = constrained.features_for_queries(queries)
+
+    np.testing.assert_array_equal(actual, expected)
+    assert constrained.cache_bytes <= constrained.config.cache_max_bytes
+    structure_summary = regular._full_src_structure_cache.get(1)
+    cooccur_summary = regular._full_src_cooccur_cache.get(1)
+    assert isinstance(structure_summary.candidate_ids, np.ndarray)
+    assert isinstance(structure_summary.common_counts, np.ndarray)
+    assert isinstance(structure_summary.aa_scores, np.ndarray)
+    assert isinstance(structure_summary.ra_scores, np.ndarray)
+    assert isinstance(cooccur_summary.candidate_ids, np.ndarray)
+    assert isinstance(cooccur_summary.counts, np.ndarray)
+
+
 def test_future_only_structure_preaggregates_large_source_common_neighbors():
     interactions = [Interaction(src=1, dst=1000 + idx, time=idx) for idx in range(1, 310)]
-    interactions.extend(
-        Interaction(src=1000 + idx, dst=2000 + (idx % 7), time=400 + idx)
-        for idx in range(1, 310)
-    )
+    interactions.extend(Interaction(src=1000 + idx, dst=2000 + (idx % 7), time=400 + idx) for idx in range(1, 310))
     query = Query(src=1, time=1000, candidates=(2000, 2001, 2002, 9999))
     full_tower = StructureFeatureTower()
     future_tower = StructureFeatureTower(StructureTowerConfig(future_only_transition_cooccur=True))
@@ -290,12 +393,14 @@ def test_structure_memory_switches_disable_heavy_features_only():
         )
     )
     tower.fit(
-        _table([
-            Interaction(src=1, dst=10, time=10),
-            Interaction(src=2, dst=10, time=30),
-            Interaction(src=10, dst=20, time=35),
-            Interaction(src=2, dst=20, time=40),
-        ]),
+        _table(
+            [
+                Interaction(src=1, dst=10, time=10),
+                Interaction(src=2, dst=10, time=30),
+                Interaction(src=10, dst=20, time=35),
+                Interaction(src=2, dst=20, time=40),
+            ]
+        ),
         rng=np.random.default_rng(0),
         verbose=False,
     )
@@ -311,14 +416,16 @@ def test_structure_memory_switches_disable_heavy_features_only():
 def test_structure_link_prediction_features():
     tower = StructureFeatureTower()
     tower.fit(
-        _table([
-            Interaction(src=1, dst=5, time=10),
-            Interaction(src=5, dst=1, time=15),
-            Interaction(src=1, dst=6, time=20),
-            Interaction(src=5, dst=7, time=30),
-            Interaction(src=6, dst=7, time=40),
-            Interaction(src=3, dst=7, time=50),
-        ]),
+        _table(
+            [
+                Interaction(src=1, dst=5, time=10),
+                Interaction(src=5, dst=1, time=15),
+                Interaction(src=1, dst=6, time=20),
+                Interaction(src=5, dst=7, time=30),
+                Interaction(src=6, dst=7, time=40),
+                Interaction(src=3, dst=7, time=50),
+            ]
+        ),
         rng=np.random.default_rng(0),
         verbose=False,
     )
@@ -379,9 +486,7 @@ def test_hybrid_feature_masks_include_structure_groups():
     assert "stats_prior_structure_tower_gnn" in names
     by_name = dict(masks)
     assert len(by_name["stats_prior_structure"]) == (
-        len(STAT_FEATURE_NAMES)
-        + len(CANDIDATE_PRIOR_FEATURE_NAMES)
-        + len(STRUCTURE_FEATURE_NAMES)
+        len(STAT_FEATURE_NAMES) + len(CANDIDATE_PRIOR_FEATURE_NAMES) + len(STRUCTURE_FEATURE_NAMES)
     )
     assert len(by_name["stats_prior_target_structure"]) == (
         len(STAT_FEATURE_NAMES)

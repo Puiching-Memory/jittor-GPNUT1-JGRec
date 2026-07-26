@@ -195,8 +195,6 @@ class FitContext:
     seed: int = 42
     limit_rows: int | None = None
     verbose: bool = True
-    load_checkpoint_path: Path | None = None
-    save_checkpoint_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)

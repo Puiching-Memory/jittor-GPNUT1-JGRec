@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-import json
 import os
-import pickle
 import tempfile
 from dataclasses import replace
-from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from jgrec.checkpoint import get_model_state, load_model_state, save_model_state, set_model_state
+from jgrec.contest_checkpoint import get_model_state, set_model_state
 from jgrec.core.memory import log_event, log_memory, release_memory
 from jgrec.core.types import (
     FitContext,
@@ -179,7 +176,6 @@ class HybridFeatureEncoder:
         structure_config: StructureTowerConfig | None = None,
     ) -> None:
         self.id_map = id_map
-        self.recent_window = recent_window
         self.dataset_profile = dataset_profile
         self.stats = TemporalStats(recent_window=recent_window)
         self.candidate_prior = _build_candidate_prior(candidate_prior_config or CandidatePriorConfig(enabled=False))
@@ -222,14 +218,7 @@ class HybridFeatureEncoder:
         return len(self.feature_names)
 
     def snapshot(self) -> dict[str, Any]:
-        """Return a full-state snapshot of the encoder for test-only inference."""
         return {
-            "id_map": {
-                "src_values": self.id_map.src_values,
-                "dst_values": self.id_map.dst_values,
-            },
-            "recent_window": self.recent_window,
-            "dataset_profile": self.dataset_profile,
             "stats": self.stats.snapshot(),
             "candidate_prior": self.candidate_prior.snapshot() if hasattr(self.candidate_prior, "snapshot") else {},
             "target_window": self.target_window.snapshot() if hasattr(self.target_window, "snapshot") else {},
@@ -238,46 +227,24 @@ class HybridFeatureEncoder:
             "two_tower": self.two_tower.snapshot() if hasattr(self.two_tower, "snapshot") else {},
             "graph": self.graph.snapshot() if hasattr(self.graph, "snapshot") else {},
             "sequence": self.sequence.snapshot() if hasattr(self.sequence, "snapshot") else {},
-            "feature_names": self.feature_names,
-            "verbose": self.verbose,
-            "_profile_rows": self._profile_rows,
-            "_profile_next_rows": self._profile_next_rows,
-            "_profile_elapsed": self._profile_elapsed,
         }
 
     def hydrate(self, snapshot: dict[str, Any]) -> None:
-        """Restore encoder state from a snapshot."""
-        id_map_data = snapshot["id_map"]
-        src_values = tuple(id_map_data["src_values"])
-        dst_values = tuple(id_map_data["dst_values"])
-        self.id_map = NodeIdMap(
-            src_to_id={value: idx for idx, value in enumerate(src_values)},
-            dst_to_id={value: idx for idx, value in enumerate(dst_values)},
-            src_values=src_values,
-            dst_values=dst_values,
-        )
-        self.recent_window = int(snapshot["recent_window"])
-        self.dataset_profile = snapshot.get("dataset_profile")
         self.stats.hydrate(snapshot["stats"])
-        if hasattr(self.candidate_prior, "hydrate") and snapshot.get("candidate_prior"):
-            self.candidate_prior.hydrate(snapshot["candidate_prior"])
-        if hasattr(self.target_window, "hydrate") and snapshot.get("target_window"):
-            self.target_window.hydrate(snapshot["target_window"])
-        if hasattr(self.structure, "hydrate") and snapshot.get("structure"):
-            self.structure.hydrate(snapshot["structure"])
-        if hasattr(self.source_profile, "hydrate") and snapshot.get("source_profile"):
-            self.source_profile.hydrate(snapshot["source_profile"])
-        if hasattr(self.two_tower, "hydrate") and snapshot.get("two_tower"):
-            self.two_tower.hydrate(snapshot["two_tower"])
-        if hasattr(self.graph, "hydrate") and snapshot.get("graph"):
-            self.graph.hydrate(snapshot["graph"])
-        if hasattr(self.sequence, "hydrate") and snapshot.get("sequence"):
-            self.sequence.hydrate(snapshot["sequence"])
-        self.feature_names = tuple(snapshot["feature_names"])
-        self.verbose = bool(snapshot.get("verbose", False))
-        self._profile_rows = int(snapshot.get("_profile_rows", 0))
-        self._profile_next_rows = int(snapshot.get("_profile_next_rows", FEATURE_PROFILE_INTERVAL))
-        self._profile_elapsed = dict(snapshot.get("_profile_elapsed", {}))
+        for tower_name in (
+            "candidate_prior",
+            "target_window",
+            "structure",
+            "source_profile",
+            "two_tower",
+            "graph",
+            "sequence",
+        ):
+            tower = getattr(self, tower_name)
+            tower_snapshot = snapshot.get(tower_name)
+            hydrate = getattr(tower, "hydrate", None)
+            if tower_snapshot and callable(hydrate):
+                hydrate(tower_snapshot)
 
     def fit(
         self,
@@ -571,39 +538,45 @@ class TemporalHybridRanker:
         self.config: TrainingConfig | None = None
 
     def snapshot(self) -> dict[str, Any]:
+        if self.config is None or self.id_map is None or self.encoder is None:
+            raise RuntimeError("ranker is not fitted")
+        if self.fusion is None or self.fusion_result is None:
+            raise RuntimeError("ranker fusion is not fitted")
         return {
             "config": self.config,
             "id_map": {
-                "src_values": self.id_map.src_values if self.id_map is not None else (),
-                "dst_values": self.id_map.dst_values if self.id_map is not None else (),
+                "src_values": self.id_map.src_values,
+                "dst_values": self.id_map.dst_values,
             },
             "recent_window": self.recent_window,
             "feature_names": self.feature_names,
-            "_fusion_hidden_dim": self._fusion_hidden_dim,
+            "fusion_hidden_dim": self._fusion_hidden_dim,
             "dataset_profile": self.dataset_profile,
-            "encoder": self.encoder.snapshot() if self.encoder is not None else None,
-            "fusion_state": get_model_state(self.fusion) if self.fusion is not None else None,
+            "encoder": self.encoder.snapshot(),
+            "fusion_state": get_model_state(self.fusion),
             "fusion_result": self.fusion_result,
             "lgbm_result": self.lgbm_result,
             "training_report": self.training_report,
         }
 
     def hydrate(self, snapshot: dict[str, Any]) -> None:
+        from .fusion import FusionMLP  # noqa: PLC0415
+
         self.config = snapshot["config"]
         self.recent_window = int(snapshot["recent_window"])
         self.feature_names = tuple(snapshot["feature_names"])
-        self._fusion_hidden_dim = int(snapshot["_fusion_hidden_dim"])
+        self._fusion_hidden_dim = int(snapshot["fusion_hidden_dim"])
         self.dataset_profile = snapshot.get("dataset_profile")
-        id_map_data = snapshot["id_map"]
-        src_values = tuple(id_map_data["src_values"])
-        dst_values = tuple(id_map_data["dst_values"])
+        id_map_state = snapshot["id_map"]
+        src_values = tuple(int(value) for value in id_map_state["src_values"])
+        dst_values = tuple(int(value) for value in id_map_state["dst_values"])
         self.id_map = NodeIdMap(
             src_to_id={value: idx for idx, value in enumerate(src_values)},
             dst_to_id={value: idx for idx, value in enumerate(dst_values)},
             src_values=src_values,
             dst_values=dst_values,
         )
-        encoder = HybridFeatureEncoder(
+        self.encoder = HybridFeatureEncoder(
             id_map=self.id_map,
             recent_window=self.recent_window,
             graph_config=self.config.graph_config(),
@@ -615,33 +588,20 @@ class TemporalHybridRanker:
             source_profile_config=self.config.source_profile_config(),
             structure_config=self.config.structure_config(),
         )
-        encoder.hydrate(snapshot["encoder"])
-        self.encoder = encoder
-        if snapshot["fusion_state"] is not None:
-            from .fusion import FusionMLP  # noqa: PLC0415
-            self.fusion = FusionMLP(
-                input_dim=len(snapshot["fusion_result"].feature_indices),
-                hidden_dim=self._fusion_hidden_dim,
-            )
-            set_model_state(self.fusion, snapshot["fusion_state"])
-        else:
-            self.fusion = None
+        self.encoder.hydrate(snapshot["encoder"])
         self.fusion_result = snapshot["fusion_result"]
+        self.fusion = FusionMLP(
+            input_dim=len(self.fusion_result.feature_indices),
+            hidden_dim=self._fusion_hidden_dim,
+        )
+        set_model_state(self.fusion, snapshot["fusion_state"])
         self.lgbm_result = snapshot.get("lgbm_result")
         self.training_report = snapshot.get("training_report")
 
-    def fit(
-        self,
-        interactions: InteractionTable,
-        training_config: TrainingConfig,
-        *,
-        save_checkpoint_path: Path | None = None,
-        load_checkpoint_path: Path | None = None,
-    ) -> TrainingReport:
+    def fit(self, interactions: InteractionTable, training_config: TrainingConfig) -> TrainingReport:
         if len(interactions) == 0:
             raise ValueError("training interactions are empty")
 
-        self.config = training_config
         interactions = interactions.sort_by_time()
         if training_config.max_fit_events > 0 and len(interactions) > training_config.max_fit_events:
             interactions = interactions.tail(training_config.max_fit_events)
@@ -659,6 +619,7 @@ class TemporalHybridRanker:
         self._fusion_hidden_dim = training_config.fusion_hidden_dim
 
         training_config = self._apply_auto_strategy(interactions, training_config)
+        self.config = training_config
         log_memory("hybrid_fit_start", enabled=training_config.verbose)
         log(f"[hybrid-fit] start events={len(interactions)}", enabled=training_config.verbose)
         fusion, fusion_result, lgbm_result, report, encoder_cache, cache_config = self._learn_fusion(
@@ -667,13 +628,6 @@ class TemporalHybridRanker:
         self.fusion = fusion
         self.fusion_result = fusion_result
         self.lgbm_result = lgbm_result
-
-        if load_checkpoint_path is not None and load_checkpoint_path.exists():
-            log(
-                f"[hybrid] loading checkpoint from {load_checkpoint_path}",
-                enabled=training_config.verbose,
-            )
-            self.load_checkpoint(load_checkpoint_path)
 
         rng = np.random.default_rng(training_config.seed + 10_000)
         final_config = _config_for_selected_features(training_config, fusion_result.feature_indices)
@@ -714,42 +668,8 @@ class TemporalHybridRanker:
             self.encoder.compact_for_future_queries()
         log_memory("final_encoder_done", enabled=training_config.verbose)
         self.training_report = report
-        if save_checkpoint_path is not None:
-            log(
-                f"[hybrid] saving checkpoint to {save_checkpoint_path}",
-                enabled=training_config.verbose,
-            )
-            self.save_checkpoint(save_checkpoint_path)
         log_event("[hybrid-fit] done", enabled=training_config.verbose)
         return report
-
-    def save_checkpoint(self, path: Path) -> None:
-        if self.fusion is None:
-            raise RuntimeError("ranker is not fitted")
-        save_model_state(path, get_model_state(self.fusion))
-
-    def save_full_model(self, dir_path: Path) -> None:
-        """Persist full ranker state for test-only inference."""
-        dir_path.mkdir(parents=True, exist_ok=True)
-        snapshot = self.snapshot()
-        with (dir_path / "snapshot.pkl").open("wb") as f:
-            pickle.dump(snapshot, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-    def load_full_model(self, dir_path: Path) -> None:
-        """Restore full ranker state from disk."""
-        import jittor as jt  # noqa: PLC0415
-        jt.flags.use_cuda = 1
-        snapshot_path = dir_path / "snapshot.pkl"
-        if not snapshot_path.exists():
-            raise FileNotFoundError(f"full model snapshot not found: {snapshot_path}")
-        with snapshot_path.open("rb") as f:
-            snapshot = pickle.load(f)
-        self.hydrate(snapshot)
-
-    def load_checkpoint(self, path: Path) -> None:
-        if self.fusion is None:
-            raise RuntimeError("ranker is not fitted")
-        set_model_state(self.fusion, load_model_state(path))
 
     def _can_use_future_only_final_encoder(self) -> bool:
         if self.dataset_profile is None:
@@ -818,6 +738,13 @@ class TemporalHybridRanker:
 
     def predict(self, query: TestQuery) -> np.ndarray:
         return self.predict_batch([query])[0]
+
+    def prediction_order(self, queries: TestQueryArray) -> np.ndarray | None:
+        if self.encoder is None or not queries:
+            return None
+        if not np.all(queries.time > self.encoder.stats.max_time):
+            return None
+        return np.argsort(queries.src, kind="stable")
 
     def predict_batch(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
@@ -1275,12 +1202,12 @@ def _selected_report_metric(result: FusionResult, metric: str) -> float:
 
 
 def _find_ensemble_weight(
-    mlp_model: "FusionMLP | None",
-    mlp_result: "FusionResult | None",
-    lgbm_result: "LGBMFusionResult",
+    mlp_model: FusionMLP | None,
+    mlp_result: FusionResult | None,
+    lgbm_result: LGBMFusionResult,
     val_features: np.ndarray,
     feature_indices: tuple[int, ...],
-    config: "TrainingConfig",
+    config: TrainingConfig,
 ) -> float:
     if mlp_model is None or mlp_result is None:
         return 0.5
@@ -1293,7 +1220,7 @@ def _find_ensemble_weight(
 
     metric = config.selection_metric.lower()
     best_w, best_score = 0.5, -1.0
-    for w_int in range(0, 11):
+    for w_int in range(11):
         w = w_int / 10.0
         blended = w * mlp_probs + (1.0 - w) * lgbm_probs
         score = _mrr_from_probs(blended) if metric == "mrr" else _ap_from_probs(blended)
@@ -1807,20 +1734,22 @@ class HybridRankerAdapter:
             dataset_train_path=context.dataset.train_path,
             dataset_test_path=context.dataset.test_path,
         )
-        return self.impl.fit(
-            interactions,
-            training_config=config,
-            save_checkpoint_path=context.save_checkpoint_path,
-            load_checkpoint_path=context.load_checkpoint_path,
-        )
-
-    def save_full_model(self, dir_path: Path) -> None:
-        """Persist full hybrid state for test-only inference."""
-        self.impl.save_full_model(dir_path)
-
-    def load_full_model(self, dir_path: Path) -> None:
-        """Restore full hybrid state from disk."""
-        self.impl.load_full_model(dir_path)
+        return self.impl.fit(interactions, training_config=config)
 
     def predict_batch(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         return self.impl.predict_batch(queries)
+
+    def prediction_order(self, queries: TestQueryArray) -> np.ndarray | None:
+        return self.impl.prediction_order(queries)
+
+    @property
+    def training_report(self) -> TrainingReport | None:
+        return self.impl.training_report
+
+    def snapshot(self) -> dict[str, Any]:
+        return self.impl.snapshot()
+
+    def hydrate(self, snapshot: dict[str, Any]) -> None:
+        self.impl.hydrate(snapshot)
+        if self.impl.config is not None:
+            self.config = self.impl.config

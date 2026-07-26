@@ -186,11 +186,11 @@ class EndToEndTemporalGraphModel(jt.nn.Module):
             (batch_size, candidate_count, self.hidden_size)
         )
         interaction = src_state_expanded * candidate_state
-        
+
         # Normalize each signal block before concatenation to equalize magnitudes
         signals = [attended, src_state_expanded, candidate_state, interaction, stats_state]
-        normed_signals = [norm(sig) for norm, sig in zip(self.scorer_input_norm, signals)]
-        
+        normed_signals = [norm(sig) for norm, sig in zip(self.scorer_input_norm, signals, strict=True)]
+
         scorer_input = jt.concat(normed_signals, dim=-1)
         logits = self.scorer(scorer_input.reshape((batch_size * candidate_count, -1))).reshape(
             (batch_size, candidate_count)
@@ -454,7 +454,7 @@ class EndToEndTemporalGraphModel(jt.nn.Module):
 
         # Normalize each signal block before concatenation to equalize magnitudes
         signals = [attended, src_state_expanded, candidate_state, interaction, stats_state]
-        normed_signals = [norm(sig) for norm, sig in zip(self.scorer_input_norm, signals)]
+        normed_signals = [norm(sig) for norm, sig in zip(self.scorer_input_norm, signals, strict=True)]
 
         scorer_input = jt.concat(normed_signals, dim=-1)
         logits = self.scorer(scorer_input.reshape((batch_size * candidate_count, -1))).reshape(
@@ -508,9 +508,9 @@ class EndToEndTemporalGraphModel(jt.nn.Module):
         q = attn_module.query(query)
         k = attn_module.key(key)
 
-        q_shape = q.shape[:-1] + (n_heads, head_size)
+        q_shape = (*q.shape[:-1], n_heads, head_size)
         q = q.view(*q_shape)
-        k_shape = k.shape[:-1] + (n_heads, head_size)
+        k_shape = (*k.shape[:-1], n_heads, head_size)
         k = k.view(*k_shape)
 
         q = q.permute(0, 2, 1, 3)

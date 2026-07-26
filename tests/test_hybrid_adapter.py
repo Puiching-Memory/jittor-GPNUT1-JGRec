@@ -1,9 +1,16 @@
+from types import SimpleNamespace
+
 import numpy as np
 
 from jgrec.core.types import InteractionTable, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.rankers.hybrid.config import TrainingConfig
-from jgrec.rankers.hybrid.ranker import HybridFeatureEncoder, HybridRankerAdapter, _build_supervised_queries
+from jgrec.rankers.hybrid.ranker import (
+    HybridFeatureEncoder,
+    HybridRankerAdapter,
+    TemporalHybridRanker,
+    _build_supervised_queries,
+)
 
 
 class _CapturingHybridImpl:
@@ -13,6 +20,10 @@ class _CapturingHybridImpl:
     def predict_batch(self, queries):
         self.seen_queries = queries
         return np.zeros((len(queries), queries.candidate_count), dtype=np.float64)
+
+    def prediction_order(self, queries):
+        self.seen_queries = queries
+        return np.arange(len(queries) - 1, -1, -1, dtype=np.int64)
 
 
 def test_hybrid_adapter_preserves_test_query_array_for_prediction():
@@ -29,6 +40,50 @@ def test_hybrid_adapter_preserves_test_query_array_for_prediction():
 
     assert impl.seen_queries is queries
     np.testing.assert_array_equal(probs, np.zeros((2, 3), dtype=np.float64))
+
+
+def test_hybrid_adapter_delegates_prediction_order():
+    adapter = HybridRankerAdapter()
+    impl = _CapturingHybridImpl()
+    adapter.impl = impl
+    queries = TestQueryArray(
+        src=np.asarray([1, 2], dtype=np.int32),
+        time=np.asarray([10, 11], dtype=np.int32),
+        candidates=np.asarray([[3, 4, 5], [6, 7, 8]], dtype=np.int32),
+    )
+
+    order = adapter.prediction_order(queries)
+
+    assert impl.seen_queries is queries
+    np.testing.assert_array_equal(order, np.asarray([1, 0], dtype=np.int64))
+
+
+def test_hybrid_prediction_order_groups_future_only_queries_by_source():
+    ranker = TemporalHybridRanker()
+    ranker.encoder = SimpleNamespace(stats=SimpleNamespace(max_time=100))
+    queries = TestQueryArray(
+        src=np.asarray([3, 1, 3, 2, 1], dtype=np.int32),
+        time=np.asarray([101, 102, 103, 104, 105], dtype=np.int32),
+        candidates=np.arange(15, dtype=np.int32).reshape(5, 3),
+    )
+
+    order = ranker.prediction_order(queries)
+
+    np.testing.assert_array_equal(order, np.asarray([1, 4, 3, 0, 2], dtype=np.int64))
+
+
+def test_hybrid_prediction_order_rejects_non_future_or_unfitted_queries():
+    queries = TestQueryArray(
+        src=np.asarray([2, 1], dtype=np.int32),
+        time=np.asarray([101, 100], dtype=np.int32),
+        candidates=np.arange(6, dtype=np.int32).reshape(2, 3),
+    )
+    ranker = TemporalHybridRanker()
+
+    assert ranker.prediction_order(queries) is None
+
+    ranker.encoder = SimpleNamespace(stats=SimpleNamespace(max_time=100))
+    assert ranker.prediction_order(queries) is None
 
 
 def test_supervised_query_builder_returns_test_query_array_batches():

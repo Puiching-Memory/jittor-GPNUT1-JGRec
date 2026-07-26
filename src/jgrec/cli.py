@@ -9,6 +9,11 @@ from typing import Literal
 from rich.panel import Panel
 from rich.table import Table
 
+from .contest_checkpoint import (
+    ContestCheckpointWriter,
+    load_checkpoint_dataset,
+    load_checkpoint_metadata,
+)
 from .core.io import discover_datasets
 from .core.memory import configure_memory_log, log_memory, release_memory
 from .core.runner import build_dataset_submission
@@ -19,7 +24,7 @@ from .rankers.hybrid.config import TrainingConfig
 from .rankers.registry import create_ranker
 from .submission import expected_test_rows, validate_submission_file, write_zip
 
-ModelName = Literal["hybrid", "craft", "temporal-graph"]
+ModelName = Literal["hybrid", "hybrid-heuristic", "craft", "temporal-graph"]
 SelectionMetric = Literal["ap", "mrr"]
 GNNModel = Literal["xsimgcl", "lightgcn"]
 FusionMode = Literal["mlp", "lgbm", "ensemble"]
@@ -131,19 +136,16 @@ class CLIConfig:
     source_profile_window_size: int = 16
     source_profile_recent_k: int = 32
     source_profile_predict_history_limit: int = 0
-    save_checkpoint: bool = False
-    checkpoint_dir: Path | None = None
-    load_checkpoint_dir: Path | None = None
-    save_full_model_dir: Path | None = None
-    load_full_model_dir: Path | None = None
-    test_only: bool = False
-    recompute_test_profile: bool = False
+    prediction_cache_max_mb: int = 512
+    save_checkpoint: Path | None = None
+    load_checkpoint: Path | None = None
 
 
 def main(argv: list[str] | None = None) -> int:
     import tyro  # noqa: PLC0415
 
     args = tyro.cli(CLIConfig, args=argv)
+    _validate_checkpoint_args(args)
     _validate_device_args(args)
     _configure_jittor_device(args)
 
@@ -152,55 +154,63 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = Path("result") / run_name
     csv_dir = run_dir / "csv"
     zip_path = run_dir / "result.zip"
-    checkpoint_dir = args.checkpoint_dir or (run_dir / "checkpoints")
     configure_memory_log(run_dir / "memory.log")
     log_memory("cli_start", enabled=not args.quiet_ranker)
     console.print(_run_panel(run_dir, zip_path, args, ranker_config))
 
-    datasets = discover_datasets(args.data_dir, allow_test_only=args.test_only)
+    datasets = discover_datasets(args.data_dir)
     selected_datasets = _select_datasets(datasets, args.dataset)
+    checkpoint_writer = _checkpoint_writer(args, datasets)
+    checkpoint_metadata = _loaded_checkpoint_metadata(args)
     results = []
     result_table = _result_table()
-    for dataset in datasets:
-        output_path = csv_dir / f"{dataset.name}.csv"
-        selected = dataset.name in selected_datasets
-        if args.resume_existing and output_path.exists() and (not selected or args.limit_rows is None):
-            result = _reuse_existing_result(dataset, output_path, args)
+    try:
+        for dataset in datasets:
+            output_path = csv_dir / f"{dataset.name}.csv"
+            selected = dataset.name in selected_datasets
+            if args.resume_existing and output_path.exists() and (not selected or args.limit_rows is None):
+                result = _reuse_existing_result(dataset, output_path, args)
+                results.append(result)
+                _add_result_row(result_table, result, args.model, reused=True)
+                console.print(f"[yellow]reused[/yellow] {result.rows} rows -> {result.output_path}")
+                continue
+            if not selected:
+                continue
+
+            console.rule(f"[bold]{dataset.name}")
+            console.print(f"[cyan]train[/cyan] {dataset.train_path}")
+            console.print(f"[cyan]test [/cyan] {dataset.test_path}")
+            ranker = create_ranker(args.model, ranker_config)
+            if args.load_checkpoint is not None:
+                _hydrate_ranker(
+                    ranker,
+                    load_checkpoint_dataset(args.load_checkpoint, dataset.name),
+                )
+            after_fit = None
+            if checkpoint_writer is not None and dataset.name not in checkpoint_writer.written_datasets:
+                after_fit = _checkpoint_after_fit(checkpoint_writer, dataset.name)
+            result = build_dataset_submission(
+                dataset=dataset,
+                ranker=ranker,
+                output_dir=csv_dir,
+                batch_size=args.batch_size,
+                seed=args.seed,
+                verbose=not args.quiet_ranker,
+                limit_rows=args.limit_rows,
+                fit_ranker=args.load_checkpoint is None,
+                after_fit=after_fit,
+            )
             results.append(result)
-            _add_result_row(result_table, result, args.model, reused=True)
-            console.print(f"[yellow]reused[/yellow] {result.rows} rows -> {result.output_path}")
-            continue
-        if not selected:
-            continue
 
-        console.rule(f"[bold]{dataset.name}")
-        console.print(f"[cyan]train[/cyan] {dataset.train_path}")
-        console.print(f"[cyan]test [/cyan] {dataset.test_path}")
-        ranker = create_ranker(args.model, ranker_config)
-        result = build_dataset_submission(
-            dataset=dataset,
-            ranker=ranker,
-            output_dir=csv_dir,
-            batch_size=args.batch_size,
-            seed=args.seed,
-            verbose=not args.quiet_ranker,
-            limit_rows=args.limit_rows,
-            checkpoint_dir=checkpoint_dir if args.save_checkpoint else None,
-            load_checkpoint_dir=args.load_checkpoint_dir,
-            model_name=args.model,
-            full_model_dir=args.save_full_model_dir,
-            load_full_model_dir=args.load_full_model_dir,
-            recompute_test_profile=args.recompute_test_profile,
-        )
-        results.append(result)
-
-        if not args.skip_validate:
-            expected_rows = None if args.limit_rows is not None else expected_test_rows(dataset)
-            validate_submission_file(result.output_path, expected_rows=expected_rows)
-        _add_result_row(result_table, result, args.model)
-        console.print(f"[green]wrote[/green] {result.rows} rows -> {result.output_path}")
-        del ranker
-        release_memory()
+            if not args.skip_validate:
+                expected_rows = None if args.limit_rows is not None else expected_test_rows(dataset)
+                validate_submission_file(result.output_path, expected_rows=expected_rows)
+            _add_result_row(result_table, result, args.model)
+            console.print(f"[green]wrote[/green] {result.rows} rows -> {result.output_path}")
+            del ranker
+            release_memory()
+    finally:
+        _finish_checkpoint_run(checkpoint_writer)
 
     if args.resume_existing and len(results) != len(datasets):
         present = {result.name for result in results}
@@ -210,7 +220,150 @@ def main(argv: list[str] | None = None) -> int:
     write_zip(results, zip_path)
     console.print(result_table)
     console.print(f"[bold green]archive[/bold green] {zip_path}")
+    if checkpoint_metadata is not None:
+        console.print(f"[bold green]loaded checkpoint[/bold green] {args.load_checkpoint}")
     return 0
+
+
+def _checkpoint_writer(args: CLIConfig, datasets: list[DatasetPaths]) -> ContestCheckpointWriter | None:
+    if args.save_checkpoint is None:
+        return None
+    return ContestCheckpointWriter(
+        args.save_checkpoint,
+        model_name=args.model,
+        expected_datasets=tuple(dataset.name for dataset in datasets),
+    )
+
+
+def _loaded_checkpoint_metadata(args: CLIConfig) -> dict | None:
+    if args.load_checkpoint is None:
+        return None
+    metadata = load_checkpoint_metadata(args.load_checkpoint)
+    if metadata["model_name"] != args.model:
+        raise ValueError(f"checkpoint model is {metadata['model_name']}, but --model is {args.model}")
+    return metadata
+
+
+def _finish_checkpoint_run(writer: ContestCheckpointWriter | None) -> None:
+    if writer is None or writer.is_closed:
+        return
+    if writer.is_complete:
+        writer.finalize()
+        console.print(f"[bold green]checkpoint[/bold green] {writer.path}")
+    else:
+        writer.close_partial()
+        pending = ", ".join(name for name in writer.expected_datasets if name not in writer.written_datasets)
+        console.print(
+            f"[yellow]checkpoint partial[/yellow] {writer.path.with_suffix(f'{writer.path.suffix}.tmp')} "
+            f"(pending: {pending})"
+        )
+
+
+def _checkpoint_after_fit(writer: ContestCheckpointWriter, dataset_name: str):
+    def save_dataset_state(ranker) -> None:
+        writer.add_dataset(dataset_name, _snapshot_ranker(ranker))
+        if writer.is_complete:
+            writer.finalize()
+            console.print(f"[bold green]checkpoint[/bold green] {writer.path}")
+
+    return save_dataset_state
+
+
+def _snapshot_ranker(ranker) -> dict:
+    snapshot = getattr(ranker, "snapshot", None)
+    if not callable(snapshot):
+        raise TypeError(f"ranker does not support contest checkpoints: {ranker.name}")
+    return snapshot()
+
+
+def _hydrate_ranker(ranker, state: dict) -> None:
+    hydrate = getattr(ranker, "hydrate", None)
+    if not callable(hydrate):
+        raise TypeError(f"ranker does not support contest checkpoints: {ranker.name}")
+    hydrate(state)
+
+
+def _hybrid_config_kwargs(args: CLIConfig) -> dict:
+    return {
+        "val_ratio": args.val_ratio,
+        "context_ratio": args.context_ratio,
+        "max_train_events": args.max_train_events,
+        "max_val_events": args.max_val_events,
+        "supervised_feature_batch_size": args.supervised_feature_batch_size,
+        "supervised_feature_memmap": args.supervised_feature_memmap,
+        "num_negatives": args.num_negatives,
+        "max_fit_events": args.max_fit_events,
+        "epochs": args.epochs,
+        "train_batch_size": args.train_batch_size,
+        "lr": args.lr,
+        "weight_decay": args.weight_decay,
+        "selection_metric": args.selection_metric,
+        "early_stop_patience": args.early_stop,
+        "seed": args.seed,
+        "verbose": not args.quiet_ranker,
+        "encoder_state_cache_enabled": args.encoder_state_cache,
+        "auto_strategy_enabled": args.auto_strategy,
+        "candidate_prior_enabled": not args.disable_candidate_prior,
+        "target_window_enabled": not args.disable_target_window,
+        "target_window_fractions": _parse_target_window_fractions(args.target_window_fractions),
+        "test_candidate_negative_ratio": args.test_candidate_negative_ratio,
+        "structure_enabled": not args.disable_structure,
+        "structure_cooccur_enabled": not args.disable_structure_cooccur,
+        "structure_transition_enabled": not args.disable_structure_transition,
+        "structure_cooccur_history_limit": args.structure_cooccur_history_limit,
+        "structure_predict_neighbor_limit": args.structure_predict_neighbor_limit,
+        "source_profile_enabled": not args.disable_source_profile,
+        "source_profile_deterministic_enabled": not args.disable_source_profile_deterministic,
+        "source_profile_item2vec_enabled": not args.disable_source_profile_item2vec,
+        "source_profile_embedding_dim": args.source_profile_embedding_dim,
+        "source_profile_epochs": args.source_profile_epochs,
+        "source_profile_early_stop_patience": args.source_profile_early_stop_patience,
+        "source_profile_batch_size": args.source_profile_batch_size,
+        "source_profile_score_batch_size": args.source_profile_score_batch_size,
+        "source_profile_max_samples": args.source_profile_max_samples,
+        "source_profile_window_size": args.source_profile_window_size,
+        "source_profile_recent_k": args.source_profile_recent_k,
+        "source_profile_predict_history_limit": args.source_profile_predict_history_limit,
+        "prediction_cache_max_bytes": max(int(args.prediction_cache_max_mb), 0) * 1024 * 1024,
+        "gnn_enabled": not args.disable_gnn,
+        "gnn_model": args.gnn_model,
+        "gnn_edge_weighting": args.gnn_edge_weighting,
+        "gnn_time_decay_ratio": args.gnn_time_decay_ratio,
+        "gnn_embedding_dim": args.gnn_embedding_dim,
+        "gnn_layers": args.gnn_layers,
+        "gnn_epochs": args.gnn_epochs,
+        "gnn_early_stop_patience": args.gnn_early_stop_patience,
+        "gnn_batch_size": args.gnn_batch_size,
+        "gnn_max_graph_edges": args.gnn_max_graph_edges,
+        "gnn_max_train_edges": args.gnn_max_train_edges,
+        "gnn_lr": args.gnn_lr,
+        "gnn_reg_weight": args.gnn_reg_weight,
+        "gnn_cl_rate": args.gnn_cl_rate,
+        "seq_enabled": not args.disable_seq,
+        "seq_epochs": args.seq_epochs,
+        "seq_early_stop_patience": args.seq_early_stop_patience,
+        "seq_batch_size": args.seq_batch_size,
+        "seq_score_batch_size": args.seq_score_batch_size,
+        "seq_max_samples": args.seq_max_samples,
+        "seq_max_len": args.seq_max_len,
+        "seq_hidden_size": args.seq_hidden_size,
+        "seq_layers": args.seq_layers,
+        "seq_heads": args.seq_heads,
+        "seq_dropout": args.seq_dropout,
+        "two_tower_enabled": not args.disable_two_tower,
+        "two_tower_embedding_dim": args.two_tower_embedding_dim,
+        "two_tower_hidden_dim": args.two_tower_hidden_dim,
+        "two_tower_epochs": args.two_tower_epochs,
+        "two_tower_early_stop_patience": args.two_tower_early_stop_patience,
+        "two_tower_batch_size": args.two_tower_batch_size,
+        "two_tower_score_batch_size": args.two_tower_score_batch_size,
+        "two_tower_max_samples": args.two_tower_max_samples,
+        "fusion_hidden_dim": args.fusion_hidden_dim,
+        "fusion_mode": args.fusion_mode,
+        "hard_negative_ratio": args.hard_negative_ratio,
+        "popular_negative_ratio": args.popular_negative_ratio,
+        "negative_sampling_workers": args.negative_sampling_workers,
+    }
 
 
 def _ranker_config(args: CLIConfig):
@@ -252,84 +405,14 @@ def _ranker_config(args: CLIConfig):
             candidate_recent_feature_group=args.candidate_recent_feature_group,
             refit_full=args.refit_full,
         )
+    if args.model == "hybrid-heuristic":
+        from .rankers.hybrid_heuristic.config import TrainingConfig as HeuristicTrainingConfig  # noqa: PLC0415
+
+        return HeuristicTrainingConfig(
+            **_hybrid_config_kwargs(args),
+        )
     return TrainingConfig(
-        val_ratio=args.val_ratio,
-        context_ratio=args.context_ratio,
-        max_train_events=args.max_train_events,
-        max_val_events=args.max_val_events,
-        supervised_feature_batch_size=args.supervised_feature_batch_size,
-        supervised_feature_memmap=args.supervised_feature_memmap,
-        num_negatives=args.num_negatives,
-        max_fit_events=args.max_fit_events,
-        epochs=args.epochs,
-        train_batch_size=args.train_batch_size,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        selection_metric=args.selection_metric,
-        early_stop_patience=args.early_stop,
-        seed=args.seed,
-        verbose=not args.quiet_ranker,
-        encoder_state_cache_enabled=args.encoder_state_cache,
-        auto_strategy_enabled=args.auto_strategy,
-        candidate_prior_enabled=not args.disable_candidate_prior,
-        target_window_enabled=not args.disable_target_window,
-        target_window_fractions=_parse_target_window_fractions(args.target_window_fractions),
-        test_candidate_negative_ratio=args.test_candidate_negative_ratio,
-        structure_enabled=not args.disable_structure,
-        structure_cooccur_enabled=not args.disable_structure_cooccur,
-        structure_transition_enabled=not args.disable_structure_transition,
-        structure_cooccur_history_limit=args.structure_cooccur_history_limit,
-        structure_predict_neighbor_limit=args.structure_predict_neighbor_limit,
-        source_profile_enabled=not args.disable_source_profile,
-        source_profile_deterministic_enabled=not args.disable_source_profile_deterministic,
-        source_profile_item2vec_enabled=not args.disable_source_profile_item2vec,
-        source_profile_embedding_dim=args.source_profile_embedding_dim,
-        source_profile_epochs=args.source_profile_epochs,
-        source_profile_early_stop_patience=args.source_profile_early_stop_patience,
-        source_profile_batch_size=args.source_profile_batch_size,
-        source_profile_score_batch_size=args.source_profile_score_batch_size,
-        source_profile_max_samples=args.source_profile_max_samples,
-        source_profile_window_size=args.source_profile_window_size,
-        source_profile_recent_k=args.source_profile_recent_k,
-        source_profile_predict_history_limit=args.source_profile_predict_history_limit,
-        gnn_enabled=not args.disable_gnn,
-        gnn_model=args.gnn_model,
-        gnn_edge_weighting=args.gnn_edge_weighting,
-        gnn_time_decay_ratio=args.gnn_time_decay_ratio,
-        gnn_embedding_dim=args.gnn_embedding_dim,
-        gnn_layers=args.gnn_layers,
-        gnn_epochs=args.gnn_epochs,
-        gnn_early_stop_patience=args.gnn_early_stop_patience,
-        gnn_batch_size=args.gnn_batch_size,
-        gnn_max_graph_edges=args.gnn_max_graph_edges,
-        gnn_max_train_edges=args.gnn_max_train_edges,
-        gnn_lr=args.gnn_lr,
-        gnn_reg_weight=args.gnn_reg_weight,
-        gnn_cl_rate=args.gnn_cl_rate,
-        seq_enabled=not args.disable_seq,
-        seq_epochs=args.seq_epochs,
-        seq_early_stop_patience=args.seq_early_stop_patience,
-        seq_batch_size=args.seq_batch_size,
-        seq_score_batch_size=args.seq_score_batch_size,
-        seq_max_samples=args.seq_max_samples,
-        seq_max_len=args.seq_max_len,
-        seq_hidden_size=args.seq_hidden_size,
-        seq_layers=args.seq_layers,
-        seq_heads=args.seq_heads,
-        seq_dropout=args.seq_dropout,
-        two_tower_enabled=not args.disable_two_tower,
-        two_tower_embedding_dim=args.two_tower_embedding_dim,
-        two_tower_hidden_dim=args.two_tower_hidden_dim,
-        two_tower_epochs=args.two_tower_epochs,
-        two_tower_early_stop_patience=args.two_tower_early_stop_patience,
-        two_tower_batch_size=args.two_tower_batch_size,
-        two_tower_score_batch_size=args.two_tower_score_batch_size,
-        two_tower_max_samples=args.two_tower_max_samples,
-        fusion_hidden_dim=args.fusion_hidden_dim,
-        fusion_mode=args.fusion_mode,
-        hard_negative_ratio=args.hard_negative_ratio,
-        popular_negative_ratio=args.popular_negative_ratio,
-        negative_sampling_workers=args.negative_sampling_workers,
+        **_hybrid_config_kwargs(args),
     )
 
 
@@ -338,6 +421,20 @@ def _validate_device_args(args: CLIConfig) -> None:
         raise ValueError("--cpu is disabled; this project requires CUDA")
     if args.model == "temporal-graph" and args.cpu:
         raise ValueError("temporal-graph requires CUDA; do not pass --cpu")
+
+
+def _validate_checkpoint_args(args: CLIConfig) -> None:
+    if args.save_checkpoint is not None and args.load_checkpoint is not None:
+        raise ValueError("--save-checkpoint and --load-checkpoint cannot be used together")
+    checkpoint_path = args.save_checkpoint or args.load_checkpoint
+    if checkpoint_path is None:
+        return
+    if args.model != "hybrid":
+        raise ValueError("contest checkpoints are only supported for --model hybrid")
+    if checkpoint_path.suffix.lower() != ".pkl":
+        raise ValueError("contest checkpoint must use the .pkl extension")
+    if args.save_checkpoint is not None and args.resume_existing:
+        raise ValueError("--save-checkpoint cannot be combined with --resume-existing")
 
 
 def _configure_jittor_device(args: CLIConfig) -> None:
@@ -383,12 +480,21 @@ def _build_run_name(args: CLIConfig, config) -> str:
 
 def _config_digest(args: CLIConfig, config) -> str:
     cli_payload = _jsonable(args)
-    for operational_key in ("dataset", "run_name", "resume_existing", "encoder_state_cache"):
+    for operational_key in (
+        "dataset",
+        "run_name",
+        "resume_existing",
+        "encoder_state_cache",
+        "save_checkpoint",
+        "load_checkpoint",
+        "prediction_cache_max_mb",
+    ):
         if isinstance(cli_payload, dict):
             cli_payload.pop(operational_key, None)
     ranker_payload = _jsonable(config)
     if isinstance(ranker_payload, dict):
         ranker_payload.pop("encoder_state_cache_enabled", None)
+        ranker_payload.pop("prediction_cache_max_bytes", None)
     payload = {
         "cli": cli_payload,
         "ranker": ranker_payload,
@@ -441,18 +547,27 @@ def _run_panel(run_dir: Path, zip_path: Path, args: CLIConfig, config) -> Panel:
             "source_profile_item2vec",
             "on" if config.source_profile_enabled and config.source_profile_item2vec_enabled else "off",
         )
-        table.add_row("source_profile_epochs/max_samples", f"{config.source_profile_epochs}/{config.source_profile_max_samples}")
+        table.add_row(
+            "source_profile_epochs/max_samples", f"{config.source_profile_epochs}/{config.source_profile_max_samples}"
+        )
         table.add_row("two_tower", "on" if config.two_tower_enabled else "off")
         table.add_row("sequence", "on" if config.seq_enabled else "off")
         table.add_row("structure", "on" if config.structure_enabled else "off")
         table.add_row("structure_cooccur", "on" if config.structure_cooccur_enabled else "off")
         table.add_row("structure_transition", "on" if config.structure_transition_enabled else "off")
         table.add_row("structure_cooccur_history_limit", str(config.structure_cooccur_history_limit))
-        table.add_row("structure_predict_neighbor_limit", str(config.structure_predict_neighbor_limit) if config.structure_predict_neighbor_limit else "off")
-        table.add_row("source_profile_predict_history_limit", str(config.source_profile_predict_history_limit) if config.source_profile_predict_history_limit else "off")
+        table.add_row(
+            "structure_predict_neighbor_limit",
+            str(config.structure_predict_neighbor_limit) if config.structure_predict_neighbor_limit else "off",
+        )
+        table.add_row(
+            "source_profile_predict_history_limit",
+            str(config.source_profile_predict_history_limit) if config.source_profile_predict_history_limit else "off",
+        )
         table.add_row("max_fit_events", str(config.max_fit_events) if config.max_fit_events else "full")
         table.add_row("supervised_feature_batch_size", str(config.supervised_feature_batch_size))
         table.add_row("supervised_feature_memmap", "on" if config.supervised_feature_memmap else "off")
+        table.add_row("prediction_cache_max_mb", str(args.prediction_cache_max_mb))
         table.add_row("negative_sampling_workers", str(config.negative_sampling_workers))
     elif args.model == "temporal-graph":
         table.add_row("max_fit_events", str(config.max_fit_events) if config.max_fit_events else "full")

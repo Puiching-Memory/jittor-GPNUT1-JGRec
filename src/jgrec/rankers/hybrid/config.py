@@ -33,6 +33,7 @@ SOURCE_PROFILE_FEATURE_NAMES = (
     "source_profile_recent_item2vec_dot",
     "source_profile_recent_item2vec_cosine",
 )
+DEFAULT_PREDICTION_CACHE_BYTES = 512 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class StructureTowerConfig:
     bridge_overlap_threshold: float = 0.50
     bridge_min_role_degree: int = 2
     predict_neighbor_limit: int = 0
+    cache_max_bytes: int = DEFAULT_PREDICTION_CACHE_BYTES // 2
 
 
 @dataclass(frozen=True)
@@ -137,6 +139,7 @@ class SourceProfileConfig:
     lr: float = 1e-3
     weight_decay: float = 0.0
     predict_history_limit: int = 0
+    cache_max_bytes: int = DEFAULT_PREDICTION_CACHE_BYTES // 2
 
 
 @dataclass(frozen=True)
@@ -227,6 +230,7 @@ class TrainingConfig:
     source_profile_recent_k: int = 32
     source_profile_predict_history_limit: int = 0
     structure_predict_neighbor_limit: int = 0
+    prediction_cache_max_bytes: int = DEFAULT_PREDICTION_CACHE_BYTES
     fusion_hidden_dim: int = 64
     fusion_mode: str = "mlp"
     hard_negative_ratio: float = 0.5
@@ -246,6 +250,7 @@ class TrainingConfig:
         )
 
     def structure_config(self) -> StructureTowerConfig:
+        structure_cache_bytes = max(int(self.prediction_cache_max_bytes), 0) // 2
         return StructureTowerConfig(
             enabled=self.structure_enabled,
             cooccur_enabled=self.structure_cooccur_enabled,
@@ -253,6 +258,7 @@ class TrainingConfig:
             cooccur_history_limit=self.structure_cooccur_history_limit,
             future_only_transition_cooccur=self.structure_future_only_transition_cooccur,
             predict_neighbor_limit=self.structure_predict_neighbor_limit,
+            cache_max_bytes=structure_cache_bytes,
         )
 
     def graph_config(self) -> GraphTowerConfig:
@@ -313,6 +319,7 @@ class TrainingConfig:
         )
 
     def source_profile_config(self) -> SourceProfileConfig:
+        total_cache_bytes = max(int(self.prediction_cache_max_bytes), 0)
         return SourceProfileConfig(
             enabled=self.source_profile_enabled,
             deterministic_enabled=self.source_profile_deterministic_enabled,
@@ -329,6 +336,7 @@ class TrainingConfig:
             lr=self.lr,
             weight_decay=self.weight_decay,
             predict_history_limit=self.source_profile_predict_history_limit,
+            cache_max_bytes=total_cache_bytes - total_cache_bytes // 2,
         )
 
     def fusion_config(self) -> FusionConfig:

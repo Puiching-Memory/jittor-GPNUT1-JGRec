@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 EMPTY_I32 = np.empty(0, dtype=np.int32)
+EMPTY_I64 = np.empty(0, dtype=np.int64)
 
 
 class SparseCountMap:
@@ -11,7 +12,7 @@ class SparseCountMap:
     ~8 bytes/entry vs ~106 bytes for nested Python dicts (~13x saving).
     """
 
-    __slots__ = ("row_keys", "row_offsets", "col_indices", "values")
+    __slots__ = ("col_indices", "row_keys", "row_offsets", "values")
 
     def __init__(
         self,
@@ -51,6 +52,31 @@ class SparseCountMap:
             np.asarray(all_vals, dtype=np.int32) if all_vals else EMPTY_I32.copy(),
         )
 
+    @classmethod
+    def from_snapshot(cls, data: dict) -> SparseCountMap:
+        if data.get("format") != "csr-v1":
+            return cls.from_nested_dict(data)
+        row_keys = np.asarray(data["row_keys"], dtype=np.int32)
+        row_offsets = np.asarray(data["row_offsets"], dtype=np.int32)
+        col_indices = np.asarray(data["col_indices"], dtype=np.int32)
+        values = np.asarray(data["values"], dtype=np.int32)
+        if row_offsets.shape != (len(row_keys) + 1,):
+            raise ValueError("invalid sparse count row offsets")
+        if col_indices.shape != values.shape:
+            raise ValueError("invalid sparse count columns and values")
+        if row_offsets.size == 0 or row_offsets[0] != 0 or row_offsets[-1] != len(values):
+            raise ValueError("invalid sparse count offset bounds")
+        return cls(row_keys, row_offsets, col_indices, values)
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "format": "csr-v1",
+            "row_keys": self.row_keys,
+            "row_offsets": self.row_offsets,
+            "col_indices": self.col_indices,
+            "values": self.values,
+        }
+
     def get_count(self, left: int, right: int) -> int:
         idx = int(np.searchsorted(self.row_keys, left))
         if idx >= len(self.row_keys) or self.row_keys[idx] != left:
@@ -80,7 +106,7 @@ class SparseCountMap:
             if start < end:
                 cols = self.col_indices[start:end].tolist()
                 vals = self.values[start:end].tolist()
-                result[key] = dict(zip(cols, vals))
+                result[key] = dict(zip(cols, vals, strict=True))
         return result
 
     def copy(self) -> SparseCountMap:
@@ -92,26 +118,31 @@ class SparseCountMap:
         )
 
     def sum_rows(self, left_keys: np.ndarray) -> dict[int, int]:
+        cols, values = self.sum_rows_arrays(left_keys)
+        return dict(zip(cols.tolist(), values.tolist(), strict=True))
+
+    def sum_rows_arrays(self, left_keys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         if left_keys.size == 0 or len(self.row_keys) == 0:
-            return {}
+            return EMPTY_I32, EMPTY_I64
         indices = np.searchsorted(self.row_keys, left_keys)
-        valid = (indices < len(self.row_keys)) & (self.row_keys[indices] == left_keys)
+        valid = indices < len(self.row_keys)
+        valid_positions = np.flatnonzero(valid)
+        valid[valid_positions] &= self.row_keys[indices[valid_positions]] == left_keys[valid_positions]
         valid_indices = indices[valid]
         if valid_indices.size == 0:
-            return {}
+            return EMPTY_I32, EMPTY_I64
         starts = self.row_offsets[valid_indices]
         ends = self.row_offsets[valid_indices + 1]
         mask = starts < ends
         if not np.any(mask):
-            return {}
+            return EMPTY_I32, EMPTY_I64
         starts, ends = starts[mask], ends[mask]
-        slices = np.concatenate([np.arange(s, e) for s, e in zip(starts, ends)])
-        cols = self.col_indices[slices]
-        vals = self.values[slices]
+        cols = np.concatenate([self.col_indices[s:e] for s, e in zip(starts, ends, strict=True)])
+        vals = np.concatenate([self.values[s:e] for s, e in zip(starts, ends, strict=True)])
         unique_cols, inverse = np.unique(cols, return_inverse=True)
         summed = np.zeros(len(unique_cols), dtype=np.int64)
         np.add.at(summed, inverse, vals)
-        return dict(zip(unique_cols.tolist(), summed.tolist()))
+        return unique_cols, summed
 
     def batch_get_counts(self, left_keys: np.ndarray, right_key: int) -> np.ndarray:
         result = np.zeros(len(left_keys), dtype=np.int32)
@@ -128,6 +159,32 @@ class SparseCountMap:
             abs_pos = start + pos
             if abs_pos < end and self.col_indices[abs_pos] == right_key:
                 result[i] = int(self.values[abs_pos])
+        return result
+
+    def sum_row_counts_for_candidates(
+        self,
+        left_keys: np.ndarray,
+        candidate_ids: np.ndarray,
+        *,
+        exclude_equal: bool = False,
+    ) -> np.ndarray:
+        result = np.zeros(len(candidate_ids), dtype=np.int64)
+        if left_keys.size == 0 or candidate_ids.size == 0 or len(self.row_keys) == 0:
+            return result
+
+        row_indices = np.searchsorted(self.row_keys, left_keys)
+        valid_rows = np.flatnonzero(row_indices < len(self.row_keys))
+        valid_rows = valid_rows[self.row_keys[row_indices[valid_rows]] == left_keys[valid_rows]]
+        for left_row in valid_rows:
+            row_idx = row_indices[left_row]
+            start, end = int(self.row_offsets[row_idx]), int(self.row_offsets[row_idx + 1])
+            columns = self.col_indices[start:end]
+            positions = np.searchsorted(columns, candidate_ids)
+            matched = np.flatnonzero(positions < len(columns))
+            matched = matched[columns[positions[matched]] == candidate_ids[matched]]
+            if exclude_equal:
+                matched = matched[candidate_ids[matched] != left_keys[left_row]]
+            result[matched] += self.values[start + positions[matched]]
         return result
 
     def __bool__(self) -> bool:

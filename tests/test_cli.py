@@ -1,6 +1,9 @@
 import importlib
 import re
 import sys
+from pathlib import Path
+
+import pytest
 
 from jgrec.rankers.registry import create_ranker
 
@@ -190,6 +193,20 @@ def test_encoder_state_cache_is_operational_and_does_not_change_run_name_digest(
     assert _build_run_name(enabled_args, enabled_config) == _build_run_name(disabled_args, disabled_config)
 
 
+def test_prediction_cache_budget_is_operational_and_does_not_change_run_name_digest() -> None:
+    CLIConfig, _build_run_name, _ranker_config = _cli_symbols()
+    default_args = CLIConfig()
+    constrained_args = CLIConfig(prediction_cache_max_mb=96)
+
+    config = _ranker_config(constrained_args)
+
+    assert config.prediction_cache_max_bytes == 96 * 1024 * 1024
+    assert (
+        config.structure_config().cache_max_bytes + config.source_profile_config().cache_max_bytes == 96 * 1024 * 1024
+    )
+    assert _build_run_name(default_args, _ranker_config(default_args)) == _build_run_name(constrained_args, config)
+
+
 def test_operational_resume_options_do_not_change_run_name_digest():
     CLIConfig, _build_run_name, _ranker_config = _cli_symbols()
     base_args = CLIConfig()
@@ -199,3 +216,61 @@ def test_operational_resume_options_do_not_change_run_name_digest():
         base_args,
         _ranker_config(base_args),
     )
+
+
+def test_cli_exposes_explicit_checkpoint_save_and_load_paths():
+    CLIConfig, _, _ = _cli_symbols()
+
+    save_args = CLIConfig(save_checkpoint=Path("checkpoints/checkpoint1.pkl"))
+    load_args = CLIConfig(load_checkpoint=Path("checkpoints/checkpoint1.pkl"))
+
+    assert save_args.save_checkpoint == Path("checkpoints/checkpoint1.pkl")
+    assert load_args.load_checkpoint == Path("checkpoints/checkpoint1.pkl")
+
+
+def test_cli_rejects_ambiguous_or_unsupported_checkpoint_options():
+    module = importlib.import_module("jgrec.cli")
+    checkpoint = Path("checkpoints/checkpoint1.pkl")
+
+    with pytest.raises(ValueError, match="cannot be used together"):
+        module._validate_checkpoint_args(module.CLIConfig(save_checkpoint=checkpoint, load_checkpoint=checkpoint))
+    with pytest.raises(ValueError, match="only supported for --model hybrid"):
+        module._validate_checkpoint_args(module.CLIConfig(model="craft", save_checkpoint=checkpoint))
+    with pytest.raises(ValueError, match=r"must use the \.pkl extension"):
+        module._validate_checkpoint_args(module.CLIConfig(save_checkpoint=Path("checkpoints/checkpoint1.npz")))
+
+
+def test_checkpoint_callbacks_snapshot_and_hydrate_rankers(tmp_path):
+    module = importlib.import_module("jgrec.cli")
+    checkpoint_path = tmp_path / "checkpoint1.pkl"
+    writer = module.ContestCheckpointWriter(
+        checkpoint_path,
+        model_name="hybrid",
+        expected_datasets=("dataset1",),
+    )
+
+    class SnapshotRanker:
+        name = "hybrid"
+
+        def snapshot(self):
+            return {"weight": 7}
+
+    module._checkpoint_after_fit(writer, "dataset1")(SnapshotRanker())
+    assert checkpoint_path.exists()
+
+    class HydratedRanker:
+        name = "hybrid"
+
+        def __init__(self):
+            self.state = None
+
+        def hydrate(self, state):
+            self.state = state
+
+    restored = HydratedRanker()
+    module._hydrate_ranker(
+        restored,
+        module.load_checkpoint_dataset(checkpoint_path, "dataset1"),
+    )
+
+    assert restored.state == {"weight": 7}

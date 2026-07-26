@@ -20,6 +20,13 @@ logs/
 .cache/
 site/
 
+# === CUDA Toolkit (project-local) ===
+third_party/cuda-toolkit/
+
+# === Jittor Build Cache ===
+.venv/jittor_home/
+.venv/jittor_nv126_overlay/
+
 # === Experiment Results ===
 result/
 result_perm_backup_*/
