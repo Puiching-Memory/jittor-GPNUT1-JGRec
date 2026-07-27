@@ -180,6 +180,8 @@ class VectorizedHeuristicIndex:
         for d, w in zip(vis_dst.tolist(), decay_w.tolist(), strict=True):
             decay_by_dst[d] = decay_by_dst.get(d, 0.0) + w
 
+        # 向量化：把候选 c 的入边 src 集合一次性取出，求与 src 邻居集合的交集。
+        # 交集大小 = 共同邻居数；cn_decay 用 decay 权重在交集上求和。
         for j in range(n):
             c = int(cand[j])
             c_srcs = self._dst_visible_srcs(c, qt)
@@ -244,6 +246,111 @@ class VectorizedHeuristicIndex:
                 sb += pair_w.get((c, h), 0.0)
             out[j, 0] = np.log1p(sf)
             out[j, 1] = np.log1p(sb)
+        return out.astype(np.float32)
+
+    def tail_features_for_group(
+        self,
+        src: int,
+        qt: int,
+        cand_rows: np.ndarray,
+        windows: tuple[float, float, float],
+        want_cooccur: bool,
+    ) -> np.ndarray:
+        """同一 (src, qt) 下多行候选的 cn(7-10)+cooccur(11-12) 向量化批量计算。
+
+        cand_rows: (G, K) int64。返回 (G, K, 6)，列序 [short,medium,long,decay,fwd,bwd]。
+        邻接成员用全局 src-id 位运算一次构造，组内各行复用；逐候选循环被
+        np.isin/交集计数取代。
+        """
+        cand_rows = np.asarray(cand_rows, dtype=np.int64)
+        G, K = cand_rows.shape
+        out = np.zeros((G, K, 6), dtype=np.float64)
+        vis_dst, vis_tim = self._src_visible(src, qt)
+        if vis_dst.size == 0:
+            return out.astype(np.float32)
+
+        w_short, w_medium, w_long = windows
+        short_cut, medium_cut, long_cut = qt - w_short, qt - w_medium, qt - w_long
+        # src 邻居（dst id 空间）按窗口去重；decay 权重按 dst 聚合
+        short_set = np.unique(vis_dst[vis_tim >= short_cut])
+        medium_set = np.unique(vis_dst[vis_tim >= medium_cut])
+        long_set = np.unique(vis_dst[vis_tim >= long_cut])
+        decay_w = np.exp(-np.maximum(qt - vis_tim, 0) / w_medium)
+        decay_by_dst: dict[int, float] = {}
+        for d, w in zip(vis_dst.tolist(), decay_w.tolist(), strict=True):
+            decay_by_dst[d] = decay_by_dst.get(d, 0.0) + w
+        short_set = set(vis_dst[vis_tim >= short_cut].tolist())
+        medium_set = set(vis_dst[vis_tim >= medium_cut].tolist())
+        long_set = set(vis_dst[vis_tim >= long_cut].tolist())
+
+        # 候选 -> dst_offsets 行位置（向量化）
+        flat_cand = cand_rows.reshape(-1)
+        d_pos = np.searchsorted(self.dst_keys, flat_cand)
+        d_pos = np.clip(d_pos, 0, max(len(self.dst_keys) - 1, 0))
+        found = (len(self.dst_keys) > 0) & (self.dst_keys[d_pos] == flat_cand)
+        d_pos = d_pos.reshape(G, K)
+        found = found.reshape(G, K)
+
+        # 逐候选取其入边 src 集合，与 src 邻居窗口求交集（窗口/权重只构造一次）。
+        for g in range(G):
+            for j in range(K):
+                if not found[g, j]:
+                    continue
+                p = int(d_pos[g, j])
+                a, b = int(self.dst_offsets[p]), int(self.dst_offsets[p + 1])
+                tim_seg = self.dst_times[a:b]
+                cutoff = int(np.searchsorted(tim_seg, qt, side="left"))
+                if cutoff <= 0:
+                    continue
+                c_src_set = set(self.dst_src[a:a + cutoff].tolist())
+                if short_set:
+                    out[g, j, 0] = np.log1p(len(short_set & c_src_set))
+                if medium_set:
+                    out[g, j, 1] = np.log1p(len(medium_set & c_src_set))
+                if long_set:
+                    out[g, j, 2] = np.log1p(len(long_set & c_src_set))
+                s = 0.0
+                for z in decay_by_dst.keys() & c_src_set:
+                    s += decay_by_dst[z]
+                out[g, j, 3] = np.log1p(s)
+
+        if want_cooccur and vis_dst.size >= 2:
+            a_seq = vis_dst[:-1]
+            b_seq = vis_dst[1:]
+            t_seq = vis_tim[1:]
+            decay = np.exp(-np.maximum(qt - t_seq, 0) / w_medium)
+            # 双向索引：fwd_idx[right][left]=w（查 (h,c)：right=c 桶内 left=h）
+            #           bwd_idx[left][right]=w（查 (c,h)：left=c 桶内 right=h）
+            fwd_idx: dict[int, dict[int, float]] = {}
+            bwd_idx: dict[int, dict[int, float]] = {}
+            for a, b, w in zip(a_seq.tolist(), b_seq.tolist(), decay.tolist(), strict=True):
+                ai, bi = int(a), int(b)
+                fw = fwd_idx.get(bi)
+                if fw is None:
+                    fw = fwd_idx[bi] = {}
+                fw[ai] = fw.get(ai, 0.0) + w
+                bw = bwd_idx.get(ai)
+                if bw is None:
+                    bw = bwd_idx[ai] = {}
+                bw[bi] = bw.get(bi, 0.0) + w
+            hist_set = set(vis_dst.tolist())
+            for g in range(G):
+                for j in range(K):
+                    c = int(cand_rows[g, j])
+                    # fwd[h,c]：c 的入边 left 桶 ∩ hist
+                    fw = fwd_idx.get(c)
+                    sf = 0.0
+                    if fw:
+                        for h in fw.keys() & hist_set:
+                            sf += fw[h]
+                    # bwd[c,h]：c 的出边 right 桶 ∩ hist
+                    bw = bwd_idx.get(c)
+                    sb = 0.0
+                    if bw:
+                        for h in bw.keys() & hist_set:
+                            sb += bw[h]
+                    out[g, j, 4] = np.log1p(sf)
+                    out[g, j, 5] = np.log1p(sb)
         return out.astype(np.float32)
 
     def _co_weight(self, left: int, right: int, qt: int, w_medium: float) -> float:

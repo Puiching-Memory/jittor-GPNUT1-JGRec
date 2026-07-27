@@ -29,19 +29,19 @@ SOURCE_PROFILE_CACHE_MIN_HISTORY = 32
 @dataclass(frozen=True)
 class _CompactDeterministicSummary:
     full_candidate_ids: np.ndarray
-    full_values: np.ndarray
+    full_values: np.ndarray  # (M, 6): 共现4 + posdecay_cooccur + last_position_inv
     recent_candidate_ids: np.ndarray
     recent_values: np.ndarray
 
     @classmethod
     def from_dicts(
         cls,
-        full_scores: dict[int, tuple[float, float, float, float]],
+        full_scores: dict[int, tuple[float, float, float, float, float, float]],
         recent_scores: dict[int, tuple[float, float]],
     ) -> _CompactDeterministicSummary:
         full_ids = np.asarray(sorted(full_scores), dtype=np.int64)
         recent_ids = np.asarray(sorted(recent_scores), dtype=np.int64)
-        full_values = np.asarray([full_scores[int(key)] for key in full_ids], dtype=np.float64).reshape((-1, 4))
+        full_values = np.asarray([full_scores[int(key)] for key in full_ids], dtype=np.float64).reshape((-1, 6))
         recent_values = np.asarray([recent_scores[int(key)] for key in recent_ids], dtype=np.float64).reshape((-1, 2))
         return cls(full_ids, full_values, recent_ids, recent_values)
 
@@ -53,7 +53,9 @@ class _CompactDeterministicSummary:
         )
 
     def fill_candidates(self, candidates: np.ndarray, output: np.ndarray) -> None:
-        _fill_matching_rows(self.full_candidate_ids, self.full_values, candidates, output[:, :4])
+        _fill_matching_rows(self.full_candidate_ids, self.full_values[:, :4], candidates, output[:, :4])
+        _fill_matching_rows(self.full_candidate_ids, self.full_values[:, 4:5], candidates, output[:, 10:11])
+        _fill_matching_rows(self.full_candidate_ids, self.full_values[:, 5:6], candidates, output[:, 11:12])
         _fill_matching_rows(self.recent_candidate_ids, self.recent_values, candidates, output[:, 4:6])
 
 
@@ -303,11 +305,19 @@ class SourceProfileTower:
         history_int32 = history.astype(np.int32, copy=False)
         history_degrees = self._degrees_for(history_int32)
         candidate_degrees = self._degrees_for(candidates)
+        hist_size = history.size
+        # 每个历史位置距末尾的 rank 及 OTTO 位置权重
+        ranks = hist_size - 1 - np.arange(hist_size)
+        pos_weights = np.minimum(2.0 ** np.minimum(ranks, 32) - 1.0, 2.0 ** 32)
         for col_idx, candidate in enumerate(candidates):
             candidate_int = int(candidate)
             candidate_degree = candidate_degrees[col_idx]
             counts = sparse.batch_get_counts(history_int32, candidate_int)
             mask = (counts > 0) & (history != candidate_int)
+            # 候选在 src 序列中最近出现位置倒数（与共现无关）
+            hit_positions = np.flatnonzero(history == candidate_int)
+            if hit_positions.size:
+                output[col_idx, 11] = 1.0 / (float(ranks[hit_positions[-1]]) + 1.0)
             if not np.any(mask):
                 continue
             valid_counts = counts[mask].astype(np.float32)
@@ -318,6 +328,8 @@ class SourceProfileTower:
             output[col_idx, 1] = values.max()
             output[col_idx, 2] = cosines.sum()
             output[col_idx, 3] = cosines.max()
+            # 位置衰减加权共现和（越近权重越高），log1p 压缩量级
+            output[col_idx, 10] = float(np.log1p((values * pos_weights[mask]).sum()))
             recent_mask = mask[-recent_k:]
             if np.any(recent_mask):
                 recent_counts = counts[-recent_k:][recent_mask].astype(np.float32)
@@ -356,19 +368,25 @@ class SourceProfileTower:
         if candidate_ids.size == 0:
             return _CompactDeterministicSummary(
                 full_candidate_ids=np.empty(0, dtype=np.int64),
-                full_values=np.empty((0, 4), dtype=np.float64),
+                full_values=np.empty((0, 6), dtype=np.float64),
                 recent_candidate_ids=np.empty(0, dtype=np.int64),
                 recent_values=np.empty((0, 2), dtype=np.float64),
             )
 
         candidate_degrees = np.maximum(self._item_degree_values, 1).astype(np.float32)
-        full_values = np.zeros((candidate_ids.size, 4), dtype=np.float64)
+        full_values = np.zeros((candidate_ids.size, 6), dtype=np.float64)
         recent_values = np.zeros((candidate_ids.size, 2), dtype=np.float64)
         full_touched = np.zeros(candidate_ids.size, dtype=bool)
         recent_touched = np.zeros(candidate_ids.size, dtype=bool)
         sparse = self.item_pair_counts_sparse
+        hist_size = history.size
+        # OTTO 位置衰减：rank 从序列末尾数（最近 rank=0），权重 2^rank - 1
+        # 用 log2 累积避免大 rank 溢出，最后统一归一化
         for history_idx, seen in enumerate(history):
             seen_int = int(seen)
+            rank = hist_size - 1 - history_idx
+            # 位置权重（OTTO logspace(base=2)-1），rank 大时权重指数增长，截断防爆
+            pos_w = float(min(2.0 ** min(rank, 32) - 1.0, 2.0 ** 32))
             row = sparse.get_row(seen_int)
             if row is None:
                 continue
@@ -392,11 +410,27 @@ class SourceProfileTower:
             np.maximum.at(full_values[:, 1], positions, values)
             np.add.at(full_values[:, 2], positions, cosines)
             np.maximum.at(full_values[:, 3], positions, cosines)
+            # 位置衰减加权共现和（越近权重越高）
+            np.add.at(full_values[:, 4], positions, values * pos_w)
             full_touched[positions] = True
             if history_idx >= recent_start:
                 np.add.at(recent_values[:, 0], positions, cosines)
                 np.maximum.at(recent_values[:, 1], positions, cosines)
                 recent_touched[positions] = True
+
+        # 候选在 src 序列中最近出现位置倒数：1 / (rank + 1)，未出现为 0
+        # 候选即历史项本身；记录每个候选作为 seen 时的最小 rank
+        min_rank = np.full(candidate_ids.size, -1, dtype=np.int64)
+        for history_idx, seen in enumerate(history):
+            rank = hist_size - 1 - history_idx
+            pos = int(np.searchsorted(candidate_ids, seen))
+            if pos < candidate_ids.size and candidate_ids[pos] == seen and (min_rank[pos] < 0 or rank < min_rank[pos]):
+                min_rank[pos] = rank
+        seen_mask = min_rank >= 0
+        full_values[seen_mask, 5] = 1.0 / (min_rank[seen_mask].astype(np.float64) + 1.0)
+        # 位置衰减列做 log1p 压缩量级（权重指数增长）
+        full_values[:, 4] = np.log1p(full_values[:, 4])
+        full_touched |= seen_mask
 
         return _CompactDeterministicSummary(
             full_candidate_ids=candidate_ids[full_touched],
@@ -428,6 +462,23 @@ class SourceProfileTower:
         output[valid_rows, 7] = _cosine_many(item_vectors, full_profile)
         output[valid_rows, 8] = np.asarray(item_vectors @ recent_profile / scale, dtype=np.float32)
         output[valid_rows, 9] = _cosine_many(item_vectors, recent_profile)
+        # 候选与 src 历史各项的 item2vec 相似度 max
+        output[valid_rows, 12] = self._item2vec_sim_max(history, item_vectors)
+
+    def _item2vec_sim_max(self, history: np.ndarray, item_vectors: np.ndarray) -> np.ndarray:
+        """候选向量与 src 历史各项嵌入的余弦相似度最大值，逐候选。"""
+        history_ids, valid = self._candidate_positions(history)
+        history_ids = history_ids[valid & self._seen_candidate_mask[np.clip(history_ids, 0, self._seen_candidate_mask.size - 1)]]
+        if self.embeddings is None or history_ids.size == 0:
+            return np.zeros(item_vectors.shape[0], dtype=np.float32)
+        hist_vectors = self.embeddings[history_ids]
+        hist_norm = np.linalg.norm(hist_vectors, axis=1, keepdims=True)
+        hist_norm = np.maximum(hist_norm, EPSILON)
+        hist_unit = hist_vectors / hist_norm
+        item_norm = np.linalg.norm(item_vectors, axis=1, keepdims=True)
+        item_unit = item_vectors / np.maximum(item_norm, EPSILON)
+        sims = item_unit @ hist_unit.T  # (K, H)
+        return np.asarray(sims.max(axis=1), dtype=np.float32)
 
     def _embedding_profiles(
         self,

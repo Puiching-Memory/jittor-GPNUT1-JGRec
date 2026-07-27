@@ -32,6 +32,10 @@ SOURCE_PROFILE_FEATURE_NAMES = (
     "source_profile_item2vec_cosine",
     "source_profile_recent_item2vec_dot",
     "source_profile_recent_item2vec_cosine",
+    # 候选感知重排序特征（方向 B，OTTO/KDD 冠军思路）
+    "source_profile_posdecay_cooccur",  # 位置衰减加权共现和（越近权重越高）
+    "source_profile_last_position_inv",  # 候选在 src 序列中最近出现位置倒数
+    "source_profile_item2vec_sim_max",  # 候选与历史各项 item2vec 相似度 max
 )
 DEFAULT_PREDICTION_CACHE_BYTES = 512 * 1024 * 1024
 

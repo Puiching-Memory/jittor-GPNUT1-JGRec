@@ -144,10 +144,16 @@ def _scalar_deterministic_summary(
     recent_k: int,
 ) -> _CompactDeterministicSummary:
     recent_start = max(history.size - recent_k, 0)
-    full_scores: dict[int, tuple[float, float, float, float]] = {}
+    hist_size = history.size
+    full_scores: dict[int, list[float]] = {}
     recent_scores: dict[int, tuple[float, float]] = {}
+    min_rank: dict[int, int] = {}
     for history_idx, seen in enumerate(history):
         seen_int = int(seen)
+        rank = hist_size - 1 - history_idx
+        pos_w = float(min(2.0 ** min(rank, 32) - 1.0, 2.0 ** 32))
+        if seen_int not in min_rank or rank < min_rank[seen_int]:
+            min_rank[seen_int] = rank
         row = sparse.get_row(seen_int)
         if row is None:
             continue
@@ -162,19 +168,28 @@ def _scalar_deterministic_summary(
             candidate = int(col)
             value_float = float(value)
             cosine_float = float(cosine)
-            total, maximum, cosine_total, cosine_maximum = full_scores.get(candidate, (0.0, 0.0, 0.0, 0.0))
-            full_scores[candidate] = (
-                total + value_float,
-                max(maximum, value_float),
-                cosine_total + cosine_float,
-                max(cosine_maximum, cosine_float),
-            )
+            acc = full_scores.get(candidate)
+            if acc is None:
+                acc = full_scores[candidate] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            acc[0] += value_float
+            acc[1] = max(acc[1], value_float)
+            acc[2] += cosine_float
+            acc[3] = max(acc[3], cosine_float)
+            acc[4] += value_float * pos_w
             if history_idx >= recent_start:
                 recent_total, recent_maximum = recent_scores.get(candidate, (0.0, 0.0))
                 recent_scores[candidate] = (
                     recent_total + cosine_float,
                     max(recent_maximum, cosine_float),
                 )
+    # last_position_inv + posdecay 的 log1p 压缩
+    for candidate, rank in min_rank.items():
+        acc = full_scores.get(candidate)
+        if acc is None:
+            acc = full_scores[candidate] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        acc[5] = 1.0 / (rank + 1.0)
+    for acc in full_scores.values():
+        acc[4] = float(np.log1p(acc[4]))
     return _CompactDeterministicSummary.from_dicts(full_scores, recent_scores)
 
 
@@ -351,7 +366,10 @@ def test_source_profile_branch_disables_zero_their_feature_halves():
     deterministic_scores = deterministic_only.scores_for_queries([TestQuery(src=1, time=100, candidates=(10, 20, 30))])
 
     assert np.any(deterministic_scores[:, :, :6] != 0.0)
-    assert np.all(deterministic_scores[:, :, 6:] == 0.0)
+    # item2vec 列 6-9 为 0；确定性新特征列 10/11 非零
+    assert np.all(deterministic_scores[:, :, 6:10] == 0.0)
+    assert np.any(deterministic_scores[:, :, 10:12] != 0.0)
+    assert np.all(deterministic_scores[:, :, 12] == 0.0)  # item2vec_sim_max 仍 0
     _require_jittor()
     item2vec_only = SourceProfileTower(
         id_map=NodeIdMap.from_interactions(interactions),
@@ -367,8 +385,10 @@ def test_source_profile_branch_disables_zero_their_feature_halves():
     item2vec_only.fit(interactions, rng=np.random.default_rng(0), verbose=False)
     item2vec_scores = item2vec_only.scores_for_queries([TestQuery(src=1, time=100, candidates=(10, 20, 30))])
 
+    # 确定性列 0-5、10、11 为 0；item2vec 列 6-9、12 非零
     assert np.all(item2vec_scores[:, :, :6] == 0.0)
-    assert np.any(item2vec_scores[:, :, 6:] != 0.0)
+    assert np.all(item2vec_scores[:, :, 10:12] == 0.0)
+    assert np.any(item2vec_scores[:, :, 6:10] != 0.0)
 
 
 def test_encoder_cache_hydrates_source_profile_deterministic_state():

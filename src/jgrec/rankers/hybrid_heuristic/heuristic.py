@@ -35,12 +35,8 @@ class HeuristicTower:
         self.total_edges = 0
         self.windows: tuple[float, float, float] = (1.0, 1.0, 1.0)
         cache_bytes = max(int(self.config.cache_max_bytes), 0)
-        self._cn_cache: ByteBudgetLRU[int, tuple[np.ndarray, np.ndarray]] = ByteBudgetLRU(
-            max_bytes=cache_bytes // 2,
-            max_entries=256,
-        )
-        self._cn_decay_cache: ByteBudgetLRU[int, np.ndarray] = ByteBudgetLRU(
-            max_bytes=cache_bytes // 2,
+        self._hop2_ctx_cache: ByteBudgetLRU[tuple[int, int], tuple[Any, Any, Any]] = ByteBudgetLRU(
+            max_bytes=cache_bytes,
             max_entries=256,
         )
         self._vec_index: Any = None
@@ -73,14 +69,13 @@ class HeuristicTower:
             max(self.graph_span * self.config.window_medium_ratio, 1.0),
             max(self.graph_span * self.config.window_long_ratio, 1.0),
         )
-        self._vec_index = None
+        self._vec_index: Any = None
         if self.config.vectorize_quadrant:
             from jgrec.rankers.common.vec_heuristic import VectorizedHeuristicIndex  # noqa: PLC0415
 
             self._vec_index = VectorizedHeuristicIndex()
             self._vec_index.fit(interactions)
-        self._cn_cache.clear()
-        self._cn_decay_cache.clear()
+        self._hop2_ctx_cache.clear()
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -99,8 +94,7 @@ class HeuristicTower:
         self.graph_span = int(snapshot["graph_span"])
         self.total_edges = int(snapshot["total_edges"])
         self.windows = tuple(float(value) for value in snapshot["windows"])
-        self._cn_cache.clear()
-        self._cn_decay_cache.clear()
+        self._hop2_ctx_cache.clear()
 
     def features_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
@@ -111,21 +105,85 @@ class HeuristicTower:
         if not queries:
             return np.empty((0, 0, HEURISTIC_FEATURE_DIM), dtype=np.float32)
         features = np.zeros((len(queries), queries.candidate_count, HEURISTIC_FEATURE_DIM), dtype=np.float32)
-        if self._vec_index is not None:
+        if self._vec_index is None:
             for row_idx, query in enumerate(queries):
-                src = int(query.src)
-                qt = int(query.time)
-                cand = np.asarray([int(c) for c in query.candidates], dtype=np.int64)
-                features[row_idx, :, 0:7] = self._vec_index.quadrant_features_for_query(src, cand, qt)
-                features[row_idx, :, 7:11] = self._vec_index.cn_features_for_query(src, cand, qt, self.windows)
-                if self.config.cooccur_time_decay:
-                    features[row_idx, :, 11:13] = self._vec_index.cooccur_features_for_query(src, cand, qt, self.windows[1])
-                if self.config.hop2_enabled:
-                    features[row_idx, :, 13:14] = self._vec_index.hop2_features_for_query(src, cand, qt, self.windows[1])
+                self._fill_query_features(query, features[row_idx])
             return features
-        for row_idx, query in enumerate(queries):
-            self._fill_query_features(query, features[row_idx])
+
+        vec = self._vec_index
+        # 按 (src, qt) 分组：组内 cn/cooccur 的邻接与衰减权重只构造一次，
+        # 多行候选复用，消除逐查询重复建集合的开销。
+        order = np.lexsort((queries.time, queries.src))
+        sorted_src = queries.src[order]
+        sorted_time = queries.time[order]
+        # 组边界
+        group_start = 0
+        n_rows = len(queries)
+        for i in range(1, n_rows + 1):
+            boundary = i == n_rows or (sorted_src[i] != sorted_src[group_start]) or (sorted_time[i] != sorted_time[group_start])
+            if not boundary:
+                continue
+            rows = order[group_start:i]
+            group_start = i
+            src = int(queries.src[rows[0]])
+            qt = int(queries.time[rows[0]])
+            cand_rows = queries.candidates[rows].astype(np.int64)
+            # 四象限：逐行行向量化（已足够快）
+            for local_g, r in enumerate(rows):
+                features[r, :, 0:7] = vec.quadrant_features_for_query(src, cand_rows[local_g], qt)
+            # cn + cooccur：整组向量化
+            tail = vec.tail_features_for_group(
+                src, qt, cand_rows, self.windows, want_cooccur=self.config.cooccur_time_decay
+            )
+            features[rows, :, 7:11] = tail[:, :, 0:4].astype(np.float32)
+            if self.config.cooccur_time_decay:
+                features[rows, :, 11:13] = tail[:, :, 4:6].astype(np.float32)
+            if self.config.hop2_enabled:
+                hop2 = self._hop2_for_group(vec, src, qt, cand_rows)
+                features[rows, :, 13:14] = hop2
         return features
+
+    def _hop2_for_group(self, vec: Any, src: int, qt: int, cand_rows: np.ndarray) -> np.ndarray:
+        """hop2 按 (src,qt) 缓存 m 邻居与 w_zm 权重，组内候选复用。"""
+        cache_key = (src, qt)
+        ctx = self._hop2_ctx_cache.get(cache_key)
+        if ctx is None:
+            vis_dst, _ = vec._src_visible(src, qt)
+            if vis_dst.size == 0 or len(vec.co_keys) == 0:
+                ctx = (None, None, None)
+            else:
+                z = int(vis_dst[-1])
+                z_dsts, _ = vec._src_visible(z, qt)
+                m_set = np.unique(z_dsts[-64:]) if z_dsts.size else np.empty(0, dtype=np.int64)
+                w_zm = {int(m): vec._co_weight(z, int(m), qt, self.windows[1]) for m in m_set}
+                ctx = (z, m_set, w_zm)
+            self._hop2_ctx_cache.put(cache_key, ctx, size_bytes=4096)
+        z, m_set, w_zm = ctx
+        G, K = cand_rows.shape
+        out = np.zeros((G, K, 1), dtype=np.float64)
+        if z is None:
+            return out.astype(np.float32)
+        w_medium = self.windows[1]
+        # 组内记忆化 _co_weight：同组多行候选重复时复用 (left,c) 的衰减权重
+        co_memo: dict[tuple[int, int], float] = {}
+
+        def co_w(left: int, c: int) -> float:
+            key = (left, c)
+            val = co_memo.get(key)
+            if val is None:
+                val = vec._co_weight(left, c, qt, w_medium)
+                co_memo[key] = val
+            return val
+
+        active_m = [int(m) for m in m_set if w_zm[int(m)] > 0.0]
+        for g in range(G):
+            for j in range(K):
+                c = int(cand_rows[g, j])
+                score = co_w(z, c)
+                for mi in active_m:
+                    score += w_zm[mi] * co_w(mi, c)
+                out[g, j, 0] = np.log1p(score)
+        return out.astype(np.float32)
 
     # ------------------------------------------------------------------ 内部
 
