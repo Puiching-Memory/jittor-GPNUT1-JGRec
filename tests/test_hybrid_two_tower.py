@@ -95,6 +95,48 @@ def test_two_tower_in_batch_positive_mask_treats_duplicate_destinations_as_posit
     )
 
 
+def test_two_tower_in_batch_destination_keeps_each_positive_event_context():
+    from jgrec.rankers.hybrid.in_batch_negatives import (  # noqa: PLC0415
+        _in_batch_positive_destination_columns,
+    )
+
+    destination_ids = np.asarray(
+        [[10, 101], [20, 102], [30, 103]],
+        dtype=np.int32,
+    )
+    popularity = np.asarray(
+        [[4, 14], [5, 15], [6, 16]],
+        dtype=np.int32,
+    )
+    recency = np.asarray(
+        [[7, 17], [8, 18], [9, 19]],
+        dtype=np.int32,
+    )
+    time = np.asarray(
+        [[11, 21], [12, 22], [13, 23]],
+        dtype=np.int32,
+    )
+
+    actual = _in_batch_positive_destination_columns(
+        destination_ids,
+        popularity,
+        recency,
+        time,
+    )
+
+    for values, expected in zip(
+        actual,
+        (
+            np.asarray([10, 20, 30], dtype=np.int32),
+            np.asarray([4, 5, 6], dtype=np.int32),
+            np.asarray([7, 8, 9], dtype=np.int32),
+            np.asarray([11, 12, 13], dtype=np.int32),
+        ),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(values, expected)
+
+
 def test_two_tower_multi_positive_in_batch_loss_matches_numpy_reference():
     _require_jittor()
     import jittor as jt  # noqa: PLC0415

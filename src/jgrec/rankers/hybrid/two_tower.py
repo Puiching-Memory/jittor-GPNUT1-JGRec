@@ -19,7 +19,10 @@ from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
 
 from .auto_strategy import DatasetProfile, test_candidate_arrays
 from .config import TWO_TOWER_FEATURE_NAMES, TwoTowerConfig
-from .in_batch_negatives import _in_batch_positive_mask
+from .in_batch_negatives import (
+    _in_batch_positive_destination_columns,
+    _in_batch_positive_mask,
+)
 from .sampling import (
     DenseCandidatePool,
     NegativeSamplingContext,
@@ -409,13 +412,22 @@ class TwoTower:
             jt.array(samples.src_recency_buckets, dtype=jt.int32),
             jt.array(samples.src_time_buckets, dtype=jt.int32),
         )
-        positive_dst_ids = samples.dst_ids[:, 0]
-        neutral_context = np.zeros_like(positive_dst_ids)
+        (
+            positive_dst_ids,
+            positive_dst_popularity,
+            positive_dst_recency,
+            positive_dst_time,
+        ) = _in_batch_positive_destination_columns(
+            samples.dst_ids,
+            samples.dst_popularity_buckets,
+            samples.dst_recency_buckets,
+            samples.dst_time_buckets,
+        )
         destination_vectors = self.model.destination_vectors(
             jt.array(positive_dst_ids, dtype=jt.int32),
-            jt.array(neutral_context, dtype=jt.int32),
-            jt.array(neutral_context, dtype=jt.int32),
-            jt.array(neutral_context, dtype=jt.int32),
+            jt.array(positive_dst_popularity, dtype=jt.int32),
+            jt.array(positive_dst_recency, dtype=jt.int32),
+            jt.array(positive_dst_time, dtype=jt.int32),
         )
         logits = (
             source_vectors.unsqueeze(1)

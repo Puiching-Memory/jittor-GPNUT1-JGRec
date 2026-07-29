@@ -1,5 +1,11 @@
 # 各塔优化器与双塔 In-Batch Negatives 结果 — 2026-07-28
 
+> **2026-07-30 勘误**：本报告保留为历史执行记录，但不再支持模型效应结论。
+> 原筛选器对 exact ties 偏向正例列，in-batch destination 又把真实 bucket 0
+> 误作中性 context。两处均已在本地修复；修复证据见
+> `tower-optimization-inbatch-negatives-bugfix-tdd-20260730.md`。四臂需要重新
+> 生成后才能重新判决。
+
 ## 结论
 
 实现完成，但本轮没有候选获得晋级权：

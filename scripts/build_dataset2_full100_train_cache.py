@@ -33,6 +33,9 @@ from jgrec.rankers.hybrid.ranker import (
     SupervisedFeatureBuilder,
     TemporalHybridRanker,
 )
+from jgrec.rankers.hybrid.static_setwise import (
+    apply_prediction_history_limit,
+)
 
 
 def main(*, default_dataset_name: str = "dataset2") -> int:
@@ -82,6 +85,15 @@ def main(*, default_dataset_name: str = "dataset2") -> int:
         type=float,
         default=8.0,
     )
+    parser.add_argument(
+        "--prediction-history-limit",
+        type=int,
+        default=0,
+        help=(
+            "Override both structure and source-profile prediction history "
+            "limits for this cache build; zero preserves checkpoint values."
+        ),
+    )
     args = parser.parse_args()
 
     if args.candidate_count != 100:
@@ -92,6 +104,8 @@ def main(*, default_dataset_name: str = "dataset2") -> int:
         raise ValueError("validation rows must be positive")
     if args.batch_rows <= 0:
         raise ValueError("batch rows must be positive")
+    if args.prediction_history_limit < 0:
+        raise ValueError("prediction history limit must not be negative")
     if args.structure_workers <= 0:
         raise ValueError("structure workers must be positive")
     if (
@@ -174,6 +188,19 @@ def main(*, default_dataset_name: str = "dataset2") -> int:
     joint_build_id = uuid.uuid4().hex if joint_build else None
     state = load_checkpoint_dataset(args.checkpoint, args.dataset_name)
     config = state["config"]
+    checkpoint_prediction_limits = {
+        "structure_predict_neighbor_limit": int(
+            config.structure_predict_neighbor_limit
+        ),
+        "source_profile_predict_history_limit": int(
+            config.source_profile_predict_history_limit
+        ),
+    }
+    if args.prediction_history_limit:
+        config = apply_prediction_history_limit(
+            config,
+            limit=args.prediction_history_limit,
+        )
     feature_names = tuple(str(name) for name in state["feature_names"])
     source_manifest_path: Path | None = None
     source_val_path: Path | None = None
@@ -471,6 +498,7 @@ def main(*, default_dataset_name: str = "dataset2") -> int:
         "replay_feature_report": replay["feature_report"],
         "checkpoint": str(args.checkpoint.resolve()),
         "checkpoint_sha256": _sha256(args.checkpoint),
+        "checkpoint_prediction_limits": checkpoint_prediction_limits,
         "feature_names": list(feature_names),
         "prediction_limits": {
             "structure_predict_neighbor_limit": int(

@@ -39,10 +39,22 @@ def positive_ranks(scores: np.ndarray) -> np.ndarray:
         raise ValueError("candidate scores must have shape [queries, candidates]")
     if not np.all(np.isfinite(values)):
         raise ValueError("candidate scores must be finite")
+    positive = values[:, :1]
+    greater = np.sum(
+        values[:, 1:] > positive,
+        axis=1,
+        dtype=np.int32,
+    )
+    equal = np.sum(
+        values[:, 1:] == positive,
+        axis=1,
+        dtype=np.int32,
+    )
     return (
-        1
-        + np.sum(values[:, 1:] > values[:, :1], axis=1, dtype=np.int32)
-    ).astype(np.int32, copy=False)
+        1.0
+        + greater.astype(np.float64)
+        + 0.5 * equal.astype(np.float64)
+    )
 
 
 def ranking_metrics(scores: np.ndarray) -> dict[str, float]:

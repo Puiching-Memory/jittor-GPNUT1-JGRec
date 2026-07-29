@@ -6,6 +6,7 @@ import pytest
 from jgrec.rankers.hybrid.config import TwoTowerConfig
 from jgrec.rankers.hybrid.tower_optimization_experiment import (
     paired_rank_movements,
+    positive_ranks,
     ranking_metrics,
     two_tower_screen_config,
     two_tower_screen_gate,
@@ -79,6 +80,28 @@ def test_ranking_metrics_report_the_frozen_non_mrr_contract() -> None:
         / 3.0
     )
     assert metrics["mean_rank"] == pytest.approx(7.0 / 3.0)
+
+
+def test_positive_ranks_are_neutral_to_exact_score_ties() -> None:
+    scores = np.asarray(
+        [
+            [0.0, 0.0, 0.0, 0.0],
+            [3.0, 3.0, 2.0, 1.0],
+            [2.0, 3.0, 2.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+
+    ranks = positive_ranks(scores)
+
+    np.testing.assert_array_equal(
+        ranks,
+        np.asarray([2.5, 1.5, 2.5], dtype=np.float64),
+    )
+    metrics = ranking_metrics(scores[:1])
+    assert metrics["mrr"] == pytest.approx(0.4)
+    assert metrics["hit_at_1"] == pytest.approx(0.0)
+    assert metrics["mean_rank"] == pytest.approx(2.5)
 
 
 def test_paired_rank_movements_count_improved_and_worsened_queries() -> None:
