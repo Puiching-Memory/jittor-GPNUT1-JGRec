@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "protocol": "cooccur_lift_successor_v2_external_open_v1",
+  "status": "frozen_after_materialization_before_external_open",
+  "experiment_id": "dataset2_cooccur_lift_successor_v2_duel_20260729",
+  "candidate_id": "cooccur_lift_gap_aware_v2",
+  "selection_lock_sha256": "b52b529534b717ef136c82b17a090889b5aa4d67aed8618605ecbfda828e7e30",
+  "candidate_config_sha256": "2b4a0bf3c61e183f28ffbda7e601b94298e0a68acbdbec8fc691fb6efb325ed3",
+  "external_open_count_before_this_execution": 0,
+  "maximum_external_opens": 1,
+  "external_state_verified_absent": true,
+  "prior_launcher_exit": {
+    "exit_code": 2,
+    "classification": "operational_missing_runner_before_external_open",
+    "missing_path": "scripts/evaluate_standard_external_gate.py",
+    "external_receipt_created": false,
+    "external_report_created": false,
+    "valid_gate_decision_created": false
+  },
+  "decision_role": "safety_gate_only",
+  "effect_size_estimation_authorized": false,
+  "artifact_sha256": {
+    "materialization_report": "0f02a472a865025644cb0382e2c088092b4eb82902cc5b5802c8443410a03136",
+    "external_manifest": "019240ec9adc8897d7ba1ffe7c3f5233410f465dba1ff8f3cac0cc421c08e91d",
+    "external_preflight_report": "09d8b9ac15b448be2d8d64f48f689fd0b86ea465b7d23ac152f7c92bf29d7aca",
+    "external_baseline_scores": "fc7f3e80c199c89104ac6ff4b4e7b336f2af206ebd215513060436ec5cd6f3dc",
+    "external_candidate_scores": "8ad0e9eab7f49111c0e5816f9d9bd484cd9f88533f7c94e3e2a74d98fcf6ae01",
+    "gap_aware_model": "526a28c3eb642ee6c29c05f34e44a5a5b6bd3eeda67da24b1c7f5704886880cd"
+  },
+  "implementation_sha256": {
+    "external_evaluator_script": "128e856ed4e7eff79479221c4b6742dc621af8f03fb339c7afbc9ef105d9ac07",
+    "standard_validation_protocol": "a23a6077325edb21b32b61a9c93bd17507cc3a7038b5b5e989d13282ce6abd03",
+    "preflight_script": "e75759967bb3eeacbe63937ef77d07d3aec48e7998324c8ed084a0ccfdc814f4",
+    "test_materializer_script": "24800a338b28fbde88f2d6c45edde8b888e16a2f676b1afa25101158583c91ca",
+    "package_script": "08f2ac189bc890ccf038c7d2f6cb2516f44d85180b5685ef423a8155699737ff"
+  },
+  "post_gate_sha256": {
+    "bugfixed_v1_champion_zip": "b90960c3427f70e2745bcb381289fca4625c208ebfaefb43ecdbc7a7387ff2f0",
+    "test_csv": "389e330d6a21317cc1a0a013c878850c2324e916b2392901b3c039384e201372"
+  },
+  "external_gate_names": [
+    "mrr_meets_minimum",
+    "hit_at_1_meets_minimum",
+    "hit_at_3_meets_minimum",
+    "hit_at_10_meets_minimum",
+    "ndcg_at_10_meets_minimum",
+    "mean_rank_meets_maximum",
+    "improved_minus_worsened_meets_minimum"
+  ],
+  "package_only_if_all_seven_gates_pass": true,
+  "prohibited": [
+    "treating the prior launcher exit as an external decision",
+    "calling the evaluator if an external receipt already exists",
+    "calling the evaluator more than once",
+    "reading external raw deltas as an effect-size estimate",
+    "generating a package after any failed gate"
+  ]
+}

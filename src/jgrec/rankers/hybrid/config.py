@@ -47,6 +47,9 @@ class StructureTowerConfig:
     bridge_min_role_degree: int = 2
     predict_neighbor_limit: int = 0
     cache_max_bytes: int = DEFAULT_PREDICTION_CACHE_BYTES // 2
+    cooccur_time_decay_enabled: bool = False
+    cooccur_time_decay_ratio: float = 0.05
+    cooccur_time_decay_source_history_limit: int = 64
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,12 @@ class GraphTowerConfig:
     model_name: str = "xsimgcl"
     edge_weighting: str = "none"
     time_decay_ratio: float = 0.05
+    full_edge_weighting: str | None = None
+    recent_edge_weighting: str | None = None
+    short_edge_weighting: str | None = None
+    full_time_decay_ratio: float | None = None
+    recent_time_decay_ratio: float | None = None
+    short_time_decay_ratio: float | None = None
     embedding_dim: int = 128
     layers: int = 2
     epochs: int = 50
@@ -78,6 +87,8 @@ class GraphTowerConfig:
     max_graph_edges: int = 0
     max_train_edges: int = 200_000
     lr: float = 1e-3
+    lr_schedule: str = "constant"
+    min_lr_ratio: float = 0.0
     weight_decay: float = 0.0
     reg_weight: float = 1e-5
     cl_rate: float = 1e-4
@@ -100,6 +111,8 @@ class SequenceTowerConfig:
     heads: int = 4
     dropout: float = 0.2
     lr: float = 1e-3
+    lr_schedule: str = "constant"
+    min_lr_ratio: float = 0.0
     weight_decay: float = 0.0
 
 
@@ -115,11 +128,19 @@ class TwoTowerConfig:
     score_batch_size: int = 2048
     max_samples: int = 50_000
     lr: float = 1e-3
+    lr_schedule: str = "constant"
+    min_lr_ratio: float = 0.0
     weight_decay: float = 0.0
     num_negatives: int = 31
     hard_negative_ratio: float = 0.5
     popular_negative_ratio: float = 0.25
+    test_candidate_negative_ratio: float = 0.0
+    objective: str = "bce"
+    early_stop_metric: str = "loss"
     negative_sampling_workers: int = 0
+    in_batch_negatives: bool = False
+    in_batch_negative_weight: float = 1.0
+    in_batch_temperature: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -137,6 +158,8 @@ class SourceProfileConfig:
     window_size: int = 16
     recent_k: int = 32
     lr: float = 1e-3
+    lr_schedule: str = "constant"
+    min_lr_ratio: float = 0.0
     weight_decay: float = 0.0
     predict_history_limit: int = 0
     cache_max_bytes: int = DEFAULT_PREDICTION_CACHE_BYTES // 2
@@ -150,13 +173,16 @@ class TrainingConfig:
     max_val_events: int = 5_000
     supervised_feature_batch_size: int = 4096
     supervised_feature_memmap: bool = True
+    supervised_feature_cache_dir: Path | None = None
     num_negatives: int = 31
+    train_num_negatives: int | None = None
+    val_num_negatives: int | None = None
     max_fit_events: int = 0
     epochs: int = 15
     train_batch_size: int = 512
     lr: float = 0.001
     weight_decay: float = 0.0
-    selection_metric: str = "ap"
+    selection_metric: str = "mrr"
     early_stop_patience: int = 3
     seed: int = 42
     verbose: bool = True
@@ -172,6 +198,8 @@ class TrainingConfig:
     test_candidate_negative_ratio: float = 0.0
     dataset_train_path: Path | None = None
     dataset_test_path: Path | None = None
+    service_normalizer_calibration_enabled: bool = False
+    service_normalizer_calibration_batch_size: int = 256
     auto_mode: str = "manual"
     profile_holdout_pair_hit_rate: float = 0.0
     profile_candidate_unseen_dst_rate: float = 0.0
@@ -184,6 +212,12 @@ class TrainingConfig:
     gnn_model: str = "xsimgcl"
     gnn_edge_weighting: str = "none"
     gnn_time_decay_ratio: float = 0.05
+    gnn_full_edge_weighting: str | None = None
+    gnn_recent_edge_weighting: str | None = None
+    gnn_short_edge_weighting: str | None = None
+    gnn_full_time_decay_ratio: float | None = None
+    gnn_recent_time_decay_ratio: float | None = None
+    gnn_short_time_decay_ratio: float | None = None
     gnn_embedding_dim: int = 128
     gnn_layers: int = 2
     gnn_epochs: int = 10
@@ -193,6 +227,9 @@ class TrainingConfig:
     gnn_max_graph_edges: int = 0
     gnn_max_train_edges: int = 40_000
     gnn_lr: float = 0.001
+    gnn_lr_schedule: str = "constant"
+    gnn_min_lr_ratio: float = 0.0
+    gnn_weight_decay: float | None = None
     gnn_reg_weight: float = 1e-5
     gnn_cl_rate: float = 1e-4
     seq_enabled: bool = True
@@ -207,6 +244,10 @@ class TrainingConfig:
     seq_layers: int = 2
     seq_heads: int = 4
     seq_dropout: float = 0.2
+    seq_lr: float | None = None
+    seq_lr_schedule: str = "constant"
+    seq_min_lr_ratio: float = 0.0
+    seq_weight_decay: float | None = None
     two_tower_enabled: bool = True
     two_tower_embedding_dim: int = 64
     two_tower_hidden_dim: int = 64
@@ -216,6 +257,17 @@ class TrainingConfig:
     two_tower_batch_size: int = 512
     two_tower_score_batch_size: int = 2048
     two_tower_max_samples: int = 50_000
+    two_tower_num_negatives: int | None = None
+    two_tower_test_candidate_negative_ratio: float | None = None
+    two_tower_objective: str = "bce"
+    two_tower_early_stop_metric: str = "loss"
+    two_tower_lr: float | None = None
+    two_tower_lr_schedule: str = "constant"
+    two_tower_min_lr_ratio: float = 0.0
+    two_tower_weight_decay: float | None = None
+    two_tower_in_batch_negatives: bool = False
+    two_tower_in_batch_negative_weight: float = 1.0
+    two_tower_in_batch_temperature: float = 1.0
     source_profile_enabled: bool = True
     source_profile_deterministic_enabled: bool = True
     source_profile_item2vec_enabled: bool = True
@@ -228,14 +280,41 @@ class TrainingConfig:
     source_profile_max_samples: int = 100_000
     source_profile_window_size: int = 16
     source_profile_recent_k: int = 32
+    source_profile_lr: float | None = None
+    source_profile_lr_schedule: str = "constant"
+    source_profile_min_lr_ratio: float = 0.0
+    source_profile_weight_decay: float | None = None
     source_profile_predict_history_limit: int = 0
     structure_predict_neighbor_limit: int = 0
+    structure_cooccur_time_decay_enabled: bool = False
+    structure_cooccur_time_decay_ratio: float = 0.05
+    structure_cooccur_time_decay_source_history_limit: int = 64
     prediction_cache_max_bytes: int = DEFAULT_PREDICTION_CACHE_BYTES
     fusion_hidden_dim: int = 64
-    fusion_mode: str = "mlp"
+    fusion_mode: str = "ensemble"
+    fusion_context_transform_version: int = 1
+    frozen_fusion_feature_candidate: str | None = None
+    frozen_ensemble_mlp_weight: float | None = None
+    refit_full: bool = True
+    expert_blend_mode: str = "rrf"
+    expert_rrf_k: float = 60.0
     hard_negative_ratio: float = 0.5
     popular_negative_ratio: float = 0.25
     negative_sampling_workers: int = 0
+
+    def resolved_train_num_negatives(self) -> int:
+        override = getattr(self, "train_num_negatives", None)
+        value = int(self.num_negatives if override is None else override)
+        if value < 1:
+            raise ValueError("train_num_negatives must be at least 1")
+        return value
+
+    def resolved_val_num_negatives(self) -> int:
+        override = getattr(self, "val_num_negatives", None)
+        value = int(self.num_negatives if override is None else override)
+        if value < 1:
+            raise ValueError("val_num_negatives must be at least 1")
+        return value
 
     def candidate_prior_config(self) -> CandidatePriorConfig:
         return CandidatePriorConfig(
@@ -259,14 +338,36 @@ class TrainingConfig:
             future_only_transition_cooccur=self.structure_future_only_transition_cooccur,
             predict_neighbor_limit=self.structure_predict_neighbor_limit,
             cache_max_bytes=structure_cache_bytes,
+            cooccur_time_decay_enabled=bool(
+                getattr(self, "structure_cooccur_time_decay_enabled", False)
+            ),
+            cooccur_time_decay_ratio=float(
+                getattr(self, "structure_cooccur_time_decay_ratio", 0.05)
+            ),
+            cooccur_time_decay_source_history_limit=int(
+                getattr(
+                    self,
+                    "structure_cooccur_time_decay_source_history_limit",
+                    64,
+                )
+            ),
         )
 
     def graph_config(self) -> GraphTowerConfig:
+        tower_weight_decay = getattr(self, "gnn_weight_decay", None)
+        if tower_weight_decay is None:
+            tower_weight_decay = self.weight_decay
         return GraphTowerConfig(
             enabled=self.gnn_enabled,
             model_name=self.gnn_model,
             edge_weighting=self.gnn_edge_weighting,
             time_decay_ratio=self.gnn_time_decay_ratio,
+            full_edge_weighting=getattr(self, "gnn_full_edge_weighting", None),
+            recent_edge_weighting=getattr(self, "gnn_recent_edge_weighting", None),
+            short_edge_weighting=getattr(self, "gnn_short_edge_weighting", None),
+            full_time_decay_ratio=getattr(self, "gnn_full_time_decay_ratio", None),
+            recent_time_decay_ratio=getattr(self, "gnn_recent_time_decay_ratio", None),
+            short_time_decay_ratio=getattr(self, "gnn_short_time_decay_ratio", None),
             embedding_dim=self.gnn_embedding_dim,
             layers=self.gnn_layers,
             epochs=self.gnn_epochs,
@@ -276,12 +377,21 @@ class TrainingConfig:
             max_graph_edges=self.gnn_max_graph_edges,
             max_train_edges=self.gnn_max_train_edges,
             lr=self.gnn_lr,
-            weight_decay=self.weight_decay,
+            lr_schedule=str(
+                getattr(self, "gnn_lr_schedule", "constant")
+            ).lower(),
+            min_lr_ratio=float(getattr(self, "gnn_min_lr_ratio", 0.0)),
+            weight_decay=float(tower_weight_decay),
             reg_weight=self.gnn_reg_weight,
             cl_rate=self.gnn_cl_rate,
         )
-
     def sequence_config(self) -> SequenceTowerConfig:
+        tower_lr = getattr(self, "seq_lr", None)
+        if tower_lr is None:
+            tower_lr = self.lr
+        tower_weight_decay = getattr(self, "seq_weight_decay", None)
+        if tower_weight_decay is None:
+            tower_weight_decay = self.weight_decay
         return SequenceTowerConfig(
             enabled=self.seq_enabled,
             epochs=self.seq_epochs,
@@ -295,11 +405,72 @@ class TrainingConfig:
             layers=self.seq_layers,
             heads=self.seq_heads,
             dropout=self.seq_dropout,
-            lr=self.lr,
-            weight_decay=self.weight_decay,
+            lr=float(tower_lr),
+            lr_schedule=str(
+                getattr(self, "seq_lr_schedule", "constant")
+            ).lower(),
+            min_lr_ratio=float(getattr(self, "seq_min_lr_ratio", 0.0)),
+            weight_decay=float(tower_weight_decay),
         )
 
     def two_tower_config(self) -> TwoTowerConfig:
+        tower_lr = getattr(self, "two_tower_lr", None)
+        if tower_lr is None:
+            tower_lr = self.lr
+        tower_weight_decay = getattr(
+            self,
+            "two_tower_weight_decay",
+            None,
+        )
+        if tower_weight_decay is None:
+            tower_weight_decay = self.weight_decay
+        tower_num_negatives = getattr(self, "two_tower_num_negatives", None)
+        if tower_num_negatives is None:
+            tower_num_negatives = self.resolved_train_num_negatives()
+        tower_num_negatives = int(tower_num_negatives)
+        if tower_num_negatives < 1:
+            raise ValueError("two_tower_num_negatives must be at least 1")
+
+        tower_test_ratio = getattr(
+            self,
+            "two_tower_test_candidate_negative_ratio",
+            None,
+        )
+        if tower_test_ratio is None:
+            tower_test_ratio = float(
+                getattr(self, "test_candidate_negative_ratio", 0.0)
+            )
+        tower_test_ratio = float(tower_test_ratio)
+        if not 0.0 <= tower_test_ratio <= 1.0:
+            raise ValueError(
+                "two_tower_test_candidate_negative_ratio must be between 0 and 1"
+            )
+
+        objective = str(getattr(self, "two_tower_objective", "bce")).lower()
+        if objective not in {"bce", "listwise"}:
+            raise ValueError(f"unsupported two_tower_objective: {objective}")
+        early_stop_metric = str(
+            getattr(self, "two_tower_early_stop_metric", "loss")
+        ).lower()
+        if early_stop_metric not in {"loss", "mrr"}:
+            raise ValueError(
+                f"unsupported two_tower_early_stop_metric: {early_stop_metric}"
+            )
+        in_batch_negative_weight = float(
+            getattr(self, "two_tower_in_batch_negative_weight", 1.0)
+        )
+        if in_batch_negative_weight < 0.0:
+            raise ValueError(
+                "two_tower_in_batch_negative_weight must be non-negative"
+            )
+        in_batch_temperature = float(
+            getattr(self, "two_tower_in_batch_temperature", 1.0)
+        )
+        if in_batch_temperature <= 0.0:
+            raise ValueError(
+                "two_tower_in_batch_temperature must be positive"
+            )
+
         return TwoTowerConfig(
             enabled=self.two_tower_enabled,
             embedding_dim=self.two_tower_embedding_dim,
@@ -310,16 +481,40 @@ class TrainingConfig:
             batch_size=self.two_tower_batch_size,
             score_batch_size=self.two_tower_score_batch_size,
             max_samples=self.two_tower_max_samples,
-            lr=self.lr,
-            weight_decay=self.weight_decay,
-            num_negatives=self.num_negatives,
+            lr=float(tower_lr),
+            lr_schedule=str(
+                getattr(self, "two_tower_lr_schedule", "constant")
+            ).lower(),
+            min_lr_ratio=float(
+                getattr(self, "two_tower_min_lr_ratio", 0.0)
+            ),
+            weight_decay=float(tower_weight_decay),
+            num_negatives=tower_num_negatives,
             hard_negative_ratio=self.hard_negative_ratio,
             popular_negative_ratio=self.popular_negative_ratio,
+            test_candidate_negative_ratio=tower_test_ratio,
+            objective=objective,
+            early_stop_metric=early_stop_metric,
             negative_sampling_workers=self.negative_sampling_workers,
+            in_batch_negatives=bool(
+                getattr(self, "two_tower_in_batch_negatives", False)
+            ),
+            in_batch_negative_weight=in_batch_negative_weight,
+            in_batch_temperature=in_batch_temperature,
         )
 
     def source_profile_config(self) -> SourceProfileConfig:
         total_cache_bytes = max(int(self.prediction_cache_max_bytes), 0)
+        tower_lr = getattr(self, "source_profile_lr", None)
+        if tower_lr is None:
+            tower_lr = self.lr
+        tower_weight_decay = getattr(
+            self,
+            "source_profile_weight_decay",
+            None,
+        )
+        if tower_weight_decay is None:
+            tower_weight_decay = self.weight_decay
         return SourceProfileConfig(
             enabled=self.source_profile_enabled,
             deterministic_enabled=self.source_profile_deterministic_enabled,
@@ -333,11 +528,21 @@ class TrainingConfig:
             max_samples=self.source_profile_max_samples,
             window_size=self.source_profile_window_size,
             recent_k=self.source_profile_recent_k,
-            lr=self.lr,
-            weight_decay=self.weight_decay,
+            lr=float(tower_lr),
+            lr_schedule=str(
+                getattr(self, "source_profile_lr_schedule", "constant")
+            ).lower(),
+            min_lr_ratio=float(
+                getattr(self, "source_profile_min_lr_ratio", 0.0)
+            ),
+            weight_decay=float(tower_weight_decay),
             predict_history_limit=self.source_profile_predict_history_limit,
             cache_max_bytes=total_cache_bytes - total_cache_bytes // 2,
         )
+
+    def resolved_fusion_context_transform_version(self) -> int:
+        """Resolve new instances to v1 while keeping legacy pickles on raw v0."""
+        return int(vars(self).get("fusion_context_transform_version", 0))
 
     def fusion_config(self) -> FusionConfig:
         from .fusion import FusionConfig  # noqa: PLC0415
@@ -350,4 +555,32 @@ class TrainingConfig:
             hidden_dim=self.fusion_hidden_dim,
             selection_metric=self.selection_metric,
             early_stop_patience=self.early_stop_patience,
+            context_transform_version=(
+                self.resolved_fusion_context_transform_version()
+            ),
         )
+
+
+def graph_window_edge_parameters(
+    config: GraphTowerConfig,
+    window_name: str,
+) -> tuple[str, float]:
+    """Resolve edge parameters for one graph window, falling back to globals."""
+
+    prefix_by_window = {
+        "gnn_full": "full",
+        "gnn_recent": "recent",
+        "gnn_short": "short",
+    }
+    try:
+        prefix = prefix_by_window[window_name]
+    except KeyError as exc:
+        raise ValueError(f"unsupported graph window: {window_name}") from exc
+
+    weighting = getattr(config, f"{prefix}_edge_weighting", None)
+    if weighting is None:
+        weighting = config.edge_weighting
+    decay_ratio = getattr(config, f"{prefix}_time_decay_ratio", None)
+    if decay_ratio is None:
+        decay_ratio = config.time_decay_ratio
+    return str(weighting), float(decay_ratio)

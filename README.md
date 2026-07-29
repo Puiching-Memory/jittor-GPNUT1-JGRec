@@ -115,8 +115,12 @@ checkpoint 和 `result.zip` 是两个独立产物；比赛材料要求 checkpoin
 
 - `--max-fit-events 0` 保持最终 encoder 使用完整训练历史。
 - 提高 `--max-train-events`、`--max-val-events` 可以让融合器看到更多监督事件，但会增加训练时间。
-- `--selection-metric mrr` 可用于与默认 `ap` 对比，因为线上评分是 MRR。
+- 默认 `--selection-metric mrr` 与线上 query-level MRR 对齐；需要复现实验时仍可显式切回 `ap`。
+- 默认 `--fusion-mode ensemble --expert-blend-mode rrf`，避免 MLP 概率与 LGBM LambdaRank 分数量纲直接相加。
+- 基础 FusionMLP 默认以 `--fusion-context-transform-version 1` 同时消费 raw、减 query 行均值、减 query 行最大值三组通道；LGBM 仍消费 raw。
+- 调试时可用 `--no-refit-full` 复用验证口径 encoder；正式提交默认仍做全量 refit。
 - `--test-candidate-negative-ratio` 用于校准冷启动/新链接数据的负采样分布。
+- `--supervised-feature-cache-dir .cache/supervised-features` 可在只调整融合器参数时复用 train/val 监督特征。
 - 不建议为了提速直接关闭 `structure`、`two_tower`、`candidate_prior`，这些是当前 dataset2 提升的关键特征。
 
 ## 模型摘要

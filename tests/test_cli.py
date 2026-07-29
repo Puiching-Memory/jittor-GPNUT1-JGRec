@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from jgrec.rankers.hybrid.config import TrainingConfig
 from jgrec.rankers.registry import create_ranker
+from jgrec.rankers.temporal_graph.config import TemporalGraphTrainingConfig
 
 
 def _cli_symbols():
@@ -22,6 +24,94 @@ def test_cli_import_does_not_load_graph_backend():
     assert "jgrec.rankers.hybrid.gnn" not in sys.modules
 
 
+def test_safe_hybrid_defaults_select_query_metric_and_ensemble():
+    CLIConfig, _, _ranker_config = _cli_symbols()
+
+    cli = CLIConfig()
+    training = TrainingConfig()
+    temporal_training = TemporalGraphTrainingConfig()
+    resolved = _ranker_config(cli)
+
+    assert cli.selection_metric == "mrr"
+    assert cli.fusion_mode == "ensemble"
+    assert cli.fusion_context_transform_version == 1
+    assert training.selection_metric == "mrr"
+    assert temporal_training.selection_metric == "mrr"
+    assert training.fusion_mode == "ensemble"
+    assert training.fusion_context_transform_version == 1
+    assert training.expert_blend_mode == "rrf"
+    assert resolved.selection_metric == "mrr"
+    assert resolved.fusion_mode == "ensemble"
+    assert resolved.fusion_context_transform_version == 1
+    assert resolved.expert_blend_mode == "rrf"
+
+
+def test_cli_passes_no_refit_full_to_hybrid_config():
+    CLIConfig, _, _ranker_config = _cli_symbols()
+
+    config = _ranker_config(CLIConfig(refit_full=False))
+
+    assert config.refit_full is False
+
+
+def test_cli_passes_frozen_standard_validation_candidates():
+    CLIConfig, _, _ranker_config = _cli_symbols()
+
+    config = _ranker_config(
+        CLIConfig(
+            frozen_fusion_feature_candidate=(
+                "stats_prior_structure_tower_gnn"
+            ),
+            frozen_ensemble_mlp_weight=0.3,
+        )
+    )
+
+    assert (
+        config.frozen_fusion_feature_candidate
+        == "stats_prior_structure_tower_gnn"
+    )
+    assert config.frozen_ensemble_mlp_weight == pytest.approx(0.3)
+
+
+def test_cli_passes_independent_tower_optimization_and_in_batch_settings():
+    CLIConfig, _, _ranker_config = _cli_symbols()
+
+    config = _ranker_config(
+        CLIConfig(
+            gnn_lr_schedule="cosine",
+            gnn_min_lr_ratio=0.1,
+            gnn_weight_decay=1e-4,
+            seq_lr=2e-3,
+            seq_lr_schedule="cosine",
+            seq_min_lr_ratio=0.2,
+            seq_weight_decay=2e-4,
+            two_tower_lr=3e-3,
+            two_tower_lr_schedule="cosine",
+            two_tower_min_lr_ratio=0.3,
+            two_tower_weight_decay=3e-4,
+            two_tower_in_batch_negatives=True,
+            two_tower_in_batch_negative_weight=0.75,
+            two_tower_in_batch_temperature=0.25,
+            source_profile_lr=4e-3,
+            source_profile_lr_schedule="cosine",
+            source_profile_min_lr_ratio=0.4,
+            source_profile_weight_decay=4e-4,
+        )
+    )
+
+    assert config.graph_config().lr_schedule == "cosine"
+    assert config.graph_config().weight_decay == pytest.approx(1e-4)
+    assert config.sequence_config().lr == pytest.approx(2e-3)
+    assert config.sequence_config().min_lr_ratio == pytest.approx(0.2)
+    two_tower = config.two_tower_config()
+    assert two_tower.lr == pytest.approx(3e-3)
+    assert two_tower.in_batch_negatives is True
+    assert two_tower.in_batch_negative_weight == pytest.approx(0.75)
+    assert two_tower.in_batch_temperature == pytest.approx(0.25)
+    assert config.source_profile_config().lr == pytest.approx(4e-3)
+    assert config.source_profile_config().weight_decay == pytest.approx(4e-4)
+
+
 def test_disabled_hybrid_ranker_does_not_load_heavy_backends():
     CLIConfig, _, _ranker_config = _cli_symbols()
     sys.modules.pop("jgrec.rankers.hybrid.gnn", None)
@@ -36,6 +126,41 @@ def test_disabled_hybrid_ranker_does_not_load_heavy_backends():
     assert "jgrec.rankers.hybrid.sequence" not in sys.modules
     assert "jgrec.rankers.hybrid.two_tower" not in sys.modules
     assert "jgrec.rankers.hybrid.source_profile" not in sys.modules
+
+
+def test_cli_passes_independent_negative_counts_to_hybrid_config():
+    CLIConfig, _, _ranker_config = _cli_symbols()
+    args = CLIConfig(num_negatives=7, train_num_negatives=3, val_num_negatives=9)
+
+    config = _ranker_config(args)
+
+    assert config.resolved_train_num_negatives() == 3
+    assert config.resolved_val_num_negatives() == 9
+
+
+def test_cli_negative_overrides_do_not_change_temporal_graph_config():
+    CLIConfig, _, _ranker_config = _cli_symbols()
+    args = CLIConfig(
+        model="temporal-graph",
+        num_negatives=7,
+        train_num_negatives=3,
+        val_num_negatives=9,
+    )
+
+    config = _ranker_config(args)
+
+    assert config.num_negatives == 7
+
+
+def test_cli_passes_supervised_feature_cache_without_changing_run_identity():
+    CLIConfig, _build_run_name, _ranker_config = _cli_symbols()
+    base_args = CLIConfig()
+    cached_args = CLIConfig(supervised_feature_cache_dir=Path("cache/supervised-features"))
+
+    cached_config = _ranker_config(cached_args)
+
+    assert cached_config.supervised_feature_cache_dir == Path("cache/supervised-features")
+    assert _build_run_name(cached_args, cached_config) == _build_run_name(base_args, _ranker_config(base_args))
 
 
 def test_run_name_is_human_readable_for_default_hybrid():

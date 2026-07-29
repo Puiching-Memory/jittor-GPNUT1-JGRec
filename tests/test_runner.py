@@ -48,6 +48,20 @@ class SourceScheduledRanker(SourceValueRanker):
         return np.argsort(queries.src, kind="stable")
 
 
+class TiedPriorRanker(DummyRanker):
+    def predict_batch(self, queries: TestQueryArray) -> np.ndarray:
+        return np.tile(
+            np.asarray([0.5, 0.5, 0.5, 0.25], dtype=np.float64),
+            (len(queries), 25),
+        )
+
+    def prediction_tie_break_prior(self, queries: TestQueryArray) -> np.ndarray:
+        return np.tile(
+            np.asarray([1.0, 3.0, 2.0, 0.0], dtype=np.float64),
+            (len(queries), 25),
+        )
+
+
 def _write_train_csv(path) -> None:
     with path.open("w", newline="") as f:
         writer = csv.writer(f)
@@ -122,8 +136,32 @@ def test_build_dataset_submission_limits_rows_and_clips_predictions(tmp_path):
 
     with result.output_path.open("r", newline="") as f:
         rows = list(csv.reader(f))
-    assert rows[0][0] == "0.00000000"
-    assert rows[0][-1] == "1.00000000"
+    numeric = np.asarray(rows[0], dtype=np.float64)
+    assert numeric.min() == 0.0
+    assert numeric.max() == 1.0
+    assert np.unique(numeric).size == numeric.size
+
+
+def test_build_dataset_submission_breaks_exact_ties_by_prior_and_round_trips(tmp_path):
+    dataset_root = tmp_path / "dataset1"
+    dataset_root.mkdir()
+    train_path = dataset_root / "train.csv"
+    test_path = dataset_root / "test.csv"
+    _write_train_csv(train_path)
+    _write_test_csv(test_path, row_count=1)
+    dataset = DatasetPaths("dataset1", dataset_root, train_path, test_path)
+
+    result = build_dataset_submission(
+        dataset=dataset,
+        ranker=TiedPriorRanker(),
+        output_dir=tmp_path / "out",
+        verbose=False,
+    )
+
+    persisted = np.loadtxt(result.output_path, delimiter=",", ndmin=2)
+    assert np.unique(persisted[0]).size == persisted.shape[1]
+    assert persisted[0, 1] > persisted[0, 2] > persisted[0, 0]
+    assert persisted[0, :3].min() > persisted[0, 3]
 
 
 def test_build_dataset_submission_logs_predict_progress_without_changing_output(tmp_path, monkeypatch, capsys):

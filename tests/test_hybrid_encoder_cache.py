@@ -253,3 +253,90 @@ def test_encoder_cache_reuse_guard_matches_structure_semantics():
         replace(base, structure_cooccur_enabled=False),
         replace(base, structure_cooccur_enabled=True),
     )
+    assert not _can_reuse_encoder_cache(
+        base,
+        replace(base, structure_cooccur_time_decay_enabled=True),
+    )
+
+
+def test_encoder_prefix_cache_preserves_time_decay_aggregate():
+    interactions = InteractionTable.from_events(_interactions())
+    structure_config = StructureTowerConfig(
+        future_only_transition_cooccur=True,
+        cooccur_time_decay_enabled=True,
+        cooccur_time_decay_ratio=0.05,
+        cooccur_time_decay_source_history_limit=64,
+    )
+    cache = HybridPrefixStateCache(
+        interactions,
+        recent_window=4,
+        candidate_prior_config=CandidatePriorConfig(enabled=False),
+        structure_config=structure_config,
+        test_candidate_counts=Counter(),
+        verbose=False,
+    )
+    snapshot = cache.snapshot_for_prefix(len(interactions))
+    restored = StructureFeatureTower(structure_config)
+    restored.hydrate(snapshot.structure)
+    direct = StructureFeatureTower(structure_config)
+    direct.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    queries = [TestQuery(src=1, time=120, candidates=(10, 20, 40, 999))]
+
+    np.testing.assert_allclose(
+        restored.time_decay_features_for_queries(queries),
+        direct.time_decay_features_for_queries(queries),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_time_decay_feature_is_appended_without_changing_legacy_feature_columns():
+    interactions = InteractionTable.from_events(_interactions())
+    base = TrainingConfig(
+        candidate_prior_enabled=False,
+        structure_enabled=True,
+        structure_future_only_transition_cooccur=True,
+        source_profile_enabled=False,
+        two_tower_enabled=False,
+        gnn_enabled=False,
+        seq_enabled=False,
+    )
+    enabled = replace(
+        base,
+        structure_cooccur_time_decay_enabled=True,
+        structure_cooccur_time_decay_ratio=0.05,
+        structure_cooccur_time_decay_source_history_limit=64,
+    )
+    legacy_encoder = HybridFeatureEncoder(
+        id_map=NodeIdMap.from_interactions(interactions),
+        recent_window=4,
+        candidate_prior_config=base.candidate_prior_config(),
+        target_window_config=base.target_window_config(),
+        structure_config=base.structure_config(),
+        source_profile_config=base.source_profile_config(),
+        two_tower_config=base.two_tower_config(),
+        graph_config=base.graph_config(),
+        sequence_config=base.sequence_config(),
+    )
+    enabled_encoder = HybridFeatureEncoder(
+        id_map=NodeIdMap.from_interactions(interactions),
+        recent_window=4,
+        candidate_prior_config=enabled.candidate_prior_config(),
+        target_window_config=enabled.target_window_config(),
+        structure_config=enabled.structure_config(),
+        source_profile_config=enabled.source_profile_config(),
+        two_tower_config=enabled.two_tower_config(),
+        graph_config=enabled.graph_config(),
+        sequence_config=enabled.sequence_config(),
+    )
+    legacy_encoder.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    enabled_encoder.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    queries = [TestQuery(src=1, time=120, candidates=(10, 20, 40, 999))]
+
+    legacy_features = legacy_encoder.features_for_queries(queries)
+    enabled_features = enabled_encoder.features_for_queries(queries)
+
+    assert legacy_encoder.feature_dim == 63
+    assert enabled_encoder.feature_dim == 64
+    assert enabled_encoder.feature_names[-1] == "cooccur_time_decay_score"
+    np.testing.assert_array_equal(enabled_features[..., :63], legacy_features)

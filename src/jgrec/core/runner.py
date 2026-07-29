@@ -14,6 +14,7 @@ from jgrec.rankers.base import Ranker
 
 from .io import read_interactions, read_test_queries
 from .memory import log_event, log_memory, release_memory
+from .prediction_ties import break_prediction_ties
 from .types import DatasetPaths, DatasetResult, FitContext, TestQueryArray, TrainingReport
 
 PREDICT_PROGRESS_INTERVAL = 10_000
@@ -122,12 +123,21 @@ def _predict_batch(ranker: Ranker, batch: TestQueryArray) -> np.ndarray:
             "ranker returned invalid prediction shape: "
             f"{probs_batch.shape}, expected {(len(batch), batch.candidate_count)}"
         )
+    probs_batch = np.asarray(probs_batch, dtype=np.float64)
     np.clip(probs_batch, 0.0, 1.0, out=probs_batch)
-    return probs_batch
+    priority_for_queries = getattr(ranker, "prediction_tie_break_prior", None)
+    priorities = priority_for_queries(batch) if callable(priority_for_queries) else None
+    stabilized, _ = break_prediction_ties(
+        probs_batch,
+        priorities=priorities,
+        candidate_ids=batch.candidates,
+    )
+    return stabilized
 
 
 def _write_probabilities(output_file, probabilities: np.ndarray) -> None:
-    np.savetxt(output_file, probabilities, delimiter=",", fmt="%.8f")
+    # 17 significant digits round-trip float64 nextafter tie-breaks.
+    np.savetxt(output_file, probabilities, delimiter=",", fmt="%.17g")
 
 
 def _prediction_order(ranker: Ranker, queries: TestQueryArray) -> np.ndarray | None:

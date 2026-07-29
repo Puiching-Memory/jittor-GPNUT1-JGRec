@@ -239,10 +239,68 @@ MRR 选择：
 | `--max-fit-events 0`              | 不截断训练历史，最终 encoder 使用完整 `train.csv`。                   |
 | `--max-train-events`              | 融合器监督训练使用的正样本事件上限。                                  |
 | `--max-val-events`                | 融合器特征组选择、早停和本地 AP/MRR 验证的事件上限。                  |
-| `--num-negatives`                 | 每个正样本配多少个负候选。                                            |
-| `--selection-metric`              | 融合器早停和特征 mask 选择使用 `ap` 或 `mrr`。                        |
+| `--num-negatives`                 | 兼容参数；作为混合模型训练/验证负例数的共同回退值，temporal-graph 仍直接使用它。 |
+| `--train-num-negatives`           | 混合模型训练负例数，同时用于 two-tower；省略时继承 `--num-negatives`。          |
+| `--val-num-negatives`             | 混合模型验证负例数；省略时继承 `--num-negatives`。                              |
+| `--selection-metric`              | 融合器早停和特征 mask 选择使用 `ap` 或 `mrr`；默认 `mrr`。             |
+| `--fusion-mode`                   | 使用 `mlp`、`lgbm` 或 `ensemble`；默认 `ensemble`。                    |
+| `--fusion-context-transform-version` | 基础 FusionMLP 的行内上下文变换；默认 `1` 为 raw、减行均值、减行最大值，`0` 为旧 raw-only。 |
+| `--expert-blend-mode`             | ensemble 使用 `probability`、`temperature` 或尺度无关的 `rrf`；默认 `rrf`。 |
+| `--expert-rrf-k`                  | RRF 的平滑常数，默认 `60`。                                           |
+| `--no-refit-full`                 | hybrid 调试时复用验证口径 encoder，跳过最终全历史 refit。              |
 | `--test-candidate-negative-ratio` | 负样本中来自 test 候选分布的比例；冷启动/新链接数据通常需要更高比例。 |
 | `--supervised-feature-memmap`     | 监督特征落盘分块，降低常驻内存。                                      |
+| `--supervised-feature-cache-dir`  | 持久化训练/验证监督特征；相同特征配置的后续运行直接 mmap 加载。        |
+
+例如，保持训练成本较低、同时让本地 MRR 在更大的验证候选组上选择模型：
+
+```bash
+uv run jgrec-build \
+  --num-negatives 31 \
+  --train-num-negatives 31 \
+  --val-num-negatives 99
+```
+
+## 快速调融合器
+
+给一组特征实验固定同一个缓存目录。第一次运行会生成训练/验证 `.npy` 和原子发布的 JSON manifest：
+
+```bash
+uv run jgrec-build \
+  --dataset dataset2 \
+  --seed 60 \
+  --selection-metric mrr \
+  --max-train-events 50000 \
+  --max-val-events 20000 \
+  --train-num-negatives 31 \
+  --val-num-negatives 99 \
+  --fusion-mode mlp \
+  --fusion-hidden-dim 64 \
+  --supervised-feature-cache-dir .cache/supervised-features
+```
+
+第二次保持数据、切分、负采样和所有塔参数不变，只调整融合器参数：
+
+```bash
+uv run jgrec-build \
+  --dataset dataset2 \
+  --seed 60 \
+  --selection-metric mrr \
+  --max-train-events 50000 \
+  --max-val-events 20000 \
+  --train-num-negatives 31 \
+  --val-num-negatives 99 \
+  --fusion-mode ensemble \
+  --expert-blend-mode rrf \
+  --fusion-hidden-dim 128 \
+  --supervised-feature-cache-dir .cache/supervised-features
+```
+
+日志出现 `[supervised-feature-cache] hit` 时，会跳过监督阶段的 train/val encoder 拟合和特征生成，并恢复首次运行结束时的 RNG 状态。以下融合参数可直接复用缓存：`fusion-mode`、`fusion-context-transform-version`、`expert-blend-mode`、`expert-rrf-k`、`fusion-hidden-dim`、`epochs`、`train-batch-size`、`early-stop` 和 `selection-metric`。行内上下文按训练 batch 即时计算，不会把 raw 特征缓存扩大三倍。
+
+数据内容、seed、时间切分、训练/验证事件数、负例数或比例、任一塔配置、特征布局、数据画像变化时会自动生成新 key。`lr` 和 `weight-decay` 同时供部分塔训练使用，因此改变它们也会失效。缓存没有自动淘汰；空间不足时可删除 `.cache/supervised-features`。缓存命中默认仍会执行最终全历史 encoder；加 `--no-refit-full` 后恢复验证口径 encoder，适合快速迭代，不作为正式提交默认值。
+
+提交写出边界会消除每行精确分数并列：同分时先按 `candidate_prior`，再按 candidate id 确定顺序，并以 float64 round-trip 精度保存。该处理不改变任何原本非并列候选的相对次序。
 
 ## 拼包原则
 

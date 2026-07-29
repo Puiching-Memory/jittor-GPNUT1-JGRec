@@ -19,6 +19,13 @@ result.json
 logs/
 .cache/
 site/
+memory.log
+tmux.log
+
+# === Local Agent Scratch / Recovery ===
+.agents/tmp/
+.backup_champion_recovery/
+/NUL
 
 # === CUDA Toolkit (project-local) ===
 third_party/cuda-toolkit/
@@ -30,6 +37,7 @@ third_party/cuda-toolkit/
 # === Experiment Results ===
 result/
 result_perm_backup_*/
+artifacts/
 
 # === LaTeX Build Artifacts ===
 docs/**/*.aux

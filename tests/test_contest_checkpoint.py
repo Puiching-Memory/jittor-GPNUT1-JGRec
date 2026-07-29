@@ -6,6 +6,7 @@ import pytest
 
 from jgrec.contest_checkpoint import (
     ContestCheckpointWriter,
+    compose_checkpoint_datasets,
     load_checkpoint_dataset,
     load_checkpoint_metadata,
 )
@@ -138,3 +139,49 @@ def test_writer_discards_interrupted_tail_before_resuming(tmp_path: Path) -> Non
     second_run.finalize()
 
     assert load_checkpoint_dataset(checkpoint_path, "dataset2") == {"weight": 2}
+
+
+def test_compose_checkpoint_keeps_champion_dataset1_and_replaces_dataset2_from_partial(
+    tmp_path: Path,
+) -> None:
+    champion_path = tmp_path / "champion.pkl"
+    champion = ContestCheckpointWriter(
+        champion_path,
+        model_name="hybrid",
+        expected_datasets=("dataset1", "dataset2"),
+        metadata={"run_name": "champion"},
+    )
+    champion.add_dataset("dataset1", {"weight": 11, "marker": "unchanged"})
+    champion.add_dataset("dataset2", {"weight": 22, "marker": "old"})
+    champion.finalize()
+
+    candidate_path = tmp_path / "candidate.pkl"
+    candidate = ContestCheckpointWriter(
+        candidate_path,
+        model_name="hybrid",
+        expected_datasets=("dataset1", "dataset2"),
+        metadata={"run_name": "candidate"},
+    )
+    candidate.add_dataset("dataset2", {"weight": 33, "marker": "new"})
+    candidate.close_partial()
+
+    output_path = tmp_path / "composed.pkl"
+    compose_checkpoint_datasets(
+        output_path,
+        base_checkpoint=champion_path,
+        replacements={
+            "dataset2": candidate_path.with_suffix(".pkl.tmp"),
+        },
+    )
+
+    assert load_checkpoint_dataset(output_path, "dataset1") == {
+        "weight": 11,
+        "marker": "unchanged",
+    }
+    assert load_checkpoint_dataset(output_path, "dataset2") == {
+        "weight": 33,
+        "marker": "new",
+    }
+    metadata = load_checkpoint_metadata(output_path)
+    assert metadata["run_name"] == "champion"
+    assert metadata["composed_replacements"] == ("dataset2",)

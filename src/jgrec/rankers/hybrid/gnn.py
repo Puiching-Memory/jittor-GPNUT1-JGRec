@@ -10,8 +10,15 @@ from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log, track
 from jgrec.rankers.common.early_stop import LossEarlyStopper
+from jgrec.rankers.common.optimization import (
+    set_tower_optimizer_learning_rate,
+)
 
-from .config import GRAPH_WINDOW_NAMES, GraphTowerConfig
+from .config import (
+    GRAPH_WINDOW_NAMES,
+    GraphTowerConfig,
+    graph_window_edge_parameters,
+)
 
 GRAPH_WINDOW_FRACTIONS = (1.0, 0.35, 0.10)
 DENSE_CPU_NODE_LIMIT = 5_000
@@ -83,15 +90,21 @@ class GraphTower:
         for name, fraction in zip(GRAPH_WINDOW_NAMES, GRAPH_WINDOW_FRACTIONS, strict=True):
             edge_count = max(1, int(total_edges * fraction))
             window_edges = mapped_edges[total_edges - edge_count :]
-            edge_index = _graph_window_edges(window_edges, self.config, rng)
+            edge_index, edge_weight = _graph_window_data(
+                window_edges,
+                self.config,
+                rng,
+                window_name=name,
+            )
             if edge_index.shape[1] == 0:
                 continue
+            weighting, decay_ratio = graph_window_edge_parameters(self.config, name)
             log(
                 f"[gnn:{name}] train_edges={edge_index.shape[1]} model={self.config.model_name} "
-                f"edge_weighting={self.config.edge_weighting}",
+                f"edge_weighting={weighting} time_decay_ratio={decay_ratio:.6g}",
                 enabled=verbose,
             )
-            self._fit_one_window(name, edge_index, rng, verbose)
+            self._fit_one_window(name, edge_index, edge_weight, rng, verbose)
 
     def scores_for_queries(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
@@ -130,6 +143,7 @@ class GraphTower:
         self,
         name: str,
         edge_index: np.ndarray,
+        edge_weight: np.ndarray | None,
         rng: np.random.Generator,
         verbose: bool,
     ) -> None:
@@ -139,7 +153,7 @@ class GraphTower:
         seen_items[np.unique(edge_index[1])] = True
         self.seen_users[name] = seen_users
         self.seen_items[name] = seen_items
-        model = self._build_model(edge_index)
+        model = self._build_model(edge_index, edge_weight)
         optimizer = jt.nn.Adam(model.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay)
 
         users = edge_index[0].astype(np.int32, copy=False)
@@ -163,6 +177,14 @@ class GraphTower:
         epochs = range(1, self.config.epochs + 1)
         stopper = LossEarlyStopper(patience=self.config.early_stop_patience)
         for epoch in track(epochs, description=f"gnn:{name}", total=self.config.epochs, enabled=verbose):
+            learning_rate = set_tower_optimizer_learning_rate(
+                optimizer,
+                initial_lr=self.config.lr,
+                epoch=epoch,
+                total_epochs=self.config.epochs,
+                schedule=getattr(self.config, "lr_schedule", "constant"),
+                min_lr_ratio=getattr(self.config, "min_lr_ratio", 0.0),
+            )
             if max_edges < train_size:
                 order = rng.choice(train_size, size=max_edges, replace=False)
                 rng.shuffle(order)
@@ -189,7 +211,11 @@ class GraphTower:
 
             mean_loss = float(np.mean(losses)) if losses else 0.0
             val_loss = _compute_val_loss(model, val_users, val_pos, val_neg, self.config.batch_size)
-            log(f"[gnn:{name}] epoch={epoch} loss={mean_loss:.5f} val_loss={val_loss:.5f}", enabled=verbose)
+            log(
+                f"[gnn:{name}] epoch={epoch} lr={learning_rate:.8g} "
+                f"loss={mean_loss:.5f} val_loss={val_loss:.5f}",
+                enabled=verbose,
+            )
             stop_signal = val_loss if val_size > 0 else mean_loss
             if stopper.update(epoch, stop_signal, model):
                 log(f"[gnn:{name}] early_stop epoch={epoch} best_epoch={stopper.best_epoch} best_val={stopper.best_loss:.5f}", enabled=verbose)
@@ -201,7 +227,11 @@ class GraphTower:
             self.user_embeddings[name] = np.asarray(user_all.numpy(), dtype=np.float32)
             self.item_embeddings[name] = np.asarray(item_all.numpy(), dtype=np.float32)
 
-    def _build_model(self, edge_index: np.ndarray):
+    def _build_model(
+        self,
+        edge_index: np.ndarray,
+        edge_weight: np.ndarray | None = None,
+    ):
         model_name = self.config.model_name.lower()
         if model_name not in {"lightgcn", "xsimgcl"}:
             raise ValueError(f"unsupported graph model: {self.config.model_name}")
@@ -215,6 +245,11 @@ class GraphTower:
         from jittor_geometric.nn.models import LightGCN, XSimGCL  # noqa: PLC0415
 
         edge_var = jt.array(edge_index, dtype=jt.int32)
+        edge_weight_var = (
+            None
+            if edge_weight is None
+            else jt.array(edge_weight.astype(np.float32, copy=False))
+        )
         if model_name == "lightgcn":
             return LightGCN(
                 self.id_map.num_src,
@@ -222,6 +257,7 @@ class GraphTower:
                 self.config.embedding_dim,
                 self.config.layers,
                 edge_var,
+                edge_weight=edge_weight_var,
                 reg_weight=self.config.reg_weight,
             )
         if model_name == "xsimgcl":
@@ -231,6 +267,7 @@ class GraphTower:
                 self.config.embedding_dim,
                 self.config.layers,
                 edge_var,
+                edge_weight=edge_weight_var,
                 reg_weight=self.config.reg_weight,
                 cl_rate=self.config.cl_rate,
                 temperature=self.config.temperature,
@@ -340,8 +377,15 @@ def _mapped_edges(
 
 
 def _mapped_edge_tail_limit(config: GraphTowerConfig) -> int:
-    weighting = _normalized_edge_weighting(config.edge_weighting)
-    if weighting != "none" or config.max_graph_edges <= 0:
+    if config.max_graph_edges <= 0:
+        return 0
+    weightings = (
+        _normalized_edge_weighting(
+            graph_window_edge_parameters(config, name)[0]
+        )
+        for name in GRAPH_WINDOW_NAMES
+    )
+    if any(weighting != "none" for weighting in weightings):
         return 0
     smallest_fraction = min(GRAPH_WINDOW_FRACTIONS)
     return max(int(np.ceil(config.max_graph_edges / smallest_fraction)), config.max_graph_edges)
@@ -352,18 +396,53 @@ def _graph_window_edges(
     config: GraphTowerConfig,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    if not mapped_edges:
-        return np.empty((2, 0), dtype=np.int32)
+    edge_index, _ = _graph_window_data(
+        mapped_edges,
+        config,
+        rng,
+        window_name=None,
+    )
+    return edge_index
 
-    weighting = _normalized_edge_weighting(config.edge_weighting)
+
+def _graph_window_data(
+    mapped_edges: list[tuple[int, int, int]],
+    config: GraphTowerConfig,
+    rng: np.random.Generator,
+    *,
+    window_name: str | None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    if not mapped_edges:
+        return np.empty((2, 0), dtype=np.int32), None
+
+    if window_name is None:
+        weighting = config.edge_weighting
+        time_decay_ratio = config.time_decay_ratio
+    else:
+        weighting, time_decay_ratio = graph_window_edge_parameters(
+            config,
+            window_name,
+        )
+    weighting = _normalized_edge_weighting(weighting)
     if weighting == "none":
         edge_index = np.asarray([(src, dst) for src, dst, _ in mapped_edges], dtype=np.int32).T
-        return _tail_edges(edge_index, config.max_graph_edges)
+        return _tail_edges(edge_index, config.max_graph_edges), None
 
-    edge_index, weights = _weighted_mapped_edges(mapped_edges, weighting, config.time_decay_ratio)
+    edge_index, weights = _weighted_mapped_edges(
+        mapped_edges,
+        weighting,
+        time_decay_ratio,
+    )
     if config.max_graph_edges > 0 and edge_index.shape[1] > config.max_graph_edges:
-        edge_index = _sample_edges_by_weight(edge_index, weights, config.max_graph_edges, rng)
-    return edge_index
+        selected = _sample_edge_indices(
+            edge_index,
+            weights,
+            config.max_graph_edges,
+            rng,
+        )
+        edge_index = edge_index[:, selected]
+        weights = weights[selected]
+    return edge_index, weights.astype(np.float32, copy=False)
 
 
 def _weighted_mapped_edges(
@@ -402,15 +481,26 @@ def _sample_edges_by_weight(
     max_edges: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
+    selected = _sample_edge_indices(edge_index, weights, max_edges, rng)
+    return edge_index[:, selected]
+
+
+def _sample_edge_indices(
+    edge_index: np.ndarray,
+    weights: np.ndarray,
+    max_edges: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
     if max_edges <= 0 or edge_index.shape[1] <= max_edges:
-        return edge_index
+        return np.arange(edge_index.shape[1], dtype=np.int64)
     total_weight = float(weights.sum())
     if not np.isfinite(total_weight) or total_weight <= 0.0:
-        return _tail_edges(edge_index, max_edges)
+        start = edge_index.shape[1] - max_edges
+        return np.arange(start, edge_index.shape[1], dtype=np.int64)
     probabilities = weights / total_weight
     selected = rng.choice(edge_index.shape[1], size=max_edges, replace=False, p=probabilities)
     selected.sort()
-    return edge_index[:, selected]
+    return selected
 
 
 def _tail_edges(edge_index: np.ndarray, max_edges: int) -> np.ndarray:

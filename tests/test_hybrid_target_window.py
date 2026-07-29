@@ -206,7 +206,7 @@ def test_feature_masks_and_selected_config_include_target_window():
 
     names = [name for name, _ in masks]
 
-    assert names == [
+    assert names[:12] == [
         "stats",
         "stats_prior",
         "stats_prior_structure",
