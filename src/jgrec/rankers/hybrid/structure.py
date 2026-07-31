@@ -30,6 +30,7 @@ STRUCTURE_FEATURE_NAMES = (
     "dst_degree_log",
     "aa_log_rank",
 )
+COOCCUR_TIME_DECAY_FEATURE_NAMES = ("cooccur_time_decay_score",)
 STRUCTURE_FEATURE_DIM = len(STRUCTURE_FEATURE_NAMES)
 FULL_HISTORY_CACHE_LIMIT = 256
 FULL_COMMON_NEIGHBOR_CACHE_LIMIT = 256
@@ -160,6 +161,11 @@ class StructureFeatureTower:
             build_cooccurs=self.config.cooccur_enabled,
             cooccur_history_limit=self.config.cooccur_history_limit,
             future_only_transition_cooccur=self.config.future_only_transition_cooccur,
+            cooccur_time_decay_ratio=(
+                self.config.cooccur_time_decay_ratio
+                if self.config.cooccur_time_decay_enabled
+                else 0.0
+            ),
         )
         self.min_time = int(interactions.time[0])
         self.max_time = int(interactions.time[-1])
@@ -232,6 +238,36 @@ class StructureFeatureTower:
             force_full_preaggregate = full_history_src_counts[int(query.src)] > 1
             self._fill_query_features(query, features[row_idx], force_full_preaggregate=force_full_preaggregate)
         return features
+
+    def time_decay_features_for_queries(
+        self, queries: TestQueryArray | list[TestQuery]
+    ) -> np.ndarray:
+        if not queries:
+            return np.empty((0, 0, 1), dtype=np.float32)
+        query_array = (
+            queries if isinstance(queries, TestQueryArray) else TestQueryArray.from_queries(queries)
+        )
+        output = np.zeros(
+            (len(query_array), query_array.candidate_count, 1),
+            dtype=np.float32,
+        )
+        if not self.config.cooccur_time_decay_enabled:
+            return output
+        for row_index, (src, query_time, candidates) in enumerate(
+            zip(
+                query_array.src,
+                query_array.time,
+                query_array.candidates,
+                strict=True,
+            )
+        ):
+            output[row_index, :, 0] = self.index.cooccur_time_decay_scores(
+                int(src),
+                candidates,
+                int(query_time),
+                source_history_limit=self.config.cooccur_time_decay_source_history_limit,
+            )
+        return output
 
     def _fill_query_features(
         self,

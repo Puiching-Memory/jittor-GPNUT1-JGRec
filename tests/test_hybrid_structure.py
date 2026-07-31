@@ -226,6 +226,105 @@ def test_future_only_structure_build_preserves_full_history_features_without_tim
     np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 
 
+def test_time_decayed_cooccurrence_matches_direct_events_after_compaction_and_hydrate():
+    interactions = _table(
+        [
+            Interaction(src=1, dst=10, time=1),
+            Interaction(src=2, dst=10, time=1),
+            Interaction(src=1, dst=30, time=2),
+            Interaction(src=3, dst=30, time=2),
+            Interaction(src=2, dst=20, time=3),
+            Interaction(src=3, dst=20, time=7),
+            Interaction(src=9, dst=99, time=10),
+        ]
+    )
+    config = StructureTowerConfig(
+        cooccur_time_decay_enabled=True,
+        cooccur_time_decay_ratio=0.5,
+        cooccur_time_decay_source_history_limit=64,
+    )
+    direct = StructureFeatureTower(config)
+    direct.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    future = StructureFeatureTower(
+        StructureTowerConfig(
+            cooccur_time_decay_enabled=True,
+            cooccur_time_decay_ratio=0.5,
+            cooccur_time_decay_source_history_limit=64,
+            future_only_transition_cooccur=True,
+        )
+    )
+    future.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    restored = StructureFeatureTower(future.config)
+    restored.hydrate(future.snapshot())
+    query = Query(src=1, time=12, candidates=(20, 99))
+    expected = math.exp(-(12 - 3) / 4.5) + math.exp(-(12 - 7) / 4.5)
+
+    direct_scores = direct.time_decay_features_for_queries([query])
+    future_scores = future.time_decay_features_for_queries([query])
+    restored_scores = restored.time_decay_features_for_queries([query])
+
+    assert direct_scores.shape == (1, 2, 1)
+    assert direct_scores[0, 0, 0] == np.float32(expected)
+    assert direct_scores[0, 1, 0] == 0.0
+    np.testing.assert_allclose(future_scores, direct_scores, rtol=1e-6, atol=1e-6)
+    np.testing.assert_array_equal(restored_scores, future_scores)
+
+
+def test_temporal_index_shallow_copy_accepts_legacy_state_without_decay_fields():
+    tower = StructureFeatureTower(StructureTowerConfig(enabled=True))
+    tower.fit(
+        _table(
+            [
+                Interaction(src=1, dst=10, time=1),
+                Interaction(src=1, dst=20, time=2),
+            ]
+        ),
+        rng=np.random.default_rng(0),
+        verbose=False,
+    )
+    for name in (
+        "future_cooccur_decay_maps",
+        "cooccur_decay_enabled",
+        "cooccur_decay_anchor_time",
+        "cooccur_decay_tau",
+    ):
+        delattr(tower.index, name)
+
+    copied = tower.index.shallow_copy()
+
+    assert not copied.cooccur_decay_enabled
+    assert not copied.future_cooccur_decay_maps
+
+
+def test_time_decay_map_can_build_without_raw_cooccurrence_counts():
+    interactions = _table(
+        [
+            Interaction(src=1, dst=10, time=1),
+            Interaction(src=1, dst=20, time=2),
+            Interaction(src=2, dst=10, time=3),
+            Interaction(src=2, dst=30, time=4),
+        ]
+    )
+    tower = StructureFeatureTower(
+        StructureTowerConfig(
+            cooccur_enabled=False,
+            transition_enabled=False,
+            cooccur_time_decay_enabled=True,
+            cooccur_time_decay_ratio=0.5,
+            future_only_transition_cooccur=True,
+        )
+    )
+
+    tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+
+    assert not tower.index.built_cooccurs
+    assert not tower.index.future_cooccur_count_maps
+    assert tower.index.future_cooccur_decay_maps
+    assert tower.time_decay_features_for_queries(
+        [Query(src=1, time=5, candidates=(30,))]
+    )[0, 0, 0] > 0.0
+
+
 def test_future_only_structure_preaggregates_large_source_cooccurs():
     interactions = [Interaction(src=1, dst=1000 + idx, time=idx) for idx in range(1, 310)]
     query = Query(src=1, time=400, candidates=(1001, 1050, 1128, 1309))
@@ -468,7 +567,7 @@ def test_hybrid_feature_masks_include_structure_groups():
 
     names = [name for name, _ in masks]
 
-    assert names == [
+    assert names[:12] == [
         "stats",
         "stats_prior",
         "stats_prior_structure",

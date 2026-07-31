@@ -1,0 +1,216 @@
+{
+  "schema_version": 1,
+  "protocol": "standard_validation_plan_v1",
+  "experiment_id": "dataset2_cooccur_lift_successor_v2_duel_20260729",
+  "candidate_family": "cooccur_lift_successor_v2_duel",
+  "baseline": {
+    "baseline_id": "cooccur_lift_aux_expert_v1_promoted_champion",
+    "integration_id": "cooccur_lift_aux_expert_v1",
+    "checkpoint_sha256": "796d8d21a0c706ad11f244385b314d471d522c3b807748a54fe4ac78722f5880",
+    "selected_weight": 0.5
+  },
+  "candidate_space": [
+    {
+      "candidate_id": "cooccur_lift_full_only_v2",
+      "config_path": "docs/experiments/cooccur-lift-full-only-v2.preregistered.json",
+      "config_sha256": "82395bbbb07c17b6f6adfe5629a01ef054e07c35da68f0f28d734d7c69fa9cc0",
+      "tie_break_priority": 0
+    },
+    {
+      "candidate_id": "cooccur_lift_gap_aware_v2",
+      "config_path": "docs/experiments/cooccur-lift-gap-aware-v2.preregistered.json",
+      "config_sha256": "2b4a0bf3c61e183f28ffbda7e601b94298e0a68acbdbec8fc691fb6efb325ed3",
+      "tie_break_priority": 1
+    }
+  ],
+  "rolling_selection": {
+    "minimum_folds": 3,
+    "reserved_gate_folds": 1,
+    "aggregation": "equal_weight_fold_mean",
+    "per_fold_minimum_deltas": {
+      "mrr": 0.0,
+      "ndcg_at_10": 0.0
+    },
+    "mean_minimum_deltas": {
+      "mrr": 0.0,
+      "hit_at_1": 0.0,
+      "hit_at_3": 0.0,
+      "hit_at_10": 0.0,
+      "ndcg_at_10": 0.0
+    },
+    "mean_maximum_deltas": {
+      "mean_rank": 0.0
+    },
+    "minimum_improved_minus_worsened": 1,
+    "selection_order": [
+      "maximum_mean_fold_mrr_delta",
+      "maximum_worst_fold_mrr_delta",
+      "maximum_mean_fold_ndcg_at_10_delta",
+      "minimum_tie_break_priority"
+    ]
+  },
+  "temporal_scope": {
+    "kind": "time_local",
+    "short_window_seconds": 17038080
+  },
+  "far_horizon_validation": {
+    "protocol": "standard_far_horizon_validation_v1",
+    "eligibility_rule": "near_non_decreasing_and_gapped_strict_improvement",
+    "minimum_gapped_folds": 3,
+    "gapped_fold_aggregation": "equal_weight_fold_mean",
+    "deployment_aggregation": "near_collapsed_mixture",
+    "deployment_collapsed_fraction": 0.39971972363446745,
+    "gapped_cache_contract": {
+      "encoder_context_rows": [
+        0,
+        1137757
+      ],
+      "union_training_interaction_rows": [
+        1359708,
+        1519512
+      ],
+      "candidate_count": 100,
+      "candidate_seed": 60,
+      "internal_reference_time_max": 1255824000,
+      "external_rows_consumed": false,
+      "observation_and_availability_times_separated": true
+    },
+    "gapped_fold_specs": [
+      {
+        "fold_id": "gapped-p75",
+        "deployment_horizon_quantile": 0.75,
+        "minimum_gap_seconds": 21686400,
+        "gap_seconds": 21686400,
+        "train_interaction_rows": [
+          1437101,
+          1517010
+        ],
+        "cache_train_rows": [
+          77393,
+          157302
+        ],
+        "train_time_max": 1222387200,
+        "score_interaction_rows": [
+          1766169,
+          1800889
+        ],
+        "cache_score_rows": [
+          159804,
+          194524
+        ],
+        "score_time_min": 1244073600,
+        "score_time_max": 1246752000
+      },
+      {
+        "fold_id": "gapped-p90",
+        "deployment_horizon_quantile": 0.9,
+        "minimum_gap_seconds": 26611200,
+        "gap_seconds": 26611200,
+        "train_interaction_rows": [
+          1399367,
+          1518183
+        ],
+        "cache_train_rows": [
+          39659,
+          158475
+        ],
+        "train_time_max": 1222473600,
+        "score_interaction_rows": [
+          1832200,
+          1874240
+        ],
+        "cache_score_rows": [
+          194524,
+          236564
+        ],
+        "score_time_min": 1249084800,
+        "score_time_max": 1252022400
+      },
+      {
+        "fold_id": "gapped-p100",
+        "deployment_horizon_quantile": 1.0,
+        "minimum_gap_seconds": 30153600,
+        "gap_seconds": 30153600,
+        "train_interaction_rows": [
+          1359708,
+          1519512
+        ],
+        "cache_train_rows": [
+          0,
+          159804
+        ],
+        "train_time_max": 1222560000,
+        "score_interaction_rows": [
+          1881895,
+          1922366
+        ],
+        "cache_score_rows": [
+          236564,
+          277035
+        ],
+        "score_time_min": 1252713600,
+        "score_time_max": 1255824000
+      }
+    ],
+    "gapped_per_fold_minimum_deltas": {
+      "mrr": 0.0,
+      "ndcg_at_10": 0.0
+    },
+    "gapped_strictly_increasing_metrics": [
+      "mrr"
+    ],
+    "minimum_deployment_improved_minus_worsened_rate": 0.0,
+    "selection_order": [
+      "maximum_mean_gapped_mrr_delta",
+      "maximum_worst_gapped_mrr_delta",
+      "maximum_mean_near_mrr_delta",
+      "minimum_tie_break_priority"
+    ],
+    "zero_short_counterfactual": {
+      "enabled": true,
+      "arm_id": "zero_short",
+      "participates_in_selection": false
+    }
+  },
+  "external_gate": {
+    "holdout_id": "dataset2_external_20k_v1",
+    "lineage_sha256": "b08f07610f59905ec2d1d1366c4c8c188a80a2e1621e440361d1b70ebb9c18d7",
+    "deployment_horizon_seconds": 40435200,
+    "minimum_horizon_seconds": 40435200,
+    "minimum_start_gap_seconds": 0,
+    "strictly_increasing_metrics": [
+      "mrr"
+    ],
+    "minimum_deltas": {
+      "mrr": 0.0,
+      "hit_at_1": 0.0,
+      "hit_at_3": 0.0,
+      "hit_at_10": 0.0,
+      "ndcg_at_10": 0.0
+    },
+    "maximum_deltas": {
+      "mean_rank": 0.0
+    },
+    "minimum_improved_minus_worsened": 1,
+    "interpretation_policy": {
+      "decision_role": "safety_gate_only",
+      "effect_size_estimation_authorized": false,
+      "calibration_discount_factor": 19.5
+    }
+  },
+  "rescan_policy": {
+    "selected_weight": 0.5,
+    "v1_family_weight_rescan_authorized": false,
+    "feature_rescan_authorized": false,
+    "seed_rescan_authorized": false,
+    "capacity_rescan_authorized": false
+  },
+  "remaining_transport_risk": {
+    "excluded_by_current_audit": "Marginal candidate-popularity distribution shift.",
+    "not_excluded": [
+      "source-conditioned distribution shift",
+      "source-candidate joint-structure shift"
+    ],
+    "next_audit_trigger": "A successor passes every gapped fold but shrinks again online."
+  }
+}

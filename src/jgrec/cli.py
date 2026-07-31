@@ -28,9 +28,13 @@ ModelName = Literal["hybrid", "hybrid-heuristic", "craft", "temporal-graph"]
 SelectionMetric = Literal["ap", "mrr"]
 GNNModel = Literal["xsimgcl", "lightgcn"]
 FusionMode = Literal["mlp", "lgbm", "ensemble"]
+ExpertBlendMode = Literal["probability", "temperature", "rrf"]
 GNNEdgeWeighting = Literal["none", "repeat", "time_decay"]
 CandidateProtocol = Literal["random", "test_like"]
 CandidateRecentFeatureGroup = Literal["none", "recency_rank"]
+TwoTowerObjective = Literal["bce", "listwise"]
+TwoTowerEarlyStopMetric = Literal["loss", "mrr"]
+TowerLRSchedule = Literal["constant", "cosine"]
 
 
 @dataclass(frozen=True)
@@ -51,16 +55,24 @@ class CLIConfig:
     max_val_events: int = 5_000
     supervised_feature_batch_size: int = 4096
     supervised_feature_memmap: bool = False
+    supervised_feature_cache_dir: Path | None = None
     num_negatives: int = 31
+    train_num_negatives: int | None = None
+    val_num_negatives: int | None = None
     max_fit_events: int = 0
     epochs: int = 15
     train_batch_size: int = 512
     lr: float = 0.001
     weight_decay: float = 0.0
-    selection_metric: SelectionMetric = "ap"
+    selection_metric: SelectionMetric = "mrr"
     early_stop: int = 3
     fusion_hidden_dim: int = 64
-    fusion_mode: FusionMode = "mlp"
+    fusion_mode: FusionMode = "ensemble"
+    fusion_context_transform_version: int = 1
+    frozen_fusion_feature_candidate: str | None = None
+    frozen_ensemble_mlp_weight: float | None = None
+    expert_blend_mode: ExpertBlendMode = "rrf"
+    expert_rrf_k: float = 60.0
     disable_gnn: bool = False
     gnn_model: GNNModel = "xsimgcl"
     gnn_edge_weighting: GNNEdgeWeighting = "none"
@@ -73,6 +85,9 @@ class CLIConfig:
     gnn_max_graph_edges: int = 0
     gnn_max_train_edges: int = 40_000
     gnn_lr: float = 0.001
+    gnn_lr_schedule: TowerLRSchedule = "constant"
+    gnn_min_lr_ratio: float = 0.0
+    gnn_weight_decay: float | None = None
     gnn_reg_weight: float = 1e-5
     gnn_cl_rate: float = 1e-4
     disable_seq: bool = False
@@ -86,6 +101,10 @@ class CLIConfig:
     seq_layers: int = 2
     seq_heads: int = 4
     seq_dropout: float = 0.2
+    seq_lr: float | None = None
+    seq_lr_schedule: TowerLRSchedule = "constant"
+    seq_min_lr_ratio: float = 0.0
+    seq_weight_decay: float | None = None
     disable_two_tower: bool = False
     two_tower_embedding_dim: int = 64
     two_tower_hidden_dim: int = 64
@@ -94,6 +113,17 @@ class CLIConfig:
     two_tower_batch_size: int = 512
     two_tower_score_batch_size: int = 2048
     two_tower_max_samples: int = 50_000
+    two_tower_num_negatives: int | None = None
+    two_tower_test_candidate_negative_ratio: float | None = None
+    two_tower_objective: TwoTowerObjective = "bce"
+    two_tower_early_stop_metric: TwoTowerEarlyStopMetric = "loss"
+    two_tower_lr: float | None = None
+    two_tower_lr_schedule: TowerLRSchedule = "constant"
+    two_tower_min_lr_ratio: float = 0.0
+    two_tower_weight_decay: float | None = None
+    two_tower_in_batch_negatives: bool = False
+    two_tower_in_batch_negative_weight: float = 1.0
+    two_tower_in_batch_temperature: float = 1.0
     hard_negative_ratio: float = 0.5
     popular_negative_ratio: float = 0.25
     negative_sampling_workers: int = 0
@@ -135,6 +165,10 @@ class CLIConfig:
     source_profile_max_samples: int = 100_000
     source_profile_window_size: int = 16
     source_profile_recent_k: int = 32
+    source_profile_lr: float | None = None
+    source_profile_lr_schedule: TowerLRSchedule = "constant"
+    source_profile_min_lr_ratio: float = 0.0
+    source_profile_weight_decay: float | None = None
     source_profile_predict_history_limit: int = 0
     prediction_cache_max_mb: int = 512
     save_checkpoint: Path | None = None
@@ -413,6 +447,45 @@ def _ranker_config(args: CLIConfig):
         )
     return TrainingConfig(
         **_hybrid_config_kwargs(args),
+        supervised_feature_cache_dir=args.supervised_feature_cache_dir,
+        train_num_negatives=args.train_num_negatives,
+        val_num_negatives=args.val_num_negatives,
+        source_profile_lr=args.source_profile_lr,
+        source_profile_lr_schedule=args.source_profile_lr_schedule,
+        source_profile_min_lr_ratio=args.source_profile_min_lr_ratio,
+        source_profile_weight_decay=args.source_profile_weight_decay,
+        gnn_lr_schedule=args.gnn_lr_schedule,
+        gnn_min_lr_ratio=args.gnn_min_lr_ratio,
+        gnn_weight_decay=args.gnn_weight_decay,
+        seq_lr=args.seq_lr,
+        seq_lr_schedule=args.seq_lr_schedule,
+        seq_min_lr_ratio=args.seq_min_lr_ratio,
+        seq_weight_decay=args.seq_weight_decay,
+        two_tower_num_negatives=args.two_tower_num_negatives,
+        two_tower_test_candidate_negative_ratio=args.two_tower_test_candidate_negative_ratio,
+        two_tower_objective=args.two_tower_objective,
+        two_tower_early_stop_metric=args.two_tower_early_stop_metric,
+        two_tower_lr=args.two_tower_lr,
+        two_tower_lr_schedule=args.two_tower_lr_schedule,
+        two_tower_min_lr_ratio=args.two_tower_min_lr_ratio,
+        two_tower_weight_decay=args.two_tower_weight_decay,
+        two_tower_in_batch_negatives=args.two_tower_in_batch_negatives,
+        two_tower_in_batch_negative_weight=(
+            args.two_tower_in_batch_negative_weight
+        ),
+        two_tower_in_batch_temperature=(
+            args.two_tower_in_batch_temperature
+        ),
+        fusion_context_transform_version=(
+            args.fusion_context_transform_version
+        ),
+        frozen_fusion_feature_candidate=(
+            args.frozen_fusion_feature_candidate
+        ),
+        frozen_ensemble_mlp_weight=args.frozen_ensemble_mlp_weight,
+        refit_full=args.refit_full,
+        expert_blend_mode=args.expert_blend_mode,
+        expert_rrf_k=args.expert_rrf_k,
     )
 
 
@@ -488,6 +561,7 @@ def _config_digest(args: CLIConfig, config) -> str:
         "save_checkpoint",
         "load_checkpoint",
         "prediction_cache_max_mb",
+        "supervised_feature_cache_dir",
     ):
         if isinstance(cli_payload, dict):
             cli_payload.pop(operational_key, None)
@@ -495,6 +569,7 @@ def _config_digest(args: CLIConfig, config) -> str:
     if isinstance(ranker_payload, dict):
         ranker_payload.pop("encoder_state_cache_enabled", None)
         ranker_payload.pop("prediction_cache_max_bytes", None)
+        ranker_payload.pop("supervised_feature_cache_dir", None)
     payload = {
         "cli": cli_payload,
         "ranker": ranker_payload,
@@ -527,10 +602,18 @@ def _run_panel(run_dir: Path, zip_path: Path, args: CLIConfig, config) -> Panel:
     table.add_row("archive", str(zip_path))
     table.add_row("model", args.model)
     table.add_row("device", "cpu" if args.cpu else "cuda")
-    table.add_row("selection_metric", getattr(config, "selection_metric", "ap"))
+    table.add_row("selection_metric", getattr(config, "selection_metric", "mrr"))
     table.add_row("early_stop", str(getattr(config, "early_stop_patience", args.early_stop)))
     table.add_row("limit_rows", str(args.limit_rows) if args.limit_rows is not None else "full")
     if args.model == "hybrid":
+        table.add_row("fusion_mode", config.fusion_mode)
+        table.add_row(
+            "fusion_context_transform_version",
+            str(config.fusion_context_transform_version),
+        )
+        table.add_row("expert_blend_mode", config.expert_blend_mode)
+        table.add_row("expert_rrf_k", f"{config.expert_rrf_k:g}")
+        table.add_row("refit_full", "on" if config.refit_full else "off")
         table.add_row("gnn", config.gnn_model if config.gnn_enabled else "off")
         table.add_row("gnn_edge_weighting", config.gnn_edge_weighting if config.gnn_enabled else "off")
         table.add_row("auto_strategy", "on" if config.auto_strategy_enabled else "off")
@@ -565,8 +648,15 @@ def _run_panel(run_dir: Path, zip_path: Path, args: CLIConfig, config) -> Panel:
             str(config.source_profile_predict_history_limit) if config.source_profile_predict_history_limit else "off",
         )
         table.add_row("max_fit_events", str(config.max_fit_events) if config.max_fit_events else "full")
+        table.add_row("num_negatives", str(config.num_negatives))
+        table.add_row("train_num_negatives", str(config.resolved_train_num_negatives()))
+        table.add_row("val_num_negatives", str(config.resolved_val_num_negatives()))
         table.add_row("supervised_feature_batch_size", str(config.supervised_feature_batch_size))
         table.add_row("supervised_feature_memmap", "on" if config.supervised_feature_memmap else "off")
+        table.add_row(
+            "supervised_feature_cache",
+            str(config.supervised_feature_cache_dir) if config.supervised_feature_cache_dir is not None else "off",
+        )
         table.add_row("prediction_cache_max_mb", str(args.prediction_cache_max_mb))
         table.add_row("negative_sampling_workers", str(config.negative_sampling_workers))
     elif args.model == "temporal-graph":

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import os
 import tempfile
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from jgrec.contest_checkpoint import get_model_state, set_model_state
+from jgrec.core.io import read_test_queries
 from jgrec.core.memory import log_event, log_memory, release_memory
 from jgrec.core.types import (
     FitContext,
@@ -20,6 +21,11 @@ from jgrec.core.types import (
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
+from jgrec.service_normalizer import (
+    StreamingFeatureNormalizer,
+    normalizer_drift_report,
+    replace_result_normalizer,
+)
 
 from .auto_strategy import (
     DatasetProfile,
@@ -53,11 +59,20 @@ from .sampling import (
     sample_mixed_negatives_batch,
 )
 from .stats import STAT_FEATURE_NAMES, TemporalStats
-from .structure import STRUCTURE_FEATURE_NAMES, StructureFeatureTower
+from .structure import (
+    COOCCUR_TIME_DECAY_FEATURE_NAMES,
+    STRUCTURE_FEATURE_NAMES,
+    StructureFeatureTower,
+)
+from .supervised_feature_cache import SupervisedFeatureCache, supervised_feature_cache_key
 
 if TYPE_CHECKING:
+    from .candidate_set_transformer import CandidateSetEnsembleCheckpoint
+    from .expert_fusion import ExpertBlendCalibration
     from .fusion import FusionMLP, FusionResult
     from .fusion_lgbm import LGBMFusionResult
+    from .oof_models import PureJittorOOFStackingCheckpoint
+    from .segment_fusion import SegmentGateResult
 
 _FEATURE_MEMMAP_TEMP_FILES: list[Any] = []
 FEATURE_PROFILE_INTERVAL = 10_000
@@ -127,6 +142,9 @@ class _DisabledCandidatePriorTower:
     def features_for_query_array(self, queries: TestQueryArray, stat_features: np.ndarray) -> np.ndarray:
         return _zero_scores_for_array(queries, len(CANDIDATE_PRIOR_FEATURE_NAMES))
 
+    def tie_break_prior_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
+        return np.zeros(queries.candidates.shape, dtype=np.float64)
+
 
 class _DisabledTargetWindowTower:
     def fit(self, interactions: InteractionTable) -> None:
@@ -180,12 +198,21 @@ class HybridFeatureEncoder:
         self.stats = TemporalStats(recent_window=recent_window)
         self.candidate_prior = _build_candidate_prior(candidate_prior_config or CandidatePriorConfig(enabled=False))
         self.target_window = _build_target_window(target_window_config or TargetWindowConfig(enabled=False))
-        self.structure = _build_structure_tower(structure_config or StructureTowerConfig(enabled=False))
+        resolved_structure_config = structure_config or StructureTowerConfig(enabled=False)
+        self.structure = _build_structure_tower(resolved_structure_config)
+        self._cooccur_time_decay_enabled = bool(
+            resolved_structure_config.enabled
+            and resolved_structure_config.cooccur_time_decay_enabled
+        )
         self.source_profile = _build_source_profile_tower(
             id_map,
             source_profile_config or SourceProfileConfig(enabled=False),
         )
-        self.two_tower = _build_two_tower(id_map, two_tower_config or TwoTowerConfig(enabled=False))
+        self.two_tower = _build_two_tower(
+            id_map,
+            two_tower_config or TwoTowerConfig(enabled=False),
+            dataset_profile,
+        )
         self.graph = _build_graph_tower(id_map, graph_config)
         self.sequence = _build_sequence_tower(id_map, sequence_config)
         self.verbose = False
@@ -211,6 +238,11 @@ class HybridFeatureEncoder:
             + TWO_TOWER_FEATURE_NAMES
             + GRAPH_WINDOW_NAMES
             + SEQUENCE_FEATURE_NAMES
+            + (
+                COOCCUR_TIME_DECAY_FEATURE_NAMES
+                if self._cooccur_time_decay_enabled
+                else ()
+            )
         )
 
     @property
@@ -385,19 +417,19 @@ class HybridFeatureEncoder:
             log_event(f"[feature-profile] first_batch rows={rows} sequence_done elapsed={elapsed:.1f}s", enabled=True)
             log_event(f"[feature-profile] first_batch rows={rows} concat_start", enabled=True)
         start = perf_counter()
-        features = np.concatenate(
-            [
-                stat_features,
-                candidate_prior_features,
-                target_window_features,
-                structure_features,
-                source_profile_features,
-                two_tower_features,
-                graph_features,
-                sequence_features,
-            ],
-            axis=2,
-        ).astype(np.float32, copy=False)
+        feature_parts = [
+            stat_features,
+            candidate_prior_features,
+            target_window_features,
+            structure_features,
+            source_profile_features,
+            two_tower_features,
+            graph_features,
+            sequence_features,
+        ]
+        if self._cooccur_time_decay_enabled:
+            feature_parts.append(self.structure.time_decay_features_for_queries(queries))
+        features = np.concatenate(feature_parts, axis=2).astype(np.float32, copy=False)
         elapsed = perf_counter() - start
         self._profile_elapsed["concat"] += elapsed
         if detail_profile:
@@ -481,12 +513,20 @@ def _build_sequence_tower(id_map: NodeIdMap, config: SequenceTowerConfig) -> Any
     return SequenceTower(id_map=id_map, config=config)
 
 
-def _build_two_tower(id_map: NodeIdMap, config: TwoTowerConfig) -> Any:
+def _build_two_tower(
+    id_map: NodeIdMap,
+    config: TwoTowerConfig,
+    dataset_profile: DatasetProfile | None = None,
+) -> Any:
     if not config.enabled:
         return _DisabledTwoTower()
     from .two_tower import TwoTower  # noqa: PLC0415
 
-    return TwoTower(id_map=id_map, config=config)
+    return TwoTower(
+        id_map=id_map,
+        config=config,
+        dataset_profile=dataset_profile,
+    )
 
 
 def _zero_scores(queries: TestQueryArray | list[TestQuery], feature_count: int) -> np.ndarray:
@@ -531,6 +571,25 @@ class TemporalHybridRanker:
         self.fusion: FusionMLP | None = None
         self.fusion_result: FusionResult | None = None
         self.lgbm_result: LGBMFusionResult | None = None
+        self.segment_gate_result: SegmentGateResult | None = None
+        self.setwise_fusion: FusionMLP | None = None
+        self.setwise_fusion_result: FusionResult | None = None
+        self._setwise_hidden_dim = 64
+        self.time_ramp_setwise_fusion: FusionMLP | None = None
+        self.time_ramp_setwise_result: FusionResult | None = None
+        self._time_ramp_setwise_hidden_dim = 64
+        self.time_ramp_config: dict[str, float] | None = None
+        self.conservative_window_fusions: dict[str, FusionMLP] = {}
+        self.conservative_window_results: dict[str, FusionResult] = {}
+        self.conservative_window_hidden_dims: dict[str, int] = {}
+        self.conservative_window_config: dict[str, float] | None = None
+        self.multi_interest_proxy_state: dict[str, np.ndarray] | None = None
+        self.candidate_set_ensemble: (
+            CandidateSetEnsembleCheckpoint | None
+        ) = None
+        self.oof_stacking: PureJittorOOFStackingCheckpoint | None = None
+        self.cooccur_lift_auxiliary_state = None
+        self.cooccur_lift_auxiliary_model = None
         self.training_report: TrainingReport | None = None
         self.feature_names: tuple[str, ...] = ()
         self._fusion_hidden_dim = 64
@@ -540,8 +599,31 @@ class TemporalHybridRanker:
     def snapshot(self) -> dict[str, Any]:
         if self.config is None or self.id_map is None or self.encoder is None:
             raise RuntimeError("ranker is not fitted")
-        if self.fusion is None or self.fusion_result is None:
+        if (
+            self.oof_stacking is None
+            and
+            self.candidate_set_ensemble is None
+            and (self.fusion is None or self.fusion_result is None)
+        ):
             raise RuntimeError("ranker fusion is not fitted")
+        oof_stacking_state = None
+        if self.oof_stacking is not None:
+            from .oof_models import (  # noqa: PLC0415
+                snapshot_pure_jittor_oof_stacking,
+            )
+
+            oof_stacking_state = snapshot_pure_jittor_oof_stacking(
+                self.oof_stacking
+            )
+        candidate_set_state = None
+        if self.candidate_set_ensemble is not None:
+            from .candidate_set_transformer import (  # noqa: PLC0415
+                snapshot_candidate_set_ensemble,
+            )
+
+            candidate_set_state = snapshot_candidate_set_ensemble(
+                self.candidate_set_ensemble
+            )
         return {
             "config": self.config,
             "id_map": {
@@ -553,15 +635,52 @@ class TemporalHybridRanker:
             "fusion_hidden_dim": self._fusion_hidden_dim,
             "dataset_profile": self.dataset_profile,
             "encoder": self.encoder.snapshot(),
-            "fusion_state": get_model_state(self.fusion),
+            "fusion_state": (
+                get_model_state(self.fusion)
+                if self.fusion is not None
+                else None
+            ),
             "fusion_result": self.fusion_result,
             "lgbm_result": self.lgbm_result,
+            "segment_gate_result": self.segment_gate_result,
+            "setwise_fusion_state": (
+                get_model_state(self.setwise_fusion)
+                if self.setwise_fusion is not None
+                else None
+            ),
+            "setwise_fusion_result": self.setwise_fusion_result,
+            "setwise_hidden_dim": self._setwise_hidden_dim,
+            "time_ramp_setwise_fusion_state": (
+                get_model_state(self.time_ramp_setwise_fusion)
+                if self.time_ramp_setwise_fusion is not None
+                else None
+            ),
+            "time_ramp_setwise_result": self.time_ramp_setwise_result,
+            "time_ramp_setwise_hidden_dim": (
+                self._time_ramp_setwise_hidden_dim
+            ),
+            "time_ramp_config": self.time_ramp_config,
+            "conservative_window_fusion_states": {
+                name: get_model_state(model)
+                for name, model in self.conservative_window_fusions.items()
+            },
+            "conservative_window_results": (
+                self.conservative_window_results
+            ),
+            "conservative_window_hidden_dims": (
+                self.conservative_window_hidden_dims
+            ),
+            "conservative_window_config": self.conservative_window_config,
+            "multi_interest_proxy_state": self.multi_interest_proxy_state,
+            "cooccur_lift_auxiliary_state": (
+                self.cooccur_lift_auxiliary_state
+            ),
+            "oof_stacking_state": oof_stacking_state,
+            "candidate_set_ensemble_state": candidate_set_state,
             "training_report": self.training_report,
         }
 
     def hydrate(self, snapshot: dict[str, Any]) -> None:
-        from .fusion import FusionMLP  # noqa: PLC0415
-
         self.config = snapshot["config"]
         self.recent_window = int(snapshot["recent_window"])
         self.feature_names = tuple(snapshot["feature_names"])
@@ -589,14 +708,338 @@ class TemporalHybridRanker:
             structure_config=self.config.structure_config(),
         )
         self.encoder.hydrate(snapshot["encoder"])
+        cooccur_lift_state = snapshot.get(
+            "cooccur_lift_auxiliary_state"
+        )
+        if cooccur_lift_state is None:
+            self.cooccur_lift_auxiliary_state = None
+            self.cooccur_lift_auxiliary_model = None
+        else:
+            from .cooccur_lift_checkpoint import (  # noqa: PLC0415
+                CooccurLiftAuxiliaryState,
+                build_cooccur_lift_auxiliary_model,
+            )
+
+            if not isinstance(
+                cooccur_lift_state,
+                CooccurLiftAuxiliaryState,
+            ):
+                raise TypeError(
+                    "checkpoint cooccur-lift auxiliary state is invalid"
+                )
+            self.cooccur_lift_auxiliary_state = cooccur_lift_state
+            self.cooccur_lift_auxiliary_model = (
+                build_cooccur_lift_auxiliary_model(
+                    cooccur_lift_state
+                )
+            )
+        oof_stacking_state = snapshot.get("oof_stacking_state")
+        if oof_stacking_state is not None:
+            if self.cooccur_lift_auxiliary_state is not None:
+                raise ValueError(
+                    "cooccur-lift auxiliary does not support OOF stacking"
+                )
+            from .oof_models import (  # noqa: PLC0415
+                hydrate_pure_jittor_oof_stacking,
+            )
+
+            stacking = hydrate_pure_jittor_oof_stacking(
+                oof_stacking_state
+            )
+            self._validate_oof_stacking_feature_contract(stacking)
+            self.oof_stacking = stacking
+            self.candidate_set_ensemble = None
+            self.fusion = None
+            self.fusion_result = None
+            self.lgbm_result = None
+            self.segment_gate_result = None
+            self.setwise_fusion = None
+            self.setwise_fusion_result = None
+            self.time_ramp_setwise_fusion = None
+            self.time_ramp_setwise_result = None
+            self.time_ramp_config = None
+            self.conservative_window_fusions = {}
+            self.conservative_window_results = {}
+            self.conservative_window_hidden_dims = {}
+            self.conservative_window_config = None
+            self.multi_interest_proxy_state = None
+            self.training_report = snapshot.get("training_report")
+            return
+        candidate_set_state = snapshot.get(
+            "candidate_set_ensemble_state"
+        )
+        if candidate_set_state is not None:
+            if self.cooccur_lift_auxiliary_state is not None:
+                raise ValueError(
+                    "cooccur-lift auxiliary does not support candidate-set "
+                    "ensembles"
+                )
+            from .candidate_set_transformer import (  # noqa: PLC0415
+                hydrate_candidate_set_ensemble,
+            )
+
+            ensemble = hydrate_candidate_set_ensemble(
+                candidate_set_state
+            )
+            self._validate_candidate_set_feature_contract(ensemble)
+            self.candidate_set_ensemble = ensemble
+            self.oof_stacking = None
+            self.fusion = None
+            self.fusion_result = None
+            self.lgbm_result = None
+            self.segment_gate_result = None
+            self.setwise_fusion = None
+            self.setwise_fusion_result = None
+            self.time_ramp_setwise_fusion = None
+            self.time_ramp_setwise_result = None
+            self.time_ramp_config = None
+            self.conservative_window_fusions = {}
+            self.conservative_window_results = {}
+            self.conservative_window_hidden_dims = {}
+            self.conservative_window_config = None
+            self.multi_interest_proxy_state = None
+            self.training_report = snapshot.get("training_report")
+            return
+
+        from .fusion import FusionMLP  # noqa: PLC0415
+
+        self.candidate_set_ensemble = None
+        self.oof_stacking = None
         self.fusion_result = snapshot["fusion_result"]
         self.fusion = FusionMLP(
-            input_dim=len(self.fusion_result.feature_indices),
+            input_dim=_fusion_result_input_dim(self.fusion_result),
             hidden_dim=self._fusion_hidden_dim,
         )
         set_model_state(self.fusion, snapshot["fusion_state"])
         self.lgbm_result = snapshot.get("lgbm_result")
+        self.segment_gate_result = snapshot.get("segment_gate_result")
+        self.setwise_fusion_result = snapshot.get("setwise_fusion_result")
+        self._setwise_hidden_dim = int(snapshot.get("setwise_hidden_dim", 64))
+        proxy_state = snapshot.get("multi_interest_proxy_state")
+        self.multi_interest_proxy_state = (
+            {
+                str(key): np.asarray(value, dtype=np.float32)
+                for key, value in proxy_state.items()
+            }
+            if proxy_state is not None
+            else None
+        )
+        setwise_state = snapshot.get("setwise_fusion_state")
+        if self.setwise_fusion_result is None:
+            if setwise_state is not None:
+                raise ValueError(
+                    "checkpoint has Setwise state without a Setwise result"
+                )
+            self.setwise_fusion = None
+        else:
+            if setwise_state is None:
+                raise ValueError(
+                    "checkpoint has a Setwise result without model state"
+                )
+            self.setwise_fusion = FusionMLP(
+                input_dim=_fusion_result_input_dim(
+                    self.setwise_fusion_result
+                ),
+                hidden_dim=self._setwise_hidden_dim,
+            )
+            set_model_state(self.setwise_fusion, setwise_state)
+        self.time_ramp_setwise_result = snapshot.get(
+            "time_ramp_setwise_result"
+        )
+        self._time_ramp_setwise_hidden_dim = int(
+            snapshot.get("time_ramp_setwise_hidden_dim", 64)
+        )
+        self.time_ramp_config = snapshot.get("time_ramp_config")
+        time_ramp_state = snapshot.get("time_ramp_setwise_fusion_state")
+        if (
+            self.time_ramp_setwise_result is None
+            and time_ramp_state is None
+            and self.time_ramp_config is None
+        ):
+            self.time_ramp_setwise_fusion = None
+        elif (
+            self.time_ramp_setwise_result is None
+            or time_ramp_state is None
+            or self.time_ramp_config is None
+        ):
+            raise ValueError("checkpoint has an incomplete time-ramp expert")
+        else:
+            power = float(self.time_ramp_config["power"])
+            minimum_time = float(self.time_ramp_config["minimum_time"])
+            maximum_time = float(self.time_ramp_config["maximum_time"])
+            if (
+                not np.isfinite(power)
+                or power <= 0.0
+                or not np.isfinite(minimum_time)
+                or not np.isfinite(maximum_time)
+                or maximum_time <= minimum_time
+            ):
+                raise ValueError("checkpoint has an invalid time-ramp config")
+            self.time_ramp_config = {
+                "power": power,
+                "minimum_time": minimum_time,
+                "maximum_time": maximum_time,
+            }
+            self.time_ramp_setwise_fusion = FusionMLP(
+                input_dim=_fusion_result_input_dim(
+                    self.time_ramp_setwise_result
+                ),
+                hidden_dim=self._time_ramp_setwise_hidden_dim,
+            )
+            set_model_state(
+                self.time_ramp_setwise_fusion,
+                time_ramp_state,
+            )
+        conservative_states = snapshot.get(
+            "conservative_window_fusion_states",
+            {},
+        )
+        self.conservative_window_results = snapshot.get(
+            "conservative_window_results",
+            {},
+        )
+        self.conservative_window_hidden_dims = {
+            str(name): int(hidden_dim)
+            for name, hidden_dim in snapshot.get(
+                "conservative_window_hidden_dims",
+                {},
+            ).items()
+        }
+        self.conservative_window_config = snapshot.get(
+            "conservative_window_config"
+        )
+        conservative_keys = set(conservative_states)
+        if (
+            conservative_keys != set(self.conservative_window_results)
+            or conservative_keys != set(self.conservative_window_hidden_dims)
+        ):
+            raise ValueError(
+                "checkpoint has incomplete conservative window experts"
+            )
+        if self.conservative_window_config is None:
+            if conservative_keys:
+                raise ValueError(
+                    "checkpoint has conservative experts without config"
+                )
+            self.conservative_window_fusions = {}
+        else:
+            alpha = float(self.conservative_window_config["alpha"])
+            if (
+                not np.isfinite(alpha)
+                or not 0.0 < alpha <= 1.0
+                or not conservative_keys
+                or self.setwise_fusion is None
+                or self.setwise_fusion_result is None
+            ):
+                raise ValueError(
+                    "checkpoint has an invalid conservative window config"
+                )
+            self.conservative_window_config = {"alpha": alpha}
+            self.conservative_window_fusions = {}
+            for name in sorted(conservative_keys):
+                result = self.conservative_window_results[name]
+                model = FusionMLP(
+                    input_dim=_fusion_result_input_dim(result),
+                    hidden_dim=self.conservative_window_hidden_dims[name],
+                )
+                set_model_state(model, conservative_states[name])
+                self.conservative_window_fusions[name] = model
         self.training_report = snapshot.get("training_report")
+
+    def install_candidate_set_ensemble(
+        self,
+        ensemble: CandidateSetEnsembleCheckpoint,
+    ) -> None:
+        """Replace all legacy trainable rerankers with a pure-Jittor head."""
+        if self.config is None or self.id_map is None or self.encoder is None:
+            raise RuntimeError(
+                "candidate-set ensemble requires a fitted encoder"
+            )
+        from .candidate_set_transformer import (  # noqa: PLC0415
+            snapshot_candidate_set_ensemble,
+        )
+
+        self._validate_candidate_set_feature_contract(ensemble)
+        snapshot_candidate_set_ensemble(ensemble)
+        self.candidate_set_ensemble = ensemble
+        self.oof_stacking = None
+        self.fusion = None
+        self.fusion_result = None
+        self.lgbm_result = None
+        self.segment_gate_result = None
+        self.setwise_fusion = None
+        self.setwise_fusion_result = None
+        self.time_ramp_setwise_fusion = None
+        self.time_ramp_setwise_result = None
+        self.time_ramp_config = None
+        self.conservative_window_fusions = {}
+        self.conservative_window_results = {}
+        self.conservative_window_hidden_dims = {}
+        self.conservative_window_config = None
+        self.multi_interest_proxy_state = None
+
+    def install_pure_jittor_oof_stacking(
+        self,
+        stacking: PureJittorOOFStackingCheckpoint,
+    ) -> None:
+        """Replace legacy rerankers with a pure-Jittor OOF stack."""
+        if self.config is None or self.id_map is None or self.encoder is None:
+            raise RuntimeError(
+                "OOF stacking requires a fitted encoder"
+            )
+        from .oof_models import (  # noqa: PLC0415
+            snapshot_pure_jittor_oof_stacking,
+        )
+
+        self._validate_oof_stacking_feature_contract(stacking)
+        snapshot_pure_jittor_oof_stacking(stacking)
+        self.oof_stacking = stacking
+        self.candidate_set_ensemble = None
+        self.fusion = None
+        self.fusion_result = None
+        self.lgbm_result = None
+        self.segment_gate_result = None
+        self.setwise_fusion = None
+        self.setwise_fusion_result = None
+        self.time_ramp_setwise_fusion = None
+        self.time_ramp_setwise_result = None
+        self.time_ramp_config = None
+        self.conservative_window_fusions = {}
+        self.conservative_window_results = {}
+        self.conservative_window_hidden_dims = {}
+        self.conservative_window_config = None
+        self.multi_interest_proxy_state = None
+
+    def _validate_candidate_set_feature_contract(
+        self,
+        ensemble: CandidateSetEnsembleCheckpoint,
+    ) -> None:
+        if not ensemble.results:
+            raise ValueError("candidate-set ensemble has no experts")
+        for result in ensemble.results:
+            if result.feature_names != self.feature_names:
+                raise ValueError(
+                    "candidate-set feature names do not match the encoder"
+                )
+            if result.model_config.input_dim != len(self.feature_names):
+                raise ValueError(
+                    "candidate-set input dimension does not match the encoder"
+                )
+
+    def _validate_oof_stacking_feature_contract(
+        self,
+        stacking: PureJittorOOFStackingCheckpoint,
+    ) -> None:
+        for result in stacking.cst_experts.results:
+            if result.feature_names != self.feature_names:
+                raise ValueError(
+                    "OOF stacking CST features do not match the encoder"
+                )
+        setwise_result = stacking.setwise_mlp[1]
+        if setwise_result.feature_names != self.feature_names:
+            raise ValueError(
+                "OOF stacking Setwise features do not match the encoder"
+            )
 
     def fit(self, interactions: InteractionTable, training_config: TrainingConfig) -> TrainingReport:
         if len(interactions) == 0:
@@ -606,20 +1049,12 @@ class TemporalHybridRanker:
         if training_config.max_fit_events > 0 and len(interactions) > training_config.max_fit_events:
             interactions = interactions.tail(training_config.max_fit_events)
         self.id_map = NodeIdMap.from_interactions(interactions)
-        self.feature_names = (
-            STAT_FEATURE_NAMES
-            + CANDIDATE_PRIOR_FEATURE_NAMES
-            + TARGET_WINDOW_FEATURE_NAMES
-            + STRUCTURE_FEATURE_NAMES
-            + SOURCE_PROFILE_FEATURE_NAMES
-            + TWO_TOWER_FEATURE_NAMES
-            + GRAPH_WINDOW_NAMES
-            + SEQUENCE_FEATURE_NAMES
-        )
+        self.feature_names = _hybrid_feature_names(training_config)
         self._fusion_hidden_dim = training_config.fusion_hidden_dim
 
         training_config = self._apply_auto_strategy(interactions, training_config)
         self.config = training_config
+        self.encoder = None
         log_memory("hybrid_fit_start", enabled=training_config.verbose)
         log(f"[hybrid-fit] start events={len(interactions)}", enabled=training_config.verbose)
         fusion, fusion_result, lgbm_result, report, encoder_cache, cache_config = self._learn_fusion(
@@ -628,45 +1063,123 @@ class TemporalHybridRanker:
         self.fusion = fusion
         self.fusion_result = fusion_result
         self.lgbm_result = lgbm_result
+        self.segment_gate_result = None
+        self.setwise_fusion = None
+        self.setwise_fusion_result = None
+        self.time_ramp_setwise_fusion = None
+        self.time_ramp_setwise_result = None
+        self.time_ramp_config = None
+        self.conservative_window_fusions = {}
+        self.conservative_window_results = {}
+        self.conservative_window_hidden_dims = {}
+        self.conservative_window_config = None
+        self.multi_interest_proxy_state = None
+        self.candidate_set_ensemble = None
+        self.oof_stacking = None
 
-        rng = np.random.default_rng(training_config.seed + 10_000)
-        final_config = _config_for_selected_features(training_config, fusion_result.feature_indices)
         final_future_only = self._can_use_future_only_final_encoder()
-        if final_future_only:
-            final_config = replace(final_config, structure_future_only_transition_cooccur=True)
-        cache = self._final_encoder_cache(
-            interactions=interactions,
-            final_config=final_config,
-            existing_cache=encoder_cache,
-            existing_config=cache_config,
-            verbose=training_config.verbose,
-        )
-        final_snapshot = cache.snapshot_for_prefix(len(interactions)) if cache is not None else None
-        log_event(
-            "[hybrid-fit] final_encoder "
-            f"prior={final_config.candidate_prior_enabled} "
-            f"prior_test_freq={final_config.candidate_prior_include_test_frequency} "
-            f"profile={final_config.source_profile_enabled} "
-            f"target={final_config.target_window_enabled} "
-            f"tower={final_config.two_tower_enabled} "
-            f"gnn={final_config.gnn_enabled} seq={final_config.seq_enabled} "
-            f"future_only_structure={final_config.structure_future_only_transition_cooccur}",
-            enabled=training_config.verbose,
-        )
-        log_memory("final_encoder_start", enabled=training_config.verbose)
-        self.encoder = self._fit_encoder(
-            interactions,
-            final_config,
-            rng,
-            verbose=training_config.verbose,
-            deterministic_snapshot=final_snapshot,
-        )
-        if cache is not None:
-            cache.clear()
-        del final_snapshot
+        if training_config.refit_full:
+            rng = np.random.default_rng(training_config.seed + 10_000)
+            final_config = _config_for_selected_features(
+                training_config,
+                fusion_result.feature_indices,
+            )
+            if final_future_only:
+                final_config = replace(
+                    final_config,
+                    structure_future_only_transition_cooccur=True,
+                )
+            cache = self._final_encoder_cache(
+                interactions=interactions,
+                final_config=final_config,
+                existing_cache=encoder_cache,
+                existing_config=cache_config,
+                verbose=training_config.verbose,
+            )
+            final_snapshot = (
+                cache.snapshot_for_prefix(len(interactions))
+                if cache is not None
+                else None
+            )
+            log_event(
+                "[hybrid-fit] final_encoder refit=full "
+                f"prior={final_config.candidate_prior_enabled} "
+                f"prior_test_freq={final_config.candidate_prior_include_test_frequency} "
+                f"profile={final_config.source_profile_enabled} "
+                f"target={final_config.target_window_enabled} "
+                f"tower={final_config.two_tower_enabled} "
+                f"gnn={final_config.gnn_enabled} seq={final_config.seq_enabled} "
+                f"future_only_structure={final_config.structure_future_only_transition_cooccur}",
+                enabled=training_config.verbose,
+            )
+            log_memory("final_encoder_start", enabled=training_config.verbose)
+            self.encoder = self._fit_encoder(
+                interactions,
+                final_config,
+                rng,
+                verbose=training_config.verbose,
+                deterministic_snapshot=final_snapshot,
+            )
+            if cache is not None:
+                cache.clear()
+            del final_snapshot
+        else:
+            if self.encoder is None:
+                val_size = max(1, int(len(interactions) * training_config.val_ratio))
+                train_end = max(2, len(interactions) - val_size)
+                serving_config = replace(
+                    cache_config,
+                    structure_future_only_transition_cooccur=True,
+                )
+                self.encoder = self._fit_encoder(
+                    interactions[:train_end],
+                    serving_config,
+                    np.random.default_rng(training_config.seed + 20_000),
+                    verbose=training_config.verbose,
+                )
+            if encoder_cache is not None:
+                encoder_cache.clear()
+            log_event(
+                "[hybrid-fit] final_encoder refit=off "
+                "serving_state=validation_context",
+                enabled=training_config.verbose,
+            )
+            log_memory("final_encoder_start", enabled=training_config.verbose)
         if final_future_only:
             self.encoder.compact_for_future_queries()
         log_memory("final_encoder_done", enabled=training_config.verbose)
+        metrics = dict(report.metrics)
+        metrics["refit_full"] = float(training_config.refit_full)
+        report = replace(report, metrics=metrics)
+        if (
+            training_config.service_normalizer_calibration_enabled
+            and training_config.dataset_test_path is not None
+        ):
+            log_event(
+                "[hybrid-fit] service_normalizer_start "
+                f"path={training_config.dataset_test_path}",
+                enabled=training_config.verbose,
+            )
+            service_queries = read_test_queries(
+                training_config.dataset_test_path
+            )
+            drift = self.recalibrate_service_normalizers(
+                service_queries,
+                batch_size=(
+                    training_config.service_normalizer_calibration_batch_size
+                ),
+            )
+            metrics = dict(report.metrics)
+            metrics.update(_service_normalizer_report_metrics(drift))
+            report = replace(report, metrics=metrics)
+            max_shift = metrics[
+                "service_normalizer_max_abs_mean_shift_in_training_std"
+            ]
+            log_event(
+                "[hybrid-fit] service_normalizer_done "
+                f"heads={len(drift)} max_standardized_mean_shift={max_shift:.6f}",
+                enabled=training_config.verbose,
+            )
         self.training_report = report
         log_event("[hybrid-fit] done", enabled=training_config.verbose)
         return report
@@ -739,6 +1252,117 @@ class TemporalHybridRanker:
     def predict(self, query: TestQuery) -> np.ndarray:
         return self.predict_batch([query])[0]
 
+    def recalibrate_service_normalizers(
+        self,
+        queries: TestQueryArray | list[TestQuery],
+        *,
+        batch_size: int = 256,
+    ) -> dict[str, dict[str, int | float]]:
+        """Recompute neural-head normalizers on unlabeled service features."""
+        if not queries:
+            raise ValueError("service normalizer calibration requires non-empty queries")
+        if self.encoder is None:
+            raise RuntimeError("service normalizer calibration requires a fitted encoder")
+        if batch_size <= 0:
+            raise ValueError("service normalizer batch_size must be positive")
+        if not isinstance(queries, TestQueryArray):
+            queries = TestQueryArray.from_queries(queries)
+
+        raw_results: dict[str, FusionResult] = {}
+        if self.fusion_result is not None:
+            raw_results["fusion"] = self.fusion_result
+
+        setwise_results: dict[str, FusionResult] = {}
+        if self.setwise_fusion_result is not None:
+            setwise_results["setwise"] = self.setwise_fusion_result
+        if self.time_ramp_setwise_result is not None:
+            setwise_results["time_ramp_setwise"] = (
+                self.time_ramp_setwise_result
+            )
+        for name, result in self.conservative_window_results.items():
+            setwise_results[f"conservative_window:{name}"] = result
+        if not raw_results and not setwise_results:
+            raise RuntimeError(
+                "service normalizer calibration found no supported neural head"
+            )
+
+        accumulators = {
+            name: StreamingFeatureNormalizer()
+            for name in (*raw_results, *setwise_results)
+        }
+        for start in range(0, len(queries), batch_size):
+            query_batch = queries[start : start + batch_size]
+            raw_features = self.encoder.features_for_query_array(query_batch)
+            for name, result in raw_results.items():
+                accumulators[name].update(
+                    _select_result_features(raw_features, result)
+                )
+            if setwise_results:
+                setwise_source_features = raw_features
+                if self.multi_interest_proxy_state is not None:
+                    if self.id_map is None:
+                        raise RuntimeError(
+                            "multi-interest calibration requires an id map"
+                        )
+                    from .multi_interest_proxy import (  # noqa: PLC0415
+                        append_multi_interest_features,
+                    )
+
+                    setwise_source_features = (
+                        append_multi_interest_features(
+                            raw_features,
+                            query_batch,
+                            self.id_map,
+                            self.multi_interest_proxy_state,
+                        )
+                    )
+                from .setwise import (  # noqa: PLC0415
+                    setwise_context_features,
+                )
+
+                setwise_features = setwise_context_features(
+                    setwise_source_features
+                )
+                for name, result in setwise_results.items():
+                    accumulators[name].update(
+                        _select_result_features(
+                            setwise_features,
+                            result,
+                        )
+                    )
+            self.encoder.clear_batch_caches()
+
+        calibrated: dict[str, FusionResult] = {}
+        report: dict[str, dict[str, int | float]] = {}
+        for name, result in {
+            **raw_results,
+            **setwise_results,
+        }.items():
+            service = accumulators[name].finalize()
+            report[name] = normalizer_drift_report(
+                training_mean=result.mean,
+                training_std=result.std,
+                service=service,
+            )
+            calibrated[name] = replace_result_normalizer(
+                result,
+                service,
+            )
+
+        if "fusion" in calibrated:
+            self.fusion_result = calibrated["fusion"]
+        if "setwise" in calibrated:
+            self.setwise_fusion_result = calibrated["setwise"]
+        if "time_ramp_setwise" in calibrated:
+            self.time_ramp_setwise_result = calibrated[
+                "time_ramp_setwise"
+            ]
+        for name in self.conservative_window_results:
+            self.conservative_window_results[name] = calibrated[
+                f"conservative_window:{name}"
+            ]
+        return report
+
     def prediction_order(self, queries: TestQueryArray) -> np.ndarray | None:
         if self.encoder is None or not queries:
             return None
@@ -746,26 +1370,260 @@ class TemporalHybridRanker:
             return None
         return np.argsort(queries.src, kind="stable")
 
+    def prediction_tie_break_prior(
+        self,
+        queries: TestQueryArray | list[TestQuery],
+    ) -> np.ndarray:
+        if self.encoder is None:
+            raise RuntimeError("ranker is not fitted")
+        if not isinstance(queries, TestQueryArray):
+            queries = TestQueryArray.from_queries(queries)
+        return self.encoder.candidate_prior.tie_break_prior_for_query_array(
+            queries
+        )
+
     def predict_batch(self, queries: TestQueryArray | list[TestQuery]) -> np.ndarray:
         if not queries:
             return np.empty((0, 100), dtype=np.float64)
-        if self.encoder is None or self.fusion is None or self.fusion_result is None:
+        if self.encoder is None:
+            raise RuntimeError("ranker is not fitted")
+
+        features = self.encoder.features_for_queries(queries)
+        if self.oof_stacking is not None:
+            from .oof_models import (  # noqa: PLC0415
+                predict_pure_jittor_oof_stacking_scores,
+            )
+
+            scores = predict_pure_jittor_oof_stacking_scores(
+                self.oof_stacking,
+                features,
+                batch_size=128,
+            )
+            return scores.astype(np.float64, copy=False)
+        if self.candidate_set_ensemble is not None:
+            from .candidate_set_transformer import (  # noqa: PLC0415
+                predict_candidate_set_ensemble_probabilities,
+            )
+
+            probabilities = (
+                predict_candidate_set_ensemble_probabilities(
+                    self.candidate_set_ensemble,
+                    features,
+                    batch_size=128,
+                )
+            )
+            return probabilities.astype(np.float64, copy=False)
+        if self.fusion is None or self.fusion_result is None:
             raise RuntimeError("ranker is not fitted")
 
         from .fusion import predict_logits  # noqa: PLC0415
 
-        features = self.encoder.features_for_queries(queries)
-        selected = features[:, :, self.fusion_result.feature_indices] if self.fusion_result.feature_indices else features
-        mlp_logits = predict_logits(self.fusion, selected, self.fusion_result.mean, self.fusion_result.std)
-        probs = _softmax(mlp_logits)
+        if self.multi_interest_proxy_state is not None:
+            from .multi_interest_proxy import (  # noqa: PLC0415
+                append_multi_interest_features,
+            )
+
+            if not isinstance(queries, TestQueryArray):
+                queries = TestQueryArray.from_queries(queries)
+            setwise_source_features = append_multi_interest_features(
+                features,
+                queries,
+                self.id_map,
+                self.multi_interest_proxy_state,
+            )
+        else:
+            setwise_source_features = features
+        selected, lgbm_selected = _select_expert_features(
+            features,
+            mlp_indices=self.fusion_result.feature_indices,
+            lgbm_indices=(
+                self.lgbm_result.feature_indices
+                if self.lgbm_result is not None
+                else self.fusion_result.feature_indices
+            ),
+        )
+        setwise_context: np.ndarray | None = None
+        champion_setwise_probs: np.ndarray | None = None
+        if (
+            self.setwise_fusion is not None
+            and self.setwise_fusion_result is not None
+        ):
+            from .setwise import setwise_context_features  # noqa: PLC0415
+
+            setwise_context = setwise_context_features(
+                setwise_source_features
+            )
+            setwise_features = setwise_context
+            setwise_indices = self.setwise_fusion_result.feature_indices
+            if setwise_indices != tuple(range(setwise_features.shape[-1])):
+                setwise_features = setwise_features[..., setwise_indices]
+            setwise_logits = predict_logits(
+                self.setwise_fusion,
+                setwise_features,
+                self.setwise_fusion_result.mean,
+                self.setwise_fusion_result.std,
+            )
+            neural_logits = setwise_logits
+            probs = _softmax(neural_logits)
+            champion_setwise_probs = probs
+        else:
+            mlp_logits = predict_logits(
+                self.fusion,
+                selected,
+                self.fusion_result.mean,
+                self.fusion_result.std,
+            )
+            neural_logits = mlp_logits
+            probs = _softmax(neural_logits)
 
         if self.lgbm_result is not None:
             from .fusion_lgbm import predict_logits_lgbm  # noqa: PLC0415
 
-            lgbm_logits = predict_logits_lgbm(self.lgbm_result.model_text, selected)
-            lgbm_probs = _softmax(lgbm_logits)
-            w = self.lgbm_result.mlp_weight
-            probs = w * probs + (1.0 - w) * lgbm_probs
+            lgbm_logits = predict_logits_lgbm(self.lgbm_result.model_text, lgbm_selected)
+            if (
+                self.setwise_fusion_result is not None
+                or self.segment_gate_result is None
+            ):
+                mlp_weight: float | np.ndarray = self.lgbm_result.mlp_weight
+            else:
+                from .segment_fusion import predict_segment_weights  # noqa: PLC0415
+
+                mlp_weight = predict_segment_weights(self.segment_gate_result, features, self.feature_names)
+            from .expert_fusion import blend_expert_logits  # noqa: PLC0415
+
+            probs = blend_expert_logits(
+                neural_logits,
+                lgbm_logits,
+                mlp_weight,
+                calibration=_expert_blend_calibration(self.lgbm_result),
+            )
+
+        if self.conservative_window_config is not None:
+            from .conservative_window_blend import (  # noqa: PLC0415
+                conservative_window_scores,
+            )
+            from .setwise import setwise_context_features  # noqa: PLC0415
+
+            if (
+                champion_setwise_probs is None
+                or not self.conservative_window_fusions
+            ):
+                raise RuntimeError(
+                    "conservative window fusion requires a Setwise champion"
+                )
+            if setwise_context is None:
+                setwise_context = setwise_context_features(
+                    setwise_source_features
+                )
+            window_expert_probs = [champion_setwise_probs]
+            for name, model in self.conservative_window_fusions.items():
+                result = self.conservative_window_results[name]
+                expert_features = setwise_context
+                if result.feature_indices != tuple(
+                    range(expert_features.shape[-1])
+                ):
+                    expert_features = expert_features[
+                        ..., result.feature_indices
+                    ]
+                logits = predict_logits(
+                    model,
+                    expert_features,
+                    result.mean,
+                    result.std,
+                )
+                window_expert_probs.append(_softmax(logits))
+            window_probs = np.mean(
+                np.stack(window_expert_probs, axis=0),
+                axis=0,
+            )
+            if self.lgbm_result is not None:
+                from .expert_fusion import blend_expert_logits  # noqa: PLC0415
+
+                window_probs = blend_expert_logits(
+                    np.log(np.clip(window_probs, 1e-300, 1.0)),
+                    lgbm_logits,
+                    mlp_weight,
+                    calibration=_expert_blend_calibration(
+                        self.lgbm_result
+                    ),
+                )
+            probs = conservative_window_scores(
+                probs,
+                window_probs,
+                alpha=self.conservative_window_config["alpha"],
+            )
+
+        if (
+            self.time_ramp_setwise_fusion is not None
+            and self.time_ramp_setwise_result is not None
+            and self.time_ramp_config is not None
+        ):
+            from .setwise import setwise_context_features  # noqa: PLC0415
+            from .time_ramp import (  # noqa: PLC0415
+                blend_query_scores,
+                time_ramp_weights,
+            )
+
+            if setwise_context is None:
+                setwise_context = setwise_context_features(
+                    setwise_source_features
+                )
+            time_ramp_features = setwise_context
+            time_ramp_indices = (
+                self.time_ramp_setwise_result.feature_indices
+            )
+            if time_ramp_indices != tuple(
+                range(time_ramp_features.shape[-1])
+            ):
+                time_ramp_features = time_ramp_features[
+                    ..., time_ramp_indices
+                ]
+            time_ramp_logits = predict_logits(
+                self.time_ramp_setwise_fusion,
+                time_ramp_features,
+                self.time_ramp_setwise_result.mean,
+                self.time_ramp_setwise_result.std,
+            )
+            time_ramp_probs = _softmax(time_ramp_logits)
+            if isinstance(queries, TestQueryArray):
+                query_times = queries.time
+            else:
+                query_times = np.fromiter(
+                    (query.time for query in queries),
+                    dtype=np.int64,
+                    count=len(queries),
+                )
+            query_weights = time_ramp_weights(
+                query_times,
+                power=self.time_ramp_config["power"],
+                minimum_time=self.time_ramp_config["minimum_time"],
+                maximum_time=self.time_ramp_config["maximum_time"],
+            )
+            probs = blend_query_scores(
+                probs,
+                time_ramp_probs,
+                query_weights,
+            )
+
+        if self.cooccur_lift_auxiliary_state is not None:
+            from .cooccur_lift_checkpoint import (  # noqa: PLC0415
+                predict_cooccur_lift_auxiliary_probabilities,
+            )
+
+            if self.cooccur_lift_auxiliary_model is None:
+                raise RuntimeError(
+                    "cooccur-lift auxiliary model is not hydrated"
+                )
+            if not isinstance(queries, TestQueryArray):
+                queries = TestQueryArray.from_queries(queries)
+            auxiliary = predict_cooccur_lift_auxiliary_probabilities(
+                self.cooccur_lift_auxiliary_state,
+                self.cooccur_lift_auxiliary_model,
+                features,
+                queries,
+            )
+            weight = float(self.cooccur_lift_auxiliary_state.weight)
+            probs = (1.0 - weight) * probs + weight * auxiliary
 
         return probs.astype(np.float64, copy=False)
 
@@ -775,10 +1633,13 @@ class TemporalHybridRanker:
         config: TrainingConfig,
     ) -> tuple[FusionMLP, FusionResult, TrainingReport, HybridPrefixStateCache | None, TrainingConfig]:
         n_events = len(interactions)
-        if n_events < 100 or config.num_negatives < 1 or config.epochs < 1:
+        train_num_negatives = config.resolved_train_num_negatives()
+        val_num_negatives = config.resolved_val_num_negatives()
+        if n_events < 100 or config.epochs < 1:
             raise ValueError(
                 "not enough training signal for hybrid reranker: "
-                f"events={n_events}, num_negatives={config.num_negatives}, epochs={config.epochs}"
+                f"events={n_events}, train_num_negatives={train_num_negatives}, "
+                f"val_num_negatives={val_num_negatives}, epochs={config.epochs}"
             )
 
         rng = np.random.default_rng(config.seed)
@@ -803,71 +1664,141 @@ class TemporalHybridRanker:
         log_event(
             "[hybrid-fit] split "
             f"context={len(context_events)} train={len(train_events)} val={len(val_events)} "
-            f"dst={len(dst_pool)}",
+            f"dst={len(dst_pool)} train_negatives={train_num_negatives} "
+            f"val_negatives={val_num_negatives}",
             enabled=config.verbose,
         )
         log_memory("split_done", enabled=config.verbose)
 
         supervised_encoder_config = replace(config, structure_future_only_transition_cooccur=True)
-        encoder_cache = self._encoder_state_cache(interactions, supervised_encoder_config, config.verbose)
-        train_snapshot = encoder_cache.snapshot_for_prefix(context_end) if encoder_cache is not None else None
-        train_encoder = self._timed_fit_encoder(
-            "train_context_encoder",
-            context_events,
-            supervised_encoder_config,
-            rng,
-            config.verbose,
-            deterministic_snapshot=train_snapshot,
-        )
-        if encoder_cache is not None:
-            encoder_cache.release_except()
-        del train_snapshot
-        feature_start = perf_counter()
-        log_memory("train_features_start", enabled=config.verbose)
-        train_features = _build_supervised_features(
-            train_events,
-            train_encoder,
-            dst_pool,
-            config,
-            rng,
-            label="train_features",
-        )
-        del train_encoder
-        release_memory()
-        log_event(
-            f"[hybrid-fit] train_features shape={train_features.shape} elapsed={perf_counter() - feature_start:.1f}s",
-            enabled=config.verbose,
-        )
-        log_memory("train_features_done", enabled=config.verbose)
+        feature_cache: SupervisedFeatureCache | None = None
+        feature_cache_key = ""
+        cached_features: tuple[np.ndarray, np.ndarray] | None = None
+        cached_fusion_rng_state: dict[str, Any] | None = None
+        feature_cache_dir = getattr(config, "supervised_feature_cache_dir", None)
+        if feature_cache_dir is not None:
+            cache_start = perf_counter()
+            feature_cache = SupervisedFeatureCache(feature_cache_dir)
+            feature_cache_key = supervised_feature_cache_key(
+                interactions,
+                supervised_encoder_config,
+                recent_window=self.recent_window,
+                feature_names=self.feature_names,
+                dataset_profile=self.dataset_profile,
+            )
+            cached_features = feature_cache.load(feature_cache_key)
+            if cached_features is not None:
+                cached_fusion_rng_state = feature_cache.load_fusion_rng_state(feature_cache_key)
+                expected_train_shape = (len(train_events), train_num_negatives + 1, len(self.feature_names))
+                expected_val_shape = (len(val_events), val_num_negatives + 1, len(self.feature_names))
+                if (
+                    cached_fusion_rng_state is None
+                    or cached_features[0].shape != expected_train_shape
+                    or cached_features[1].shape != expected_val_shape
+                ):
+                    cached_features = None
+            cache_status = "hit" if cached_features is not None else "miss"
+            log_event(
+                f"[supervised-feature-cache] {cache_status} key={feature_cache_key[:12]} "
+                f"path={feature_cache.root} elapsed={perf_counter() - cache_start:.1f}s",
+                enabled=config.verbose,
+            )
 
-        val_snapshot = encoder_cache.snapshot_for_prefix(train_end) if encoder_cache is not None else None
-        val_encoder = self._timed_fit_encoder(
-            "val_context_encoder",
-            val_context_events,
-            supervised_encoder_config,
-            rng,
-            config.verbose,
-            deterministic_snapshot=val_snapshot,
-        )
-        if encoder_cache is not None:
-            encoder_cache.release_except()
-        del val_snapshot
-        feature_start = perf_counter()
-        log_memory("val_features_start", enabled=config.verbose)
-        val_features = _build_supervised_features(
-            val_events,
-            val_encoder,
-            dst_pool,
-            config,
-            rng,
-            label="val_features",
-        )
-        del val_encoder
-        log_event(
-            f"[hybrid-fit] val_features shape={val_features.shape} elapsed={perf_counter() - feature_start:.1f}s",
-            enabled=config.verbose,
-        )
-        log_memory("val_features_done", enabled=config.verbose)
+        encoder_cache: HybridPrefixStateCache | None = None
+        if cached_features is not None:
+            train_features, val_features = cached_features
+            if cached_fusion_rng_state is None:
+                raise RuntimeError("supervised feature cache hit is missing fusion RNG state")
+            rng.bit_generator.state = cached_fusion_rng_state
+            log_event(
+                f"[hybrid-fit] cached_features train_shape={train_features.shape} val_shape={val_features.shape}",
+                enabled=config.verbose,
+            )
+        else:
+            encoder_cache = self._encoder_state_cache(interactions, supervised_encoder_config, config.verbose)
+            train_snapshot = encoder_cache.snapshot_for_prefix(context_end) if encoder_cache is not None else None
+            train_encoder = self._timed_fit_encoder(
+                "train_context_encoder",
+                context_events,
+                supervised_encoder_config,
+                rng,
+                config.verbose,
+                deterministic_snapshot=train_snapshot,
+            )
+            if encoder_cache is not None:
+                encoder_cache.release_except()
+            del train_snapshot
+            feature_start = perf_counter()
+            log_memory("train_features_start", enabled=config.verbose)
+            train_features = _build_supervised_features(
+                train_events,
+                train_encoder,
+                dst_pool,
+                replace(config, num_negatives=train_num_negatives),
+                rng,
+                label="train_features",
+            )
+            del train_encoder
+            release_memory()
+            log_event(
+                f"[hybrid-fit] train_features shape={train_features.shape} "
+                f"elapsed={perf_counter() - feature_start:.1f}s",
+                enabled=config.verbose,
+            )
+            log_memory("train_features_done", enabled=config.verbose)
+
+            val_snapshot = encoder_cache.snapshot_for_prefix(train_end) if encoder_cache is not None else None
+            val_encoder = self._timed_fit_encoder(
+                "val_context_encoder",
+                val_context_events,
+                supervised_encoder_config,
+                rng,
+                config.verbose,
+                deterministic_snapshot=val_snapshot,
+            )
+            if encoder_cache is not None:
+                encoder_cache.release_except()
+            del val_snapshot
+            feature_start = perf_counter()
+            log_memory("val_features_start", enabled=config.verbose)
+            val_features = _build_supervised_features(
+                val_events,
+                val_encoder,
+                dst_pool,
+                replace(config, num_negatives=val_num_negatives),
+                rng,
+                label="val_features",
+            )
+            if config.refit_full:
+                del val_encoder
+            else:
+                self.encoder = val_encoder
+            log_event(
+                f"[hybrid-fit] val_features shape={val_features.shape} "
+                f"elapsed={perf_counter() - feature_start:.1f}s",
+                enabled=config.verbose,
+            )
+            log_memory("val_features_done", enabled=config.verbose)
+            if feature_cache is not None:
+                cache_start = perf_counter()
+                try:
+                    feature_cache.save(
+                        feature_cache_key,
+                        train_features,
+                        val_features,
+                        fusion_rng_state=rng.bit_generator.state,
+                    )
+                    log_event(
+                        f"[supervised-feature-cache] saved key={feature_cache_key[:12]} "
+                        f"path={feature_cache.root} elapsed={perf_counter() - cache_start:.1f}s",
+                        enabled=config.verbose,
+                    )
+                except (OSError, ValueError) as exc:
+                    log_event(
+                        f"[supervised-feature-cache] save_failed key={feature_cache_key[:12]} "
+                        f"reason={type(exc).__name__}: {exc}",
+                        enabled=config.verbose,
+                    )
 
         fusion_start = perf_counter()
         log_memory("fusion_start", enabled=config.verbose)
@@ -901,6 +1832,9 @@ class TemporalHybridRanker:
                 "holdout_pair_hit_rate": config.profile_holdout_pair_hit_rate,
                 "candidate_unseen_dst_rate": config.profile_candidate_unseen_dst_rate,
                 "test_candidate_negative_ratio": config.test_candidate_negative_ratio,
+                "fusion_context_transform_version": float(
+                    config.resolved_fusion_context_transform_version()
+                ),
             },
         )
         return fusion, result, lgbm_result, report, encoder_cache, supervised_encoder_config
@@ -928,15 +1862,24 @@ class TemporalHybridRanker:
             feature_indices=feature_indices,
             candidate_name=candidate_name,
         )
-        mlp_weight = _find_ensemble_weight(
+        mlp_weight, calibration = _find_ensemble_weight(
             mlp_model, mlp_result, result, val_features, feature_indices, config,
         )
         from dataclasses import replace as dc_replace  # noqa: PLC0415
-        result = dc_replace(result, mlp_weight=mlp_weight)
+        result = dc_replace(
+            result,
+            mlp_weight=mlp_weight,
+            blend_mode=calibration.mode,
+            mlp_temperature=calibration.mlp_temperature,
+            lgbm_temperature=calibration.lgbm_temperature,
+            rrf_k=calibration.rrf_k,
+        )
         log_event(
             f"[fusion-lgbm-select] chosen={result.candidate_name} "
             f"val_ap={result.best_val_ap:.5f} val_mrr={result.best_val_mrr:.5f} "
-            f"mlp_weight={mlp_weight:.2f}",
+            f"blend={calibration.mode} mlp_weight={mlp_weight:.2f} "
+            f"temperatures={calibration.mlp_temperature:.3f}/"
+            f"{calibration.lgbm_temperature:.3f} rrf_k={calibration.rrf_k:.1f}",
             enabled=config.verbose,
         )
         log_memory("lgbm_fusion_done", enabled=config.verbose)
@@ -1106,7 +2049,162 @@ def _sample_events(
     return events.take(indices)
 
 
-def _feature_masks(feature_count: int, config: TrainingConfig | None = None) -> list[tuple[str, tuple[int, ...]]]:
+def _hybrid_feature_names(config: TrainingConfig) -> tuple[str, ...]:
+    names = (
+        STAT_FEATURE_NAMES
+        + CANDIDATE_PRIOR_FEATURE_NAMES
+        + TARGET_WINDOW_FEATURE_NAMES
+        + STRUCTURE_FEATURE_NAMES
+        + SOURCE_PROFILE_FEATURE_NAMES
+        + TWO_TOWER_FEATURE_NAMES
+        + GRAPH_WINDOW_NAMES
+        + SEQUENCE_FEATURE_NAMES
+    )
+    if bool(getattr(config, "structure_cooccur_time_decay_enabled", False)):
+        names += COOCCUR_TIME_DECAY_FEATURE_NAMES
+    return names
+
+
+def _service_normalizer_report_metrics(
+    report: dict[str, dict[str, int | float]],
+) -> dict[str, float]:
+    if not report:
+        raise ValueError("service normalizer report must be non-empty")
+    rows = [float(head["count"]) for head in report.values()]
+    standardized_shifts = [
+        float(head["max_abs_mean_shift_in_training_std"])
+        for head in report.values()
+    ]
+    absolute_shifts = [
+        float(head["max_abs_mean_shift"])
+        for head in report.values()
+    ]
+    max_std_ratios = [
+        float(head["max_service_to_training_std_ratio"])
+        for head in report.values()
+    ]
+    min_std_ratios = [
+        float(head["min_service_to_training_std_ratio"])
+        for head in report.values()
+    ]
+    return {
+        "service_normalizer_head_count": float(len(report)),
+        "service_normalizer_candidate_rows": max(rows),
+        "service_normalizer_max_abs_mean_shift": max(absolute_shifts),
+        "service_normalizer_max_abs_mean_shift_in_training_std": max(
+            standardized_shifts
+        ),
+        "service_normalizer_max_service_to_training_std_ratio": max(
+            max_std_ratios
+        ),
+        "service_normalizer_min_service_to_training_std_ratio": min(
+            min_std_ratios
+        ),
+    }
+
+
+def _select_result_features(
+    features: np.ndarray,
+    result: FusionResult,
+) -> np.ndarray:
+    indices = result.feature_indices
+    selected = (
+        features
+        if indices == tuple(range(features.shape[-1]))
+        else features[..., indices]
+    )
+    from .fusion import align_fusion_input_features  # noqa: PLC0415
+
+    return align_fusion_input_features(
+        selected,
+        expected_dim=_fusion_result_input_dim(result),
+    )
+
+
+def _fusion_result_input_dim(result: FusionResult) -> int:
+    mean = np.asarray(result.mean)
+    if mean.ndim != 1 or mean.shape[0] <= 0:
+        raise ValueError("fusion result must contain a non-empty mean vector")
+    if np.asarray(result.std).shape != mean.shape:
+        raise ValueError("fusion result mean and std dimensions must match")
+    return int(mean.shape[0])
+
+
+def _select_expert_features(
+    features: np.ndarray,
+    *,
+    mlp_indices: tuple[int, ...],
+    lgbm_indices: tuple[int, ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    mlp_features = features[:, :, mlp_indices] if mlp_indices else features
+    lgbm_features = features[:, :, lgbm_indices] if lgbm_indices else features
+    return mlp_features, lgbm_features
+
+
+@dataclass(frozen=True)
+class _LeaveOneOutFeatureMask:
+    group: str
+    alias: str
+    candidate_name: str
+    indices: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _FeatureMaskCatalog:
+    masks: tuple[tuple[str, tuple[int, ...]], ...]
+    enabled_groups: tuple[str, ...]
+    full_candidate_name: str
+    full_indices: tuple[int, ...]
+    leave_one_out: tuple[_LeaveOneOutFeatureMask, ...]
+
+
+def _feature_masks(
+    feature_count: int,
+    config: TrainingConfig | None = None,
+) -> list[tuple[str, tuple[int, ...]]]:
+    catalog = _feature_mask_catalog(feature_count, config=config)
+    frozen_candidate = (
+        None
+        if config is None
+        else getattr(
+            config,
+            "frozen_fusion_feature_candidate",
+            None,
+        )
+    )
+    if frozen_candidate is None:
+        return list(catalog.masks)
+
+    by_name = dict(catalog.masks)
+    selected = by_name.get(frozen_candidate)
+    if selected is not None:
+        return [(frozen_candidate, selected)]
+
+    leave_one_out_by_alias = {
+        entry.alias: entry.indices
+        for entry in catalog.leave_one_out
+    }
+    selected = leave_one_out_by_alias.get(frozen_candidate)
+    if selected is not None:
+        return [(frozen_candidate, selected)]
+
+    available_names = [name for name, _indices in catalog.masks]
+    available_names.extend(
+        entry.alias
+        for entry in catalog.leave_one_out
+        if entry.alias not in by_name
+    )
+    available = ", ".join(available_names)
+    raise ValueError(
+        "frozen fusion feature candidate is unavailable: "
+        f"{frozen_candidate!r}; available={available}"
+    )
+
+
+def _feature_mask_catalog(
+    feature_count: int,
+    config: TrainingConfig | None = None,
+) -> _FeatureMaskCatalog:
     stats_end = len(STAT_FEATURE_NAMES)
     prior_end = stats_end + len(CANDIDATE_PRIOR_FEATURE_NAMES)
     target_end = prior_end + len(TARGET_WINDOW_FEATURE_NAMES)
@@ -1175,7 +2273,62 @@ def _feature_masks(feature_count: int, config: TrainingConfig | None = None) -> 
             continue
         seen.add(indices)
         unique.append((name, indices))
-    return unique
+
+    group_order = tuple(ranges)
+    enabled_groups = tuple(
+        group
+        for group in group_order
+        if enabled[group] and ranges[group]
+    )
+    full_indices = tuple(
+        index
+        for group in enabled_groups
+        for index in ranges[group]
+    )
+    candidate_name_by_indices = {
+        indices: name
+        for name, indices in unique
+    }
+    full_candidate_name = candidate_name_by_indices.get(full_indices, "")
+    if full_indices and not full_candidate_name:
+        full_candidate_name = "full_enabled"
+        unique.append((full_candidate_name, full_indices))
+        seen.add(full_indices)
+        candidate_name_by_indices[full_indices] = full_candidate_name
+
+    leave_one_out: list[_LeaveOneOutFeatureMask] = []
+    for group in enabled_groups:
+        removed_indices = set(ranges[group])
+        indices = tuple(
+            index
+            for index in full_indices
+            if index not in removed_indices
+        )
+        if not indices:
+            continue
+        alias = f"loo_without_{group}"
+        candidate_name = candidate_name_by_indices.get(indices, "")
+        if not candidate_name:
+            candidate_name = alias
+            unique.append((candidate_name, indices))
+            seen.add(indices)
+            candidate_name_by_indices[indices] = candidate_name
+        leave_one_out.append(
+            _LeaveOneOutFeatureMask(
+                group=group,
+                alias=alias,
+                candidate_name=candidate_name,
+                indices=indices,
+            )
+        )
+
+    return _FeatureMaskCatalog(
+        masks=tuple(unique),
+        enabled_groups=enabled_groups,
+        full_candidate_name=full_candidate_name,
+        full_indices=full_indices,
+        leave_one_out=tuple(leave_one_out),
+    )
 
 
 def _copy_rng(rng: np.random.Generator) -> np.random.Generator:
@@ -1208,26 +2361,105 @@ def _find_ensemble_weight(
     val_features: np.ndarray,
     feature_indices: tuple[int, ...],
     config: TrainingConfig,
-) -> float:
+) -> tuple[float, ExpertBlendCalibration]:
+    from .expert_fusion import ExpertBlendCalibration  # noqa: PLC0415
+
+    mode = str(getattr(config, "expert_blend_mode", "probability")).lower()
+    default_calibration = ExpertBlendCalibration(
+        mode=mode,
+        rrf_k=float(getattr(config, "expert_rrf_k", 60.0)),
+    )
     if mlp_model is None or mlp_result is None:
-        return 0.5
+        return 0.0, default_calibration
+    from .expert_fusion import (  # noqa: PLC0415
+        blend_expert_logits,
+        fit_positive_column_temperature,
+    )
     from .fusion import predict_logits  # noqa: PLC0415
     from .fusion_lgbm import predict_logits_lgbm  # noqa: PLC0415
 
     selected = val_features[:, :, feature_indices] if feature_indices else val_features
-    mlp_probs = _softmax(predict_logits(mlp_model, selected, mlp_result.mean, mlp_result.std))
-    lgbm_probs = _softmax(predict_logits_lgbm(lgbm_result.model_text, selected))
+    mlp_logits = predict_logits(
+        mlp_model,
+        selected,
+        mlp_result.mean,
+        mlp_result.std,
+    )
+    lgbm_logits = predict_logits_lgbm(lgbm_result.model_text, selected)
+    calibration = default_calibration
+    if mode == "temperature":
+        calibration = ExpertBlendCalibration(
+            mode=mode,
+            mlp_temperature=fit_positive_column_temperature(mlp_logits),
+            lgbm_temperature=fit_positive_column_temperature(lgbm_logits),
+            rrf_k=default_calibration.rrf_k,
+        )
+
+    frozen_weight = getattr(
+        config,
+        "frozen_ensemble_mlp_weight",
+        None,
+    )
+    if frozen_weight is not None:
+        frozen_weight = float(frozen_weight)
+        if (
+            not np.isfinite(frozen_weight)
+            or not 0.0 <= frozen_weight <= 1.0
+        ):
+            raise ValueError(
+                "frozen_ensemble_mlp_weight must be finite and in [0, 1]"
+            )
+        if config.fusion_mode == "lgbm" and frozen_weight != 0.0:
+            raise ValueError(
+                "lgbm fusion requires frozen_ensemble_mlp_weight=0"
+            )
+        log_event(
+            f"[ensemble-weight] frozen_w={frozen_weight:.6f} "
+            "single_split_scan=false",
+            enabled=config.verbose,
+        )
+        return frozen_weight, calibration
 
     metric = config.selection_metric.lower()
     best_w, best_score = 0.5, -1.0
-    for w_int in range(11):
-        w = w_int / 10.0
-        blended = w * mlp_probs + (1.0 - w) * lgbm_probs
+    candidate_weights = (
+        (0.0,)
+        if config.fusion_mode == "lgbm"
+        else tuple(value / 10.0 for value in range(11))
+    )
+    for w in candidate_weights:
+        blended = blend_expert_logits(
+            mlp_logits,
+            lgbm_logits,
+            w,
+            calibration=calibration,
+        )
         score = _mrr_from_probs(blended) if metric == "mrr" else _ap_from_probs(blended)
         if score > best_score:
             best_w, best_score = w, score
-    log_event(f"[ensemble-weight] best_w={best_w:.1f} {metric}={best_score:.5f}", enabled=config.verbose)
-    return best_w
+    log_event(
+        f"[ensemble-weight] blend={mode} best_w={best_w:.1f} "
+        f"{metric}={best_score:.5f}",
+        enabled=config.verbose,
+    )
+    return best_w, calibration
+
+
+def _expert_blend_calibration(
+    result: LGBMFusionResult,
+) -> ExpertBlendCalibration:
+    from .expert_fusion import ExpertBlendCalibration  # noqa: PLC0415
+
+    return ExpertBlendCalibration(
+        mode=str(getattr(result, "blend_mode", "probability")),
+        mlp_temperature=float(
+            getattr(result, "mlp_temperature", 1.0)
+        ),
+        lgbm_temperature=float(
+            getattr(result, "lgbm_temperature", 1.0)
+        ),
+        rrf_k=float(getattr(result, "rrf_k", 60.0)),
+    )
 
 
 def _mrr_from_probs(probs: np.ndarray) -> float:
@@ -1351,6 +2583,13 @@ def _can_reuse_encoder_cache(source_config: TrainingConfig, target_config: Train
         return False
     if target_config.structure_transition_enabled and not source_config.structure_transition_enabled:
         return False
+    if bool(getattr(target_config, "structure_cooccur_time_decay_enabled", False)):
+        if not bool(getattr(source_config, "structure_cooccur_time_decay_enabled", False)):
+            return False
+        if float(getattr(source_config, "structure_cooccur_time_decay_ratio", 0.05)) != float(
+            getattr(target_config, "structure_cooccur_time_decay_ratio", 0.05)
+        ):
+            return False
     if target_config.structure_cooccur_enabled:
         return (
             source_config.structure_cooccur_enabled
@@ -1741,6 +2980,12 @@ class HybridRankerAdapter:
 
     def prediction_order(self, queries: TestQueryArray) -> np.ndarray | None:
         return self.impl.prediction_order(queries)
+
+    def prediction_tie_break_prior(
+        self,
+        queries: TestQueryArray | list[TestQuery],
+    ) -> np.ndarray:
+        return self.impl.prediction_tie_break_prior(queries)
 
     @property
     def training_report(self) -> TrainingReport | None:

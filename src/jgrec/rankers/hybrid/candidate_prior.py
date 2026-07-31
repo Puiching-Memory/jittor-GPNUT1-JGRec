@@ -96,6 +96,18 @@ class CandidatePriorTower:
             features[:, :, 5] = _row_rank_features(test_freq)
         return features
 
+    def tie_break_prior_for_query_array(self, queries: TestQueryArray) -> np.ndarray:
+        if not queries:
+            return np.empty((0, 0), dtype=np.float64)
+        if not self.config.enabled or not self.config.include_test_frequency:
+            return np.zeros(queries.candidates.shape, dtype=np.float64)
+        denominator = max(float(self.test_candidate_total), 1.0)
+        _, test_freq = self._lookup_candidate_features(
+            queries.candidates.astype(np.int64, copy=False),
+            denominator,
+        )
+        return test_freq.astype(np.float64, copy=False)
+
     def _build_dense_features(self) -> None:
         self.train_seen_dense = None
         self.test_freq_dense = None

@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "status": "frozen_before_successor_v2_metrics",
+  "experiment_id": "dataset2_cooccur_lift_successor_v2_duel_20260729",
+  "amendment_reason": "The first duel attempt stopped before producing successor metrics because the legacy CUDA-trained near V1 artifact differed from a same-seed CUDA replay by 0.10732766809698313. Subsequent real-feature diagnostics proved CUDA training nondeterministic while CPU training replayed exactly. This amendment changes execution determinism only; candidate shapes, data, folds, weights, seeds, capacity, selection gates, and tie-breaks remain frozen.",
+  "candidate_ids": [
+    "cooccur_lift_full_only_v2",
+    "cooccur_lift_gap_aware_v2"
+  ],
+  "baseline_execution": {
+    "baseline_family_id": "cooccur_lift_aux_expert_v1",
+    "fold_baseline_id": "cooccur_lift_aux_expert_v1_bugfixed_cpu_fold_refit",
+    "selected_weight": 0.5,
+    "full_origin_candidate_id": "cooccur_lift_aux_expert_v1_bugfixed_refit_20260729",
+    "full_origin_online_score": 1.3577315048069973,
+    "full_origin_online_result_sha256": "d93635d3ecfb536e5c99253c3f892be6ae7b8c00ca998395c4c0b59a4fb6deb8",
+    "full_origin_external_role": "safety_gate_only"
+  },
+  "training_device": "cpu",
+  "internal_scoring_device": "cpu",
+  "trainable_heads": [
+    "near_v1_baseline",
+    "near_full_only_v2",
+    "near_gap_aware_v2",
+    "gapped_prior_setwise",
+    "gapped_v1_baseline",
+    "gapped_full_only_v2",
+    "gapped_gap_aware_v2"
+  ],
+  "deterministic_replay_gate": {
+    "runs": 2,
+    "rtol": 0.00002,
+    "atol": 0.000002,
+    "tolerance_relaxation_authorized": false,
+    "required_matches": [
+      "state",
+      "loss",
+      "probability"
+    ]
+  },
+  "historical_near_v1_manifest_role": "diagnostic_only",
+  "historical_near_v1_manifest_sha256": "52ca9c13e521956e502b2221033fd9b774ded3a14ffcde00c7f53684fd1fd459",
+  "historical_cuda_drift_policy": {
+    "report_max_abs_error": true,
+    "participates_in_replay_gate": false,
+    "participates_in_candidate_selection": false,
+    "reason": "The historical artifact was trained on the diagnosed nondeterministic CUDA path and is not an authoritative replay target for the corrected CPU V1."
+  },
+  "validation_plan_sha256": "07f0ac9a244077a3ad8e7e3cd76bd7c95c6b7c00d8a42766601785f069e95efd",
+  "plan_lock_sha256": "3519a496a5807b18e4b6f0aefdfd9c92dce34cfdf188c0f719458785f2ed6d98",
+  "bugfixed_v1_contract_sha256": "da2e25fadfb83d12a470be80862a83a716d2abf14b141b88a118003e4f5c49ad",
+  "gapped_cache_report_sha256": "7a0f964ce29c5f34dd376fe2d30b57461b233fd7a847a66bed3cf34a16fd392e",
+  "runner_sha256": "1bbf2362e9a27efe039c971f228ddf915af9027c2fe3a6ac01666720a071ea2f",
+  "execution_module_sha256": "354c7730cb1f051944338078192501c77ab0e6b70f663cdb5976ce1f31408b48",
+  "pipeline_script_sha256": "fc97a0b73f8190a7d18c6584b60a2fae61b544fe3a2b8931e113a0c73fe476f0",
+  "selection_contract": {
+    "eligibility_rule": "near_non_decreasing_and_gapped_strict_improvement",
+    "selected_weight": 0.5,
+    "weight_rescan_authorized": false,
+    "feature_rescan_authorized": false,
+    "seed_rescan_authorized": false,
+    "capacity_rescan_authorized": false
+  },
+  "external_authorized": false,
+  "external_effect_size_estimation_authorized": false,
+  "external_calibration_discount_factor": 19.5,
+  "remaining_transport_risk": [
+    "source-conditioned distribution shift",
+    "source-candidate joint-structure shift"
+  ]
+}

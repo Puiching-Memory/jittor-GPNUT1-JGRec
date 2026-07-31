@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "protocol": "cooccur_lift_successor_v2_online_package_v1",
+  "status": "frozen_after_external_acceptance_before_online_scoring",
+  "experiment_id": "dataset2_cooccur_lift_successor_v2_duel_20260729",
+  "candidate_id": "cooccur_lift_gap_aware_v2",
+  "candidate_config_sha256": "2b4a0bf3c61e183f28ffbda7e601b94298e0a68acbdbec8fc691fb6efb325ed3",
+  "selection_lock_sha256": "b52b529534b717ef136c82b17a090889b5aa4d67aed8618605ecbfda828e7e30",
+  "gap_aware_model_sha256": "526a28c3eb642ee6c29c05f34e44a5a5b6bd3eeda67da24b1c7f5704886880cd",
+  "external_open_count": 1,
+  "external_decision": {
+    "status": "accepted",
+    "decision_role": "safety_gate_only",
+    "effect_size_estimation_authorized": false,
+    "receipt_sha256": "6862dd37993971ebe78ac56a756d2a4bfa5b2e6076a2aae958a98e8cbc4c83a1",
+    "report_sha256": "dddfe6ad03b4a6a74948bb0467a22cc175d434eefee808116046a29eba0f94ac",
+    "gate_summary_sha256": "ab107216c2d7b17beab6e100b6657985d61e1925e9b27a5184964c1ba9cdcb7d",
+    "all_seven_gates_passed": true,
+    "package_authorized": true
+  },
+  "support_semantics": {
+    "short_window_seconds": 17038080,
+    "history_end": 1296259200,
+    "indicator_formula": "int(query_time - min(query_time, history_end) < short_window_seconds)",
+    "indicator_collapsed_rows": 61109,
+    "indicator_supported_rows": 92311,
+    "indicator_collapsed_fraction": 0.39831182375179247,
+    "training_mixture_collapsed_rows_reference": 61325,
+    "training_mixture_collapsed_fraction": 0.39971972363446745,
+    "separation_rule": "The audited all-zero rate sets the training mixture weight; it must not replace the preregistered temporal availability indicator.",
+    "forbidden_proxy": "cooccur_lift_short != 0"
+  },
+  "implementation_sha256": {
+    "test_materializer_script": "eb5deb0b02e18b7fb6089af5685aa80ba90afa8cf08abd9291a7ff91c1c1b563",
+    "package_script": "2776340b683979b61ff93f1d24a4faf2ea0a25dd6b0eb0cf0e47fc4079a4d26c"
+  },
+  "input_sha256": {
+    "source_checkpoint": "0b0a846cb6c7f5b5403a75a04ed12707340f024dee99a27cded3258bb108a7aa",
+    "train_csv": "da50210bbd0581de89971d907eb7ca590a4fc0364b41ee50730ae2a13d8de4a0",
+    "test_csv": "389e330d6a21317cc1a0a013c878850c2324e916b2392901b3c039384e201372",
+    "bugfixed_v1_champion_zip": "b90960c3427f70e2745bcb381289fca4625c208ebfaefb43ecdbc7a7387ff2f0"
+  },
+  "package_contract": {
+    "selected_weight": 0.5,
+    "baseline": "bugfixed_v1_new_champion_package",
+    "expected_dataset1_member_sha256": "81285eddfba612b9c05e96075be29a15718d8a94839d143e3083bf5353644369",
+    "expected_dataset2_member_sha256": "702f46d6a14b36e5330cac315ceefb130e54d4a68f9a173ce9d65c5a1d06192f",
+    "v1_family_weight_rescan_authorized": false
+  },
+  "prior_online_attempt": {
+    "status": "stopped_before_output_directory_creation",
+    "reason": "mistakenly equated the training-mixture all-zero count with the temporal support-indicator count",
+    "test_probabilities_created": false,
+    "package_created": false
+  },
+  "prohibited": [
+    "reopening external",
+    "using external raw deltas as an effect-size estimate",
+    "using the short-lift nonzero pattern as the support indicator",
+    "changing the selected weight",
+    "changing the candidate model"
+  ]
+}

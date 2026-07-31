@@ -10,6 +10,9 @@ from jgrec.core.types import InteractionTable, TestQuery, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.logging import log, track
 from jgrec.rankers.common.early_stop import LossEarlyStopper
+from jgrec.rankers.common.optimization import (
+    set_tower_optimizer_learning_rate,
+)
 
 from .config import SEQUENCE_FEATURE_NAMES, SequenceTowerConfig
 from .sequence_model import (
@@ -91,6 +94,14 @@ class SequenceTower:
 
         stopper = LossEarlyStopper(patience=self.config.early_stop_patience)
         for epoch in track(range(1, self.config.epochs + 1), description="gru-seq", total=self.config.epochs, enabled=verbose):
+            learning_rate = set_tower_optimizer_learning_rate(
+                optimizer,
+                initial_lr=self.config.lr,
+                epoch=epoch,
+                total_epochs=self.config.epochs,
+                schedule=getattr(self.config, "lr_schedule", "constant"),
+                min_lr_ratio=getattr(self.config, "min_lr_ratio", 0.0),
+            )
             order = rng.permutation(train_idx.shape[0])
             losses: list[float] = []
             for start in range(0, train_idx.shape[0], self.config.batch_size):
@@ -101,7 +112,11 @@ class SequenceTower:
 
             mean_loss = float(np.mean(losses)) if losses else 0.0
             val_loss = _eval_loss(self.model, seqs, time_deltas, lengths, pos_items, neg_items, val_idx, self.config.batch_size) if val_size > 0 else 0.0
-            log(f"[gru-seq] epoch={epoch} loss={mean_loss:.5f} val_loss={val_loss:.5f}", enabled=verbose)
+            log(
+                f"[gru-seq] epoch={epoch} lr={learning_rate:.8g} "
+                f"loss={mean_loss:.5f} val_loss={val_loss:.5f}",
+                enabled=verbose,
+            )
             if stopper.update(epoch, val_loss if val_size > 0 else mean_loss, self.model):
                 log(f"[gru-seq] early_stop epoch={epoch} best={stopper.best_epoch} val={stopper.best_loss:.5f}", enabled=verbose)
                 break
