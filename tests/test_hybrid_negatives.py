@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from jgrec.core.types import Interaction, InteractionTable
 from jgrec.idmap import NodeIdMap
@@ -21,6 +22,34 @@ def _context(interactions: list[Interaction]) -> NegativeSamplingContext:
         index=index,
         dst_values=NodeIdMap.from_interactions(interaction_table).dst_values,
     )
+
+
+def test_training_config_negative_overrides_fall_back_to_legacy_count():
+    config = TrainingConfig(num_negatives=7)
+
+    assert config.resolved_train_num_negatives() == 7
+    assert config.resolved_val_num_negatives() == 7
+    assert config.two_tower_config().num_negatives == 7
+
+
+def test_training_config_resolves_independent_negative_overrides():
+    config = TrainingConfig(num_negatives=7, train_num_negatives=3, val_num_negatives=9)
+
+    assert config.resolved_train_num_negatives() == 3
+    assert config.resolved_val_num_negatives() == 9
+    assert config.two_tower_config().num_negatives == 3
+
+
+@pytest.mark.parametrize(
+    ("config", "resolver", "message"),
+    [
+        (TrainingConfig(train_num_negatives=0), "resolved_train_num_negatives", "train_num_negatives"),
+        (TrainingConfig(val_num_negatives=-1), "resolved_val_num_negatives", "val_num_negatives"),
+    ],
+)
+def test_training_config_rejects_invalid_negative_overrides(config, resolver, message):
+    with pytest.raises(ValueError, match=message):
+        getattr(config, resolver)()
 
 
 def test_mixed_negative_sampling_prefers_recent_and_structural_hard_candidates():
@@ -240,18 +269,21 @@ def test_learn_fusion_uses_visible_dst_pools_for_train_and_val(monkeypatch):
         val_ratio=0.25,
         context_ratio=0.5,
         num_negatives=1,
+        train_num_negatives=2,
+        val_num_negatives=4,
         epochs=1,
         max_train_events=0,
         max_val_events=0,
         encoder_state_cache_enabled=False,
         test_candidate_negative_ratio=1.0,
         auto_strategy_enabled=False,
+        fusion_mode="mlp",
         verbose=False,
     )
     ranker = TemporalHybridRanker()
     ranker.id_map = NodeIdMap.from_interactions(interactions)
     ranker.feature_names = ("feature",)
-    captured: list[tuple[str, tuple[int, ...], float]] = []
+    captured: list[tuple[str, tuple[int, ...], float, int]] = []
 
     class DummyEncoder:
         feature_dim = 1
@@ -260,7 +292,14 @@ def test_learn_fusion_uses_visible_dst_pools_for_train_and_val(monkeypatch):
         return DummyEncoder()
 
     def fake_build_supervised_features(positives, encoder, dst_pool, config, rng, label):
-        captured.append((label, tuple(int(value) for value in dst_pool), config.test_candidate_negative_ratio))
+        captured.append(
+            (
+                label,
+                tuple(int(value) for value in dst_pool),
+                config.test_candidate_negative_ratio,
+                config.num_negatives,
+            )
+        )
         return np.zeros((len(positives), config.num_negatives + 1, encoder.feature_dim), dtype=np.float32)
 
     class DummyFusionResult:
@@ -276,6 +315,6 @@ def test_learn_fusion_uses_visible_dst_pools_for_train_and_val(monkeypatch):
     ranker._learn_fusion(interactions, config)
 
     assert captured == [
-        ("train_features", (10, 20, 30, 40, 50, 60, 70, 80), 1.0),
-        ("val_features", (10, 20, 30, 40, 50, 60, 70, 80), 1.0),
+        ("train_features", (10, 20, 30, 40, 50, 60, 70, 80), 1.0, 2),
+        ("val_features", (10, 20, 30, 40, 50, 60, 70, 80), 1.0, 4),
     ]

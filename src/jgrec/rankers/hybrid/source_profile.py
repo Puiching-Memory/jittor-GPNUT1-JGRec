@@ -13,6 +13,9 @@ from jgrec.idmap import NodeIdMap
 from jgrec.logging import log, track
 from jgrec.rankers.common.byte_budget_lru import ByteBudgetLRU
 from jgrec.rankers.common.early_stop import LossEarlyStopper
+from jgrec.rankers.common.optimization import (
+    set_tower_optimizer_learning_rate,
+)
 from jgrec.rankers.common.sparse_counts import SparseCountMap
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
 
@@ -245,6 +248,14 @@ class SourceProfileTower:
         for epoch in track(
             range(1, self.config.epochs + 1), description="source-profile", total=self.config.epochs, enabled=verbose
         ):
+            learning_rate = set_tower_optimizer_learning_rate(
+                optimizer,
+                initial_lr=self.config.lr,
+                epoch=epoch,
+                total_epochs=self.config.epochs,
+                schedule=getattr(self.config, "lr_schedule", "constant"),
+                min_lr_ratio=getattr(self.config, "min_lr_ratio", 0.0),
+            )
             order = rng.permutation(train_size)
             losses: list[float] = []
             for start in range(0, train_size, max(int(self.config.batch_size), 1)):
@@ -254,7 +265,11 @@ class SourceProfileTower:
                 losses.append(float(loss.item()))
             mean_loss = float(np.mean(losses)) if losses else 0.0
             val_loss = self._item2vec_val_loss(model, centers, positives, negatives, val_idx) if val_size > 0 else 0.0
-            log(f"[source-profile] epoch={epoch} loss={mean_loss:.5f} val_loss={val_loss:.5f}", enabled=verbose)
+            log(
+                f"[source-profile] epoch={epoch} lr={learning_rate:.8g} "
+                f"loss={mean_loss:.5f} val_loss={val_loss:.5f}",
+                enabled=verbose,
+            )
             release_memory()
             stop_signal = val_loss if val_size > 0 else mean_loss
             if stopper.update(epoch, stop_signal, model):

@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "status": "frozen_before_any_setwise_prob_seed_bag_metric",
+  "integration_id": "setwise_prob_seed_bag_v1",
+  "scope": "Dataset2 exact-integrated rolling selection followed by at most one external opening",
+  "weights": [
+    0.05,
+    0.1,
+    0.2,
+    0.3,
+    0.4,
+    0.5
+  ],
+  "folds": [
+    {
+      "fold_id": "fold-0",
+      "train_rows": [
+        0,
+        79909
+      ],
+      "score_rows": [
+        79909,
+        118816
+      ]
+    },
+    {
+      "fold_id": "fold-1",
+      "train_rows": [
+        0,
+        118816
+      ],
+      "score_rows": [
+        118816,
+        159804
+      ]
+    },
+    {
+      "fold_id": "fold-2",
+      "train_rows": [
+        0,
+        159804
+      ],
+      "score_rows": [
+        159804,
+        200000
+      ]
+    }
+  ],
+  "base_seed": 60,
+  "seed_salts": [
+    10007,
+    20011
+  ],
+  "training_seed_formula": "base_seed + fold_index * 1009 + seed_salt",
+  "setwise_epochs": 4,
+  "batch_size": 256,
+  "learning_rate": 0.001,
+  "weight_decay": 0.0,
+  "early_stop_patience": 0,
+  "graph_score_contract": "Use the same per-fold gnn_short column overlay and score semantics as today's exact-rolling run.",
+  "auxiliary_formula": "0.5 * setwise_probability(seed_salt=10007) + 0.5 * setwise_probability(seed_salt=20011)",
+  "candidate_formula": "candidate_w = (1 - w) * fold_champion_probability + w * auxiliary_probability",
+  "rolling_selector": "scripts/select_robust_integrated_weight.py",
+  "rolling_gate": "All existing exact_integrated_rolling_weight_selection_v1 hard gates must pass before a selection lock may exist.",
+  "external_evaluator": "scripts/evaluate_locked_weight_external.py",
+  "external_open_limit": 1,
+  "package_rule": "Package only when the one-shot external evaluation status is accepted.",
+  "stop_rule": "Any rolling rejection or external rejection closes this integration. Do not change weights, salts, epochs, folds, or rescan.",
+  "prohibited": [
+    "rank averaging",
+    "weight rescan",
+    "seed-salt replacement after metrics",
+    "model selection on the consumed validation",
+    "more than one external opening",
+    "package generation before accepted external evidence"
+  ]
+}

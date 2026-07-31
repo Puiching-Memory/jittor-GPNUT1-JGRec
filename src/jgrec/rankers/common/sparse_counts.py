@@ -4,6 +4,7 @@ import numpy as np
 
 EMPTY_I32 = np.empty(0, dtype=np.int32)
 EMPTY_I64 = np.empty(0, dtype=np.int64)
+EMPTY_F32 = np.empty(0, dtype=np.float32)
 
 
 class SparseCountMap:
@@ -149,7 +150,11 @@ class SparseCountMap:
         if left_keys.size == 0 or len(self.row_keys) == 0:
             return result
         indices = np.searchsorted(self.row_keys, left_keys)
-        valid = (indices < len(self.row_keys)) & (self.row_keys[indices] == left_keys)
+        valid = indices < len(self.row_keys)
+        valid_positions = np.flatnonzero(valid)
+        valid[valid_positions] &= (
+            self.row_keys[indices[valid_positions]] == left_keys[valid_positions]
+        )
         for i in np.flatnonzero(valid):
             idx = indices[i]
             start, end = int(self.row_offsets[idx]), int(self.row_offsets[idx + 1])
@@ -175,6 +180,121 @@ class SparseCountMap:
         row_indices = np.searchsorted(self.row_keys, left_keys)
         valid_rows = np.flatnonzero(row_indices < len(self.row_keys))
         valid_rows = valid_rows[self.row_keys[row_indices[valid_rows]] == left_keys[valid_rows]]
+        for left_row in valid_rows:
+            row_idx = row_indices[left_row]
+            start, end = int(self.row_offsets[row_idx]), int(self.row_offsets[row_idx + 1])
+            columns = self.col_indices[start:end]
+            positions = np.searchsorted(columns, candidate_ids)
+            matched = np.flatnonzero(positions < len(columns))
+            matched = matched[columns[positions[matched]] == candidate_ids[matched]]
+            if exclude_equal:
+                matched = matched[candidate_ids[matched] != left_keys[left_row]]
+            result[matched] += self.values[start + positions[matched]]
+        return result
+
+    def __bool__(self) -> bool:
+        return len(self.row_keys) > 0
+
+    def nnz(self) -> int:
+        return len(self.values)
+
+
+class SparseFloatMap:
+    """CSR-based sparse map for compact float-valued graph aggregates."""
+
+    __slots__ = ("col_indices", "row_keys", "row_offsets", "values")
+
+    def __init__(
+        self,
+        row_keys: np.ndarray,
+        row_offsets: np.ndarray,
+        col_indices: np.ndarray,
+        values: np.ndarray,
+    ) -> None:
+        self.row_keys = np.asarray(row_keys, dtype=np.int32)
+        self.row_offsets = np.asarray(row_offsets, dtype=np.int32)
+        self.col_indices = np.asarray(col_indices, dtype=np.int32)
+        self.values = np.asarray(values, dtype=np.float32)
+
+    @classmethod
+    def empty(cls) -> SparseFloatMap:
+        return cls(EMPTY_I32, np.zeros(1, dtype=np.int32), EMPTY_I32, EMPTY_F32)
+
+    @classmethod
+    def from_nested_dict(cls, data: dict[int, dict[int, float]]) -> SparseFloatMap:
+        if not data:
+            return cls.empty()
+        sorted_keys = sorted(data)
+        all_cols: list[int] = []
+        all_values: list[float] = []
+        offsets = [0]
+        for key in sorted_keys:
+            for col, value in sorted(data[key].items()):
+                all_cols.append(col)
+                all_values.append(value)
+            offsets.append(len(all_cols))
+        return cls(
+            np.asarray(sorted_keys, dtype=np.int32),
+            np.asarray(offsets, dtype=np.int32),
+            np.asarray(all_cols, dtype=np.int32),
+            np.asarray(all_values, dtype=np.float32),
+        )
+
+    @classmethod
+    def from_snapshot(cls, data: dict) -> SparseFloatMap:
+        if data.get("format") != "csr-float-v1":
+            return cls.from_nested_dict(data)
+        result = cls(
+            data["row_keys"],
+            data["row_offsets"],
+            data["col_indices"],
+            data["values"],
+        )
+        if result.row_offsets.shape != (len(result.row_keys) + 1,):
+            raise ValueError("invalid sparse float row offsets")
+        if result.col_indices.shape != result.values.shape:
+            raise ValueError("invalid sparse float columns and values")
+        if (
+            result.row_offsets.size == 0
+            or result.row_offsets[0] != 0
+            or result.row_offsets[-1] != len(result.values)
+        ):
+            raise ValueError("invalid sparse float offset bounds")
+        return result
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "format": "csr-float-v1",
+            "row_keys": self.row_keys,
+            "row_offsets": self.row_offsets,
+            "col_indices": self.col_indices,
+            "values": self.values,
+        }
+
+    def copy(self) -> SparseFloatMap:
+        return SparseFloatMap(
+            self.row_keys.copy(),
+            self.row_offsets.copy(),
+            self.col_indices.copy(),
+            self.values.copy(),
+        )
+
+    def sum_row_values_for_candidates(
+        self,
+        left_keys: np.ndarray,
+        candidate_ids: np.ndarray,
+        *,
+        exclude_equal: bool = False,
+    ) -> np.ndarray:
+        result = np.zeros(len(candidate_ids), dtype=np.float64)
+        if left_keys.size == 0 or candidate_ids.size == 0 or len(self.row_keys) == 0:
+            return result
+
+        row_indices = np.searchsorted(self.row_keys, left_keys)
+        valid_rows = np.flatnonzero(row_indices < len(self.row_keys))
+        valid_rows = valid_rows[
+            self.row_keys[row_indices[valid_rows]] == left_keys[valid_rows]
+        ]
         for left_row in valid_rows:
             row_idx = row_indices[left_row]
             start, end = int(self.row_offsets[row_idx]), int(self.row_offsets[row_idx + 1])

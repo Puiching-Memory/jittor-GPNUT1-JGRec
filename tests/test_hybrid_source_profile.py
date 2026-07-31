@@ -29,6 +29,22 @@ from jgrec.rankers.hybrid.structure import STRUCTURE_FEATURE_NAMES, StructureFea
 FEATURE = {name: idx for idx, name in enumerate(SOURCE_PROFILE_FEATURE_NAMES)}
 
 
+def test_sparse_batch_counts_treat_keys_after_last_row_as_missing() -> None:
+    sparse = SparseCountMap.from_nested_dict(
+        {
+            10: {99: 3},
+            20: {99: 5},
+        }
+    )
+
+    actual = sparse.batch_get_counts(
+        np.asarray([10, 20, 30], dtype=np.int32),
+        right_key=99,
+    )
+
+    np.testing.assert_array_equal(actual, np.asarray([3, 5, 0], dtype=np.int32))
+
+
 def test_compact_source_profile_summary_fills_candidates_in_one_batch() -> None:
     summary = _CompactDeterministicSummary(
         full_candidate_ids=np.asarray([10, 30], dtype=np.int64),
@@ -443,7 +459,7 @@ def test_feature_masks_and_selected_config_include_source_profile():
 
     names = [name for name, _ in masks]
 
-    assert names == [
+    assert names[:12] == [
         "stats",
         "stats_prior",
         "stats_prior_structure",

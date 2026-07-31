@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "status": "frozen_before_bugfixed_refit",
+  "candidate_id": "cooccur_lift_aux_expert_v1_bugfixed_refit_20260729",
+  "integration_id": "cooccur_lift_aux_expert_v1",
+  "purpose": "Rebuild the unchanged v1 candidate with the later deterministic fusion implementation and submit it once as an external safety check.",
+  "parent_promoted_manifest": "docs/experiments/cooccur-lift-aux-expert-v1.promoted.json",
+  "candidate_shape": {
+    "feature_names": [
+      "cooccur_lift_full",
+      "cooccur_lift_short"
+    ],
+    "context_transform_version": 1,
+    "context_feature_count": 195,
+    "hidden_dim_source": "source_checkpoint.dataset2.setwise_hidden_dim",
+    "epochs": 4,
+    "batch_size": 256,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0,
+    "feature_indices": "tuple(range(195))"
+  },
+  "selected_weight": 0.5,
+  "weight_rescan_authorized": false,
+  "full_origin_seed": 33100,
+  "training_assets": {
+    "frozen_config": "docs/experiments/cooccur-lift-aux-expert-v1.frozen.json",
+    "frozen_config_sha256": "55561f8c52d0be1b97fbc9a80742e11995fa1cbe3a1b836f475a2d85fde34c78",
+    "selection_lock": "result/dataset2_cooccur_lift_aux_expert_v1_20260728_compact_retry2/rolling-selection/selection-lock.json",
+    "selection_lock_sha256": "cf3e933e1edb3b96330330c4de4f50d5c87a6094dc8661c72a5768852f2f9839",
+    "source_checkpoint": "checkpoints/d1_time_ramp_g050_d2_gnn_short_none_e50_edges40000_setwise_w080_seed60_20260727.pkl",
+    "source_checkpoint_sha256": "0b0a846cb6c7f5b5403a75a04ed12707340f024dee99a27cded3258bb108a7aa",
+    "train_cache_report": "result/dataset2_joint_recent200k_full100_seed60_20260725/train-cache-report.json",
+    "train_cache_report_sha256": "a6bbf7416eb234810aee4682b67cfbb04fa562bb3c576540cd6f5b3f297fa4b6",
+    "validation_cache_report": "result/dataset2_joint_recent200k_full100_seed60_20260725/validation-cache-report.json",
+    "validation_cache_report_sha256": "92a62ea3b87a098bd1f3c2b39c43fed31b9ff0f2d865c24234c0905ad3a20911",
+    "train_feature_sha256": "b277fc53407f3b28d92a663dbcc071c5c37ac245d5f9d49833e70e80d52aa33d",
+    "train_lift_features": "result/dataset2_cooccur_lift_aux_expert_v1_20260728_compact_retry2/artifacts/lift-features.npy",
+    "train_lift_features_sha256": "c4ca979de5c56de772edd87c0c9792868f3e22cb47e333ade4c2ca8fe7ff64f4",
+    "train_short_none": "result/dataset2_targeted_gnn_edges_seed60_20260725/artifacts/short_none.train-scores.npy",
+    "train_short_none_sha256": "8bd4fb9af4da319765a313667359a8a2b1fd91bdd4903cf4b2bca2dbc17f2ead",
+    "joint_cache_provenance_required": true,
+    "joint_build_id": "f4051d5d0c684ee8b7b69694ed5217ae",
+    "joint_build_pid": 560900
+  },
+  "implementation_contract": {
+    "fusion_source": "src/jgrec/rankers/hybrid/fusion.py",
+    "fusion_source_sha256": "0897b5a2b27de31b4c0186fee1eeab1ac7e3f466890528eac3cbb276e0f128e9",
+    "requires_rng_derived_jittor_seed": true,
+    "requires_numpy_initialized_fusion_mlp": true,
+    "historical_model_reuse_authorized": false,
+    "training_device": "cpu",
+    "test_scoring_device": "cuda",
+    "gpu_training_authorized": false,
+    "device_freeze_reason": "Preflight replay on the same real feature rows showed default CUDA max_abs_error=0.05319197303453227 and cuBLAS deterministic-workspace max_abs_error=0.048016706738819914, while CPU replay was byte-exact at both 2000 and 20000 rows."
+  },
+  "deterministic_replay_gate": {
+    "runs": 2,
+    "rtol": 0.00002,
+    "atol": 0.000002,
+    "tolerance_relaxation_authorized": false,
+    "historical_drift_to_explain_not_accept": 0.10732766809698313
+  },
+  "package_contract": {
+    "champion_zip": "result/d1_time_ramp_g050_d2_gnn_short_none_e50_edges40000_setwise_w080_seed60_20260727/result.zip",
+    "champion_zip_sha256": "104f68dc82aed862600be3328f779d80e04746283c0ec75193a3582266438193",
+    "dataset1_member_sha256": "81285eddfba612b9c05e96075be29a15718d8a94839d143e3083bf5353644369",
+    "dataset2_member_sha256": "b5544d15fac4bd6d5737c5e7e30d5d413553d1e11109d5ee23acb7b18513cc3a",
+    "test_csv_sha256": "389e330d6a21317cc1a0a013c878850c2324e916b2392901b3c039384e201372",
+    "dataset1_rows": 61051,
+    "dataset2_rows": 153420,
+    "candidate_count": 100,
+    "test_scoring_order": "source_grouped",
+    "dataset2_formula": "0.5 * frozen_champion_probability + 0.5 * bugfixed_v1_auxiliary_probability"
+  },
+  "external_authorization": {
+    "authorized_by": "user_instruction_in_current_conversation",
+    "maximum_submissions": 1,
+    "safety_gate_only": true,
+    "effect_size_estimation_authorized": false,
+    "transport_discount": 19.5
+  },
+  "prohibited": [
+    "v2 training or submission",
+    "v1 weight rescan",
+    "replay tolerance relaxation",
+    "historical external evidence reuse for the new model",
+    "model substitution after training",
+    "more than one external submission"
+  ]
+}

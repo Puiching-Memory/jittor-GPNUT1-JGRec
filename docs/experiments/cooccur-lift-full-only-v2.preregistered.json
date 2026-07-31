@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "protocol": "cooccur_lift_successor_candidate_v2",
+  "status": "preregistered_before_any_successor_v2_metric",
+  "experiment_id": "dataset2_cooccur_lift_successor_v2_duel_20260729",
+  "candidate_id": "cooccur_lift_full_only_v2",
+  "baseline": {
+    "baseline_id": "cooccur_lift_aux_expert_v1_promoted_champion",
+    "integration_id": "cooccur_lift_aux_expert_v1",
+    "checkpoint_sha256": "796d8d21a0c706ad11f244385b314d471d522c3b807748a54fe4ac78722f5880",
+    "selected_weight": 0.5
+  },
+  "hypothesis": {
+    "change": "Remove cooccur_lift_short and all of its setwise-context channels.",
+    "mechanism": "Allocate the auxiliary head only to the full-history lift signal that survives online transport.",
+    "preregistered_evidence": {
+      "online_full_share_of_separate_first_layer_energy": 0.765385,
+      "online_short_all_zero_row_fraction": 0.39971972363446745,
+      "claim_limit": "Mechanistic motivation only; these values are not successor effect-size estimates."
+    }
+  },
+  "feature_schema": {
+    "base_feature_count": 63,
+    "feature_names": [
+      "cooccur_lift_full"
+    ],
+    "feature_formula": {
+      "cooccur_lift_full": "log1p(N_full) - log1p(pop_full)"
+    },
+    "removed_feature_names": [
+      "cooccur_lift_short"
+    ],
+    "appended_feature_indices": [
+      63
+    ],
+    "augmented_feature_count": 64,
+    "context_transform_version": 1,
+    "context_feature_count": 192,
+    "context_feature_indices": "tuple(range(192))"
+  },
+  "index_build": {
+    "history_limit": 64,
+    "build_transitions": false,
+    "build_cooccurs": true,
+    "cooccur_history_limit": 256,
+    "future_only_transition_cooccur": false,
+    "cooccur_time_decay_ratio": 0.0
+  },
+  "horizon_training": {
+    "causal_only": true,
+    "near_fold_count": 3,
+    "gapped_fold_count": 3,
+    "gapped_cache_contract": {
+      "source_interaction_scope": "sorted Dataset2 train.csv rows before the frozen internal reference end; no external rows",
+      "encoder_context_rows": [
+        0,
+        1137757
+      ],
+      "encoder_context_formula": "floor(min(gapped train row stop) * champion context_ratio) = floor(1517010 * 0.75)",
+      "union_training_interaction_rows": [
+        1359708,
+        1519512
+      ],
+      "candidate_count": 100,
+      "candidate_seed": 60,
+      "base_encoder_reused_across_gapped_folds": true,
+      "gnn_short_overlay": "short_none, 50 epochs, 40000 max train edges, trained only on encoder_context_rows with seed 1060",
+      "observation_and_availability_times_separated": true
+    },
+    "gapped_fold_specs": [
+      {
+        "fold_id": "gapped-p75",
+        "deployment_horizon_quantile": 0.75,
+        "minimum_gap_seconds": 21686400,
+        "gap_seconds": 21686400,
+        "train_interaction_rows": [
+          1437101,
+          1517010
+        ],
+        "cache_train_rows": [
+          77393,
+          157302
+        ],
+        "train_time_max": 1222387200,
+        "score_interaction_rows": [
+          1766169,
+          1800889
+        ],
+        "cache_score_rows": [
+          159804,
+          194524
+        ],
+        "score_time_min": 1244073600,
+        "score_time_max": 1246752000
+      },
+      {
+        "fold_id": "gapped-p90",
+        "deployment_horizon_quantile": 0.9,
+        "minimum_gap_seconds": 26611200,
+        "gap_seconds": 26611200,
+        "train_interaction_rows": [
+          1399367,
+          1518183
+        ],
+        "cache_train_rows": [
+          39659,
+          158475
+        ],
+        "train_time_max": 1222473600,
+        "score_interaction_rows": [
+          1832200,
+          1874240
+        ],
+        "cache_score_rows": [
+          194524,
+          236564
+        ],
+        "score_time_min": 1249084800,
+        "score_time_max": 1252022400
+      },
+      {
+        "fold_id": "gapped-p100",
+        "deployment_horizon_quantile": 1.0,
+        "minimum_gap_seconds": 30153600,
+        "gap_seconds": 30153600,
+        "train_interaction_rows": [
+          1359708,
+          1519512
+        ],
+        "cache_train_rows": [
+          0,
+          159804
+        ],
+        "train_time_max": 1222560000,
+        "score_interaction_rows": [
+          1881895,
+          1922366
+        ],
+        "cache_score_rows": [
+          236564,
+          277035
+        ],
+        "score_time_min": 1252713600,
+        "score_time_max": 1255824000
+      }
+    ],
+    "feature_availability_contract": {
+      "training_rows": "availability_time = observation_time",
+      "gapped_score_rows": "availability_time = fold train_time_max",
+      "full_lift_upper_cutoff": "strictly before availability_time",
+      "short_lift_lower_cutoff": "strictly after observation_time - short_window_seconds"
+    },
+    "support_state_augmentation": "none; full-only training uses each causal training row once",
+    "within_horizon_aggregation": "equal_weight_fold_mean",
+    "candidate_comparison_contract": "Both successor candidates use identical causal near and gapped training/scoring rows."
+  },
+  "auxiliary_head": {
+    "type": "listwise_setwise",
+    "hidden_dim": "champion setwise_hidden_dim",
+    "epochs": 4,
+    "batch_size": 256,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0,
+    "early_stop_patience": 0,
+    "selection_metric": "mrr"
+  },
+  "randomness": {
+    "base_seed": 60,
+    "seed_salt": 30013,
+    "training_seed_formula": "base_seed + fold_index * 1009 + seed_salt",
+    "seed_rescan_authorized": false
+  },
+  "integration": {
+    "selected_weight": 0.5,
+    "candidate_formula": "0.50 * fold_champion_probability + 0.50 * auxiliary_probability",
+    "weight_rescan_authorized": false,
+    "formula_rescan_authorized": false
+  },
+  "selection_contract": {
+    "eligibility_rule": "near_non_decreasing_and_gapped_strict_improvement",
+    "external_role": "safety_gate_only",
+    "external_effect_size_estimation_authorized": false,
+    "external_calibration_discount_factor": 19.5
+  },
+  "remaining_transport_risk": {
+    "excluded_by_current_audit": "Marginal candidate-popularity distribution shift.",
+    "not_excluded": [
+      "source-conditioned distribution shift",
+      "source-candidate joint-structure shift"
+    ],
+    "next_audit_trigger": "Candidate passes every gapped fold but shrinks again online."
+  },
+  "prohibited": [
+    "v1-family weight rescan",
+    "short-window rescan",
+    "seed or capacity scan",
+    "candidate mutation after any successor metric",
+    "external opening before the dual-horizon gate passes",
+    "external raw delta as an effect-size estimate"
+  ]
+}

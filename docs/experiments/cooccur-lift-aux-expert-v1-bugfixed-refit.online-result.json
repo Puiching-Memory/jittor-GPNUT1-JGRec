@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "status": "external_safety_gate_passed",
+  "candidate_id": "cooccur_lift_aux_expert_v1_bugfixed_refit_20260729",
+  "integration_id": "cooccur_lift_aux_expert_v1",
+  "submission_method": "manual_upload_by_user",
+  "score_source": "user_reported_in_current_conversation",
+  "online_score": 1.3577315048069973,
+  "previous_promoted_v1_online_score": 1.357529740346302,
+  "raw_delta": 0.0002017644606953,
+  "relative_delta_percent": 0.014862618084803833,
+  "transport_discount": 19.5,
+  "calibrated_delta_for_interpretation_only": 0.000010346895420271795,
+  "safety_gate_only": true,
+  "effect_size_estimation_authorized": false,
+  "promotion_authorized": false,
+  "package_sha256": "b90960c3427f70e2745bcb381289fca4625c208ebfaefb43ecdbc7a7387ff2f0",
+  "model_sha256": "73788cb3c71c2b4768d7456f3995ddbd131812a700eabd9e9ee914a359b98d52",
+  "candidate_contract_sha256": "da2e25fadfb83d12a470be80862a83a716d2abf14b141b88a118003e4f5c49ad",
+  "training_report_sha256": "949210d0bd6a4154f885286973f5772c2ab36414f647a0431ba07c43d4b3758b",
+  "deterministic_replay_max_abs_error": 0.0,
+  "tolerance_relaxed": false,
+  "v2_executed": false,
+  "weight_rescan_observed": false,
+  "recorded_date": "2026-07-29",
+  "notes": [
+    "The external result passes the non-shrink safety gate.",
+    "The calibrated delta is retained only to enforce the frozen 19.5x interpretation discount; it is not an effect-size estimate.",
+    "No platform receipt identifier was supplied, so package identity is anchored by the locally audited SHA-256 and the user's manual-upload report."
+  ]
+}

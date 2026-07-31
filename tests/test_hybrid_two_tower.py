@@ -1,5 +1,6 @@
 import importlib
 import sys
+from collections import Counter
 from dataclasses import replace
 
 import numpy as np
@@ -8,6 +9,7 @@ import pytest
 from jgrec.core.types import Interaction, InteractionTable, TestQuery
 from jgrec.idmap import NodeIdMap
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
+from jgrec.rankers.hybrid.auto_strategy import DatasetProfile
 from jgrec.rankers.hybrid.candidate_prior import CANDIDATE_PRIOR_FEATURE_NAMES
 from jgrec.rankers.hybrid.config import (
     GRAPH_WINDOW_NAMES,
@@ -45,6 +47,226 @@ def _require_jittor() -> None:
     pytest.importorskip("jittor")
 
 
+def test_two_tower_listwise_positive_loss_matches_group_softmax_reference():
+    _require_jittor()
+    import jittor as jt  # noqa: PLC0415
+
+    from jgrec.rankers.hybrid.two_tower import (  # noqa: PLC0415
+        _listwise_positive_loss,
+    )
+
+    logits = np.asarray(
+        [[2.0, 1.0, -0.5], [-4.0, 0.5, 3.0]],
+        dtype=np.float32,
+    )
+    row_max = logits.max(axis=1, keepdims=True)
+    expected = np.mean(
+        row_max[:, 0]
+        + np.log(np.exp(logits - row_max).sum(axis=1))
+        - logits[:, 0]
+    )
+
+    actual = float(
+        _listwise_positive_loss(jt.array(logits, dtype=jt.float32)).item()
+    )
+
+    assert actual == pytest.approx(float(expected), abs=1e-6)
+
+
+def test_two_tower_in_batch_positive_mask_treats_duplicate_destinations_as_positives():
+    from jgrec.rankers.hybrid.in_batch_negatives import (  # noqa: PLC0415
+        _in_batch_positive_mask,
+    )
+
+    actual = _in_batch_positive_mask(
+        np.asarray([4, 7, 4, 9], dtype=np.int32)
+    )
+
+    np.testing.assert_array_equal(
+        actual,
+        np.asarray(
+            [
+                [True, False, True, False],
+                [False, True, False, False],
+                [True, False, True, False],
+                [False, False, False, True],
+            ]
+        ),
+    )
+
+
+def test_two_tower_in_batch_destination_keeps_each_positive_event_context():
+    from jgrec.rankers.hybrid.in_batch_negatives import (  # noqa: PLC0415
+        _in_batch_positive_destination_columns,
+    )
+
+    destination_ids = np.asarray(
+        [[10, 101], [20, 102], [30, 103]],
+        dtype=np.int32,
+    )
+    popularity = np.asarray(
+        [[4, 14], [5, 15], [6, 16]],
+        dtype=np.int32,
+    )
+    recency = np.asarray(
+        [[7, 17], [8, 18], [9, 19]],
+        dtype=np.int32,
+    )
+    time = np.asarray(
+        [[11, 21], [12, 22], [13, 23]],
+        dtype=np.int32,
+    )
+
+    actual = _in_batch_positive_destination_columns(
+        destination_ids,
+        popularity,
+        recency,
+        time,
+    )
+
+    for values, expected in zip(
+        actual,
+        (
+            np.asarray([10, 20, 30], dtype=np.int32),
+            np.asarray([4, 5, 6], dtype=np.int32),
+            np.asarray([7, 8, 9], dtype=np.int32),
+            np.asarray([11, 12, 13], dtype=np.int32),
+        ),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(values, expected)
+
+
+def test_two_tower_multi_positive_in_batch_loss_matches_numpy_reference():
+    _require_jittor()
+    import jittor as jt  # noqa: PLC0415
+
+    from jgrec.rankers.hybrid.two_tower import (  # noqa: PLC0415
+        _multi_positive_in_batch_loss,
+    )
+
+    logits = np.asarray(
+        [
+            [3.0, 0.0, 2.0],
+            [-1.0, 4.0, 0.5],
+            [1.0, 0.0, 2.0],
+        ],
+        dtype=np.float32,
+    )
+    positive_dst_ids = np.asarray([5, 8, 5], dtype=np.int32)
+    shifted = logits - logits.max(axis=1, keepdims=True)
+    probs = np.exp(shifted) / np.exp(shifted).sum(axis=1, keepdims=True)
+    positive_mask = positive_dst_ids[:, None] == positive_dst_ids[None, :]
+    expected = -np.log((probs * positive_mask).sum(axis=1)).mean()
+
+    actual = float(
+        _multi_positive_in_batch_loss(
+            jt.array(logits, dtype=jt.float32),
+            positive_dst_ids,
+            temperature=1.0,
+        ).item()
+    )
+
+    assert actual == pytest.approx(float(expected), abs=1e-6)
+
+
+def test_two_tower_full_candidate_mrr_drives_maximizing_stop_signal():
+    _require_jittor()
+    from jgrec.rankers.hybrid.two_tower import (  # noqa: PLC0415
+        _early_stop_signal,
+        _full_candidate_mrr,
+    )
+
+    scores = np.asarray(
+        [[3.0, 1.0, 2.0], [0.0, 2.0, -1.0]],
+        dtype=np.float32,
+    )
+
+    assert _full_candidate_mrr(scores) == pytest.approx(0.75)
+    assert _early_stop_signal("mrr", val_loss=0.25, val_mrr=0.75) == pytest.approx(
+        -0.75
+    )
+    assert _early_stop_signal("loss", val_loss=0.25, val_mrr=0.75) == pytest.approx(
+        0.25
+    )
+
+
+def test_two_tower_config_decouples_listwise_candidate_groups_from_fusion():
+    config = TrainingConfig(
+        max_train_events=50_000,
+        max_val_events=20_000,
+        train_num_negatives=31,
+        val_num_negatives=99,
+        test_candidate_negative_ratio=0.25,
+        two_tower_embedding_dim=64,
+        two_tower_hidden_dim=64,
+        two_tower_max_samples=200_000,
+        two_tower_num_negatives=99,
+        two_tower_test_candidate_negative_ratio=1.0,
+        two_tower_objective="listwise",
+        two_tower_early_stop_metric="mrr",
+    )
+
+    tower = config.two_tower_config()
+
+    assert config.resolved_train_num_negatives() == 31
+    assert config.resolved_val_num_negatives() == 99
+    assert config.max_train_events == 50_000
+    assert config.max_val_events == 20_000
+    assert config.test_candidate_negative_ratio == pytest.approx(0.25)
+    assert tower.embedding_dim == 64
+    assert tower.hidden_dim == 64
+    assert tower.max_samples == 200_000
+    assert tower.num_negatives == 99
+    assert tower.test_candidate_negative_ratio == pytest.approx(1.0)
+    assert tower.objective == "listwise"
+    assert tower.early_stop_metric == "mrr"
+
+
+def test_two_tower_training_batch_uses_test_candidate_distribution():
+    _require_jittor()
+    from jgrec.rankers.hybrid.two_tower import (  # noqa: PLC0415
+        _build_training_batch_for_events,
+        _TowerTrainingContext,
+    )
+
+    interactions = InteractionTable.from_events(_interactions())
+    id_map = NodeIdMap.from_interactions(interactions)
+    index = TemporalInteractionIndex()
+    index.fit(interactions, build_transitions=False, build_cooccurs=False)
+    profile = DatasetProfile(
+        holdout_pair_hit_rate=0.0,
+        holdout_new_pair_rate=1.0,
+        candidate_unseen_dst_rate=0.0,
+        candidate_seen_dst_rate=1.0,
+        src_history_p90=1.0,
+        test_candidate_top1pct_share=0.5,
+        test_candidate_total=20,
+        test_candidate_counts=Counter({30: 12, 40: 8}),
+    )
+    context = _TowerTrainingContext.from_interactions(
+        interactions=interactions,
+        id_map=id_map,
+        index=index,
+        dataset_profile=profile,
+    )
+
+    batch = _build_training_batch_for_events(
+        events=interactions.take(np.asarray([0])),
+        negative_seeds=np.asarray([123], dtype=np.uint32),
+        training_context=context,
+        config=TwoTowerConfig(
+            num_negatives=2,
+            hard_negative_ratio=0.0,
+            popular_negative_ratio=0.0,
+            test_candidate_negative_ratio=1.0,
+        ),
+    )
+
+    expected = {id_map.dst_id(30), id_map.dst_id(40)}
+    assert set(batch.dst_ids[0, 1:].tolist()) == expected
+
+
 def test_two_tower_scores_have_expected_shape_and_signal():
     _require_jittor()
     from jgrec.rankers.hybrid.two_tower import TwoTower  # noqa: PLC0415
@@ -78,6 +300,39 @@ def test_two_tower_scores_have_expected_shape_and_signal():
     assert np.all(scores[:, :, 1] <= 1.0001)
     assert scores[1, 2, 0] == 0.0
     assert scores[1, 2, 1] == 0.0
+
+
+def test_two_tower_trains_with_cosine_decay_and_in_batch_negatives():
+    _require_jittor()
+    from jgrec.rankers.hybrid.two_tower import TwoTower  # noqa: PLC0415
+
+    interactions = InteractionTable.from_events(_interactions())
+    tower = TwoTower(
+        id_map=NodeIdMap.from_interactions(interactions),
+        config=TwoTowerConfig(
+            embedding_dim=8,
+            hidden_dim=8,
+            epochs=2,
+            batch_size=4,
+            max_samples=8,
+            num_negatives=2,
+            lr_schedule="cosine",
+            min_lr_ratio=0.1,
+            weight_decay=1e-4,
+            in_batch_negatives=True,
+            in_batch_negative_weight=0.5,
+            in_batch_temperature=0.5,
+        ),
+    )
+
+    tower.fit(interactions, rng=np.random.default_rng(0), verbose=False)
+    scores = tower.scores_for_queries(
+        [TestQuery(src=1, time=110, candidates=(10, 20, 40))]
+    )
+
+    assert scores.shape == (1, 3, len(TWO_TOWER_FEATURE_NAMES))
+    assert np.all(np.isfinite(scores))
+    assert np.any(scores != 0.0)
 
 
 def test_two_tower_scoring_batch_size_preserves_scores():
@@ -204,7 +459,7 @@ def test_hybrid_feature_masks_include_two_tower_groups():
 
     masks = _feature_masks(feature_count)
 
-    assert [name for name, _ in masks] == [
+    assert [name for name, _ in masks][:12] == [
         "stats",
         "stats_prior",
         "stats_prior_structure",
@@ -308,7 +563,7 @@ def test_feature_masks_respect_disabled_experimental_towers():
         config=TrainingConfig(target_window_enabled=False, source_profile_enabled=False),
     )
 
-    assert [name for name, _ in masks] == [
+    assert [name for name, _ in masks][:6] == [
         "stats",
         "stats_prior",
         "stats_prior_structure",

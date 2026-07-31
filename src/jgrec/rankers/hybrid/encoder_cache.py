@@ -221,6 +221,11 @@ class HybridPrefixStateCache:
             build_cooccurs=self.structure_config.cooccur_enabled,
             cooccur_history_limit=self.structure_config.cooccur_history_limit,
             future_only_transition_cooccur=self.structure_config.future_only_transition_cooccur,
+            cooccur_time_decay_ratio=(
+                self.structure_config.cooccur_time_decay_ratio
+                if self.structure_config.cooccur_time_decay_enabled
+                else 0.0
+            ),
         )
         return index
 

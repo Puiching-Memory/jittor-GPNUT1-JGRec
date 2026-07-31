@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import pickle
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -168,6 +169,65 @@ def load_checkpoint_dataset(path: Path, dataset_name: str) -> Any:
                 break
 
     raise KeyError(f"checkpoint dataset state is missing: {dataset_name}")
+
+
+def compose_checkpoint_datasets(
+    output_path: Path,
+    *,
+    base_checkpoint: Path,
+    replacements: Mapping[str, Path],
+) -> None:
+    """Publish a complete checkpoint with selected dataset states replaced."""
+    base_path = Path(base_checkpoint)
+    base_metadata = load_checkpoint_metadata(base_path)
+    expected_datasets = tuple(str(name) for name in base_metadata["datasets"])
+    unknown = tuple(
+        sorted({str(name) for name in replacements} - set(expected_datasets))
+    )
+    if unknown:
+        raise KeyError(
+            f"checkpoint replacements contain unknown datasets: {', '.join(unknown)}"
+        )
+
+    replacement_paths = {
+        str(name): Path(path) for name, path in replacements.items()
+    }
+    for name, path in replacement_paths.items():
+        metadata = load_checkpoint_metadata(path)
+        if metadata["model_name"] != base_metadata["model_name"]:
+            raise ValueError(
+                f"replacement checkpoint model mismatch for {name}: "
+                f"{metadata['model_name']} != {base_metadata['model_name']}"
+            )
+        if tuple(metadata["datasets"]) != expected_datasets:
+            raise ValueError(
+                f"replacement checkpoint datasets mismatch for {name}"
+            )
+
+    extra_metadata = {
+        key: value
+        for key, value in base_metadata.items()
+        if key not in _RESERVED_METADATA_KEYS
+    }
+    extra_metadata["composed_replacements"] = tuple(
+        sorted(replacement_paths)
+    )
+    writer = ContestCheckpointWriter(
+        Path(output_path),
+        model_name=str(base_metadata["model_name"]),
+        expected_datasets=expected_datasets,
+        metadata=extra_metadata,
+    )
+    try:
+        for name in expected_datasets:
+            source_path = replacement_paths.get(name, base_path)
+            state = load_checkpoint_dataset(source_path, name)
+            writer.add_dataset(name, state)
+            del state
+        writer.finalize()
+    except BaseException:
+        writer.abort()
+        raise
 
 
 def _validate_metadata(metadata: Any) -> None:

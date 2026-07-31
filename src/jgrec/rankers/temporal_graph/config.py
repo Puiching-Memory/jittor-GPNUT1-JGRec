@@ -14,7 +14,7 @@ class TemporalGraphTrainingConfig:
     train_batch_size: int = 256
     lr: float = 0.001
     weight_decay: float = 0.0
-    selection_metric: str = "ap"
+    selection_metric: str = "mrr"
     early_stop_patience: int = 10
     seed: int = 42
     verbose: bool = True

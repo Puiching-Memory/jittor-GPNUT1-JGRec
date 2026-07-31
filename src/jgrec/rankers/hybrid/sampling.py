@@ -477,7 +477,10 @@ def _take_test_candidate_negatives(
 
     weights = context.test_candidate_weights
     draw_size = min(max(target_count * 8, 32), max(len(values), 1))
-    replace = len(values) < draw_size
+    # Rejection of duplicates below gives the same sequential weighted
+    # without-replacement distribution without making NumPy scan the full
+    # candidate vocabulary for every training event.
+    replace = True
     start_count = len(negatives)
     attempts = 0
     while len(negatives) - start_count < target_count and attempts < 5:

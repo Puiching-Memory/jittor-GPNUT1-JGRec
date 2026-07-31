@@ -8,9 +8,12 @@ from jgrec.rankers.hybrid.fusion import (
     _metrics_from_model,
     _metrics_from_model_streaming,
     _set_jittor_seed_from_rng,
+    build_fusion_from_state,
     fit_fusion_mlp,
     fit_fusion_mlp_streaming,
+    predict_logits,
 )
+from jgrec.rankers.hybrid.setwise import setwise_context_features
 
 
 def _features() -> tuple[np.ndarray, np.ndarray]:
@@ -88,6 +91,118 @@ def test_streaming_fusion_keeps_contract_for_memmap_inputs(tmp_path):
     assert np.isfinite(result.best_val_ap)
     assert np.isfinite(result.best_val_mrr)
     assert model is not None
+
+
+def test_base_fusion_context_uses_raw_mean_and_max_relative_channels():
+    train, val = _features()
+    feature_indices = (0, 2, 4)
+
+    model, result = fit_fusion_mlp_streaming(
+        train_features=train,
+        val_features=val,
+        config=FusionConfig(
+            epochs=1,
+            batch_size=4,
+            hidden_dim=8,
+            context_transform_version=1,
+        ),
+        rng=np.random.default_rng(14),
+        verbose=False,
+        feature_indices=feature_indices,
+        candidate_name="base-context",
+    )
+
+    expected = setwise_context_features(train[..., feature_indices])
+    expected_flat = expected.reshape((-1, expected.shape[-1]))
+    assert result.feature_indices == feature_indices
+    assert result.mean.shape == (len(feature_indices) * 3,)
+    assert result.std.shape == (len(feature_indices) * 3,)
+    np.testing.assert_allclose(
+        result.mean,
+        expected_flat.mean(axis=0),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    assert model.linear1.weight.shape[1] == len(feature_indices) * 3
+
+
+def test_predict_logits_auto_contextualizes_raw_selected_features():
+    train, val = _features()
+    feature_indices = (0, 2)
+    model, result = fit_fusion_mlp_streaming(
+        train_features=train,
+        val_features=val,
+        config=FusionConfig(
+            epochs=1,
+            batch_size=4,
+            hidden_dim=8,
+            context_transform_version=1,
+        ),
+        rng=np.random.default_rng(15),
+        verbose=False,
+        feature_indices=feature_indices,
+        candidate_name="base-context-predict",
+    )
+    raw_selected = val[..., feature_indices]
+    explicit_context = setwise_context_features(raw_selected)
+
+    actual = predict_logits(
+        model,
+        raw_selected,
+        result.mean,
+        result.std,
+    )
+    expected = predict_logits(
+        model,
+        explicit_context,
+        result.mean,
+        result.std,
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_build_fusion_from_state_uses_stored_context_input_width():
+    train, val = _features()
+    feature_indices = (0, 2)
+    model, result = fit_fusion_mlp_streaming(
+        train_features=train,
+        val_features=val,
+        config=FusionConfig(
+            epochs=1,
+            batch_size=4,
+            hidden_dim=8,
+            context_transform_version=1,
+        ),
+        rng=np.random.default_rng(16),
+        verbose=False,
+        feature_indices=feature_indices,
+        candidate_name="base-context-restore",
+    )
+
+    restored = build_fusion_from_state(
+        input_dim=len(feature_indices),
+        hidden_dim=8,
+        state=result.state,
+    )
+
+    assert restored.linear1.weight.shape == model.linear1.weight.shape
+    np.testing.assert_allclose(
+        predict_logits(
+            restored,
+            val[..., feature_indices],
+            result.mean,
+            result.std,
+        ),
+        predict_logits(
+            model,
+            val[..., feature_indices],
+            result.mean,
+            result.std,
+        ),
+        rtol=0.0,
+        atol=0.0,
+    )
 
 
 def test_fusion_initialization_is_isolated_from_prior_jittor_rng_consumption():

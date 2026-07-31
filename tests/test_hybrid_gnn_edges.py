@@ -4,6 +4,7 @@ import pytest
 from jgrec.rankers.hybrid.config import GraphTowerConfig
 from jgrec.rankers.hybrid.gnn import (
     _dense_normalized_bipartite_adj,
+    _graph_window_data,
     _graph_window_edges,
     _sample_edges_by_weight,
     _weighted_mapped_edges,
@@ -51,6 +52,35 @@ def test_time_decay_edge_weighting_prefers_recent_repeated_edges():
     edge_index, weights = _weighted_mapped_edges(mapped_edges, "time_decay", time_decay_ratio=0.1)
 
     np.testing.assert_array_equal(edge_index, np.asarray([[0, 1], [1, 2]], dtype=np.int32))
+    assert weights[1] > weights[0]
+
+
+def test_window_edge_data_keeps_weights_for_message_passing_without_sampling():
+    mapped_edges = [
+        (0, 1, 0),
+        (0, 1, 10),
+        (1, 2, 100),
+        (1, 2, 110),
+    ]
+    config = GraphTowerConfig(
+        max_graph_edges=0,
+        recent_edge_weighting="time_decay",
+        recent_time_decay_ratio=0.1,
+    )
+
+    edge_index, weights = _graph_window_data(
+        mapped_edges,
+        config,
+        np.random.default_rng(0),
+        window_name="gnn_recent",
+    )
+
+    np.testing.assert_array_equal(
+        edge_index,
+        np.asarray([[0, 1], [1, 2]], dtype=np.int32),
+    )
+    assert weights is not None
+    assert weights.dtype == np.float32
     assert weights[1] > weights[0]
 
 

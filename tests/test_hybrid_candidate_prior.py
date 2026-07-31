@@ -2,7 +2,7 @@ from collections import Counter
 
 import numpy as np
 
-from jgrec.core.types import Interaction, InteractionTable, TestQuery
+from jgrec.core.types import Interaction, InteractionTable, TestQuery, TestQueryArray
 from jgrec.idmap import NodeIdMap
 from jgrec.rankers.hybrid.candidate_prior import CANDIDATE_PRIOR_FEATURE_NAMES, CandidatePriorTower
 from jgrec.rankers.hybrid.config import CandidatePriorConfig, TrainingConfig
@@ -31,6 +31,21 @@ def test_candidate_prior_includes_test_frequency_by_default():
     assert features[0, names["candidate_test_freq"]] > features[1, names["candidate_test_freq"]]
     assert features[0, names["candidate_unseen_test_freq"]] > 0.0
     assert features[0, names["candidate_test_freq_row_rank"]] == 1.0
+
+
+def test_candidate_prior_exposes_raw_test_frequency_for_tie_breaking():
+    tower = CandidatePriorTower(CandidatePriorConfig(enabled=True))
+    tower.fit_from_counts({10}, Counter({30: 8, 20: 3, 10: 1}))
+    queries = TestQueryArray(
+        src=np.asarray([1], dtype=np.int32),
+        time=np.asarray([100], dtype=np.int32),
+        candidates=np.asarray([[10, 20, 30]], dtype=np.int32),
+    )
+
+    priorities = tower.tie_break_prior_for_query_array(queries)
+
+    assert priorities.shape == (1, 3)
+    assert priorities[0, 2] > priorities[0, 1] > priorities[0, 0]
 
 
 def test_candidate_prior_can_opt_out_of_test_frequency_features():

@@ -19,8 +19,9 @@ class FusionConfig:
     lr: float = 0.001
     weight_decay: float = 0.0
     hidden_dim: int = 64
-    selection_metric: str = "ap"
+    selection_metric: str = "mrr"
     early_stop_patience: int = 10
+    context_transform_version: int = 0
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,21 @@ class FusionMLP(jt.nn.Module):
         return x.reshape(original_shape)
 
 
+def _listwise_positive_loss(
+    logits: jt.Var,
+    query_weights: jt.Var | None = None,
+) -> jt.Var:
+    """Return query-level softmax cross-entropy for a positive at candidate zero."""
+    if len(logits.shape) != 2 or logits.shape[1] <= 0:
+        raise ValueError("listwise fusion logits must have shape [queries, candidates]")
+    per_query = -jt.nn.log_softmax(logits, dim=1)[:, 0]
+    if query_weights is None:
+        return per_query.mean()
+    if len(query_weights.shape) != 1 or query_weights.shape[0] != logits.shape[0]:
+        raise ValueError("listwise fusion requires one weight per query")
+    return (per_query * query_weights).sum() / query_weights.sum()
+
+
 def fit_fusion_mlp(
     train_features: np.ndarray,
     val_features: np.ndarray,
@@ -66,17 +82,29 @@ def fit_fusion_mlp(
     if feature_indices is None:
         feature_indices = tuple(range(train_features.shape[-1]))
     _set_jittor_seed_from_rng(rng)
-    input_dim = len(feature_indices)
-    mean, std = _feature_normalizer(train_features, feature_indices)
+    mean, std = _feature_normalizer(
+        train_features,
+        feature_indices,
+        context_transform_version=config.context_transform_version,
+        batch_size=config.batch_size,
+    )
     selection_metric = config.selection_metric.lower()
     if selection_metric not in {"ap", "mrr"}:
         raise ValueError(f"unsupported fusion selection metric: {config.selection_metric}")
 
-    model = FusionMLP(input_dim=input_dim, hidden_dim=config.hidden_dim)
+    model = FusionMLP(input_dim=mean.shape[0], hidden_dim=config.hidden_dim)
     _initialize_fusion_mlp_from_rng(model, rng)
     optimizer = jt.nn.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
 
-    best_ap, best_mrr = _metrics_from_model(model, val_features, mean, std, config.batch_size, feature_indices)
+    best_ap, best_mrr = _metrics_from_model(
+        model,
+        val_features,
+        mean,
+        std,
+        config.batch_size,
+        feature_indices,
+        context_transform_version=config.context_transform_version,
+    )
     best_score = _selected_metric(best_ap, best_mrr, selection_metric)
     best_state = _snapshot_state(model)
     train_size = train_features.shape[0]
@@ -88,7 +116,15 @@ def fit_fusion_mlp(
         losses: list[float] = []
         for start in range(0, train_size, config.batch_size):
             batch_idx = order[start : start + config.batch_size]
-            batch_features = _normalize(_select_features(train_features[batch_idx], feature_indices), mean, std)
+            batch_features = _normalize(
+                _prepare_fusion_features(
+                    train_features[batch_idx],
+                    feature_indices,
+                    context_transform_version=config.context_transform_version,
+                ),
+                mean,
+                std,
+            )
             features = jt.array(batch_features, dtype=jt.float32)
             logits = model(features)
             targets = np.zeros((batch_idx.shape[0], logits.shape[1]), dtype=np.float32)
@@ -102,7 +138,15 @@ def fit_fusion_mlp(
             optimizer.step(loss)
             losses.append(float(loss.item()))
 
-        val_ap, val_mrr = _metrics_from_model(model, val_features, mean, std, config.batch_size, feature_indices)
+        val_ap, val_mrr = _metrics_from_model(
+            model,
+            val_features,
+            mean,
+            std,
+            config.batch_size,
+            feature_indices,
+            context_transform_version=config.context_transform_version,
+        )
         val_score = _selected_metric(val_ap, val_mrr, selection_metric)
         if val_score >= best_score:
             best_ap = val_ap
@@ -150,17 +194,29 @@ def fit_fusion_mlp_streaming(
     if feature_indices is None:
         feature_indices = tuple(range(train_features.shape[-1]))
     _set_jittor_seed_from_rng(rng)
-    input_dim = len(feature_indices)
-    mean, std = _feature_normalizer_streaming(train_features, feature_indices, config.batch_size)
+    mean, std = _feature_normalizer_streaming(
+        train_features,
+        feature_indices,
+        config.batch_size,
+        context_transform_version=config.context_transform_version,
+    )
     selection_metric = config.selection_metric.lower()
     if selection_metric not in {"ap", "mrr"}:
         raise ValueError(f"unsupported fusion selection metric: {config.selection_metric}")
 
-    model = FusionMLP(input_dim=input_dim, hidden_dim=config.hidden_dim)
+    model = FusionMLP(input_dim=mean.shape[0], hidden_dim=config.hidden_dim)
     _initialize_fusion_mlp_from_rng(model, rng)
     optimizer = jt.nn.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
 
-    best_ap, best_mrr = _metrics_from_model_streaming(model, val_features, mean, std, config.batch_size, feature_indices)
+    best_ap, best_mrr = _metrics_from_model_streaming(
+        model,
+        val_features,
+        mean,
+        std,
+        config.batch_size,
+        feature_indices,
+        context_transform_version=config.context_transform_version,
+    )
     best_score = _selected_metric(best_ap, best_mrr, selection_metric)
     best_state = _snapshot_state(model)
     train_size = train_features.shape[0]
@@ -172,7 +228,15 @@ def fit_fusion_mlp_streaming(
         losses: list[float] = []
         for start in range(0, train_size, config.batch_size):
             batch_idx = order[start : start + config.batch_size]
-            batch_features = _normalize(_select_features(train_features[batch_idx], feature_indices), mean, std)
+            batch_features = _normalize(
+                _prepare_fusion_features(
+                    train_features[batch_idx],
+                    feature_indices,
+                    context_transform_version=config.context_transform_version,
+                ),
+                mean,
+                std,
+            )
             features = jt.array(batch_features, dtype=jt.float32)
             logits = model(features)
             targets = np.zeros((batch_idx.shape[0], logits.shape[1]), dtype=np.float32)
@@ -189,7 +253,15 @@ def fit_fusion_mlp_streaming(
             if start and start % max(config.batch_size * 16, 1) == 0:
                 release_memory()
 
-        val_ap, val_mrr = _metrics_from_model_streaming(model, val_features, mean, std, config.batch_size, feature_indices)
+        val_ap, val_mrr = _metrics_from_model_streaming(
+            model,
+            val_features,
+            mean,
+            std,
+            config.batch_size,
+            feature_indices,
+            context_transform_version=config.context_transform_version,
+        )
         val_score = _selected_metric(val_ap, val_mrr, selection_metric)
         if val_score >= best_score:
             best_ap = val_ap
@@ -223,21 +295,343 @@ def fit_fusion_mlp_streaming(
     )
 
 
-def predict_logits(model: FusionMLP, features: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
-    normalized = _normalize(features, mean, std)
+def fit_fusion_mlp_listwise_fixed(
+    train_features: np.ndarray,
+    val_features: np.ndarray,
+    config: FusionConfig,
+    rng: np.random.Generator,
+    verbose: bool,
+    feature_indices: tuple[int, ...] | None = None,
+    candidate_name: str = "listwise_fixed",
+    train_row_weights: np.ndarray | None = None,
+) -> tuple[FusionMLP, FusionResult, tuple[float, ...]]:
+    """Train listwise for exactly ``config.epochs`` and evaluate validation once."""
+    if train_features.size == 0 or val_features.size == 0:
+        raise ValueError("fusion reranker requires non-empty train and validation features")
+    if train_features.ndim != 3 or val_features.ndim != 3:
+        raise ValueError("fusion reranker features must have shape [queries, candidates, features]")
+    if train_features.shape[-1] != val_features.shape[-1]:
+        raise ValueError("fusion train and validation feature dimensions must match")
+    if config.epochs <= 0:
+        raise ValueError("fixed listwise fusion requires at least one epoch")
+    if config.batch_size <= 0:
+        raise ValueError("fixed listwise fusion requires a positive batch size")
+
+    if feature_indices is None:
+        feature_indices = tuple(range(train_features.shape[-1]))
+    train_size = int(train_features.shape[0])
+    row_weights = _validate_train_row_weights(
+        train_row_weights,
+        train_size=train_size,
+    )
+    _set_jittor_seed_from_rng(rng)
+    mean, std = _feature_normalizer_streaming(
+        train_features,
+        feature_indices,
+        config.batch_size,
+        context_transform_version=config.context_transform_version,
+        row_weights=row_weights,
+    )
+    model = FusionMLP(input_dim=mean.shape[0], hidden_dim=config.hidden_dim)
+    _initialize_fusion_mlp_from_rng(model, rng)
+    optimizer = jt.nn.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+    epoch_losses: list[float] = []
+
+    epochs = range(1, config.epochs + 1)
+    for epoch in track(epochs, description=f"fusion:{candidate_name}", total=config.epochs, enabled=verbose):
+        order = rng.permutation(train_size)
+        losses: list[float] = []
+        for start in range(0, train_size, config.batch_size):
+            batch_idx = order[start : start + config.batch_size]
+            batch_features = _normalize(
+                _prepare_fusion_features(
+                    train_features[batch_idx],
+                    feature_indices,
+                    context_transform_version=config.context_transform_version,
+                ),
+                mean,
+                std,
+            )
+            features = jt.array(batch_features, dtype=jt.float32)
+            logits = model(features)
+            batch_weights = (
+                None
+                if row_weights is None
+                else jt.array(row_weights[batch_idx], dtype=jt.float32)
+            )
+            loss = _listwise_positive_loss(logits, batch_weights)
+            optimizer.step(loss)
+            losses.append(float(loss.item()))
+            del batch_features, features, logits, batch_weights, loss
+            if start and start % max(config.batch_size * 16, 1) == 0:
+                release_memory()
+
+        mean_loss = float(np.mean(losses)) if losses else math.nan
+        if not math.isfinite(mean_loss):
+            raise FloatingPointError(f"non-finite listwise fusion loss at epoch {epoch}")
+        epoch_losses.append(mean_loss)
+        log(f"[fusion:{candidate_name}] epoch={epoch} loss={mean_loss:.5f}", enabled=verbose)
+        release_memory()
+
+    state = _snapshot_state(model)
+    val_ap, val_mrr = _metrics_from_model_streaming(
+        model,
+        val_features,
+        mean,
+        std,
+        config.batch_size,
+        feature_indices,
+        context_transform_version=config.context_transform_version,
+    )
+    log(
+        f"[fusion:{candidate_name}] fixed_training_complete val_ap={val_ap:.5f} val_mrr={val_mrr:.5f}",
+        enabled=verbose,
+    )
+    return model, FusionResult(
+        best_val_ap=float(val_ap),
+        best_val_mrr=float(val_mrr),
+        state=state,
+        mean=mean,
+        std=std,
+        feature_indices=feature_indices,
+        candidate_name=candidate_name,
+    ), tuple(epoch_losses)
+
+
+def fit_fusion_mlp_listwise_streaming(
+    train_features: np.ndarray,
+    val_features: np.ndarray,
+    config: FusionConfig,
+    rng: np.random.Generator,
+    verbose: bool,
+    feature_indices: tuple[int, ...] | None = None,
+    candidate_name: str = "listwise_streaming",
+    train_row_weights: np.ndarray | None = None,
+) -> tuple[FusionMLP, FusionResult, tuple[dict[str, float | int], ...]]:
+    """Train listwise and early-stop on full-candidate validation MRR."""
+    if train_features.size == 0 or val_features.size == 0:
+        raise ValueError(
+            "fusion reranker requires non-empty train and validation features"
+        )
+    if train_features.ndim != 3 or val_features.ndim != 3:
+        raise ValueError(
+            "fusion reranker features must have shape [queries, candidates, features]"
+        )
+    if train_features.shape[-1] != val_features.shape[-1]:
+        raise ValueError("fusion train and validation feature dimensions must match")
+    if config.epochs <= 0:
+        raise ValueError("streaming listwise fusion requires at least one epoch")
+    if config.batch_size <= 0:
+        raise ValueError("streaming listwise fusion requires a positive batch size")
+    selection_metric = config.selection_metric.lower()
+    if selection_metric not in {"ap", "mrr"}:
+        raise ValueError(
+            f"unsupported fusion selection metric: {config.selection_metric}"
+        )
+
+    if feature_indices is None:
+        feature_indices = tuple(range(train_features.shape[-1]))
+    train_size = int(train_features.shape[0])
+    row_weights = _validate_train_row_weights(
+        train_row_weights,
+        train_size=train_size,
+    )
+    _set_jittor_seed_from_rng(rng)
+    mean, std = _feature_normalizer_streaming(
+        train_features,
+        feature_indices,
+        config.batch_size,
+        context_transform_version=config.context_transform_version,
+        row_weights=row_weights,
+    )
+    model = FusionMLP(
+        input_dim=mean.shape[0],
+        hidden_dim=config.hidden_dim,
+    )
+    _initialize_fusion_mlp_from_rng(model, rng)
+    optimizer = jt.nn.Adam(
+        model.parameters(),
+        lr=config.lr,
+        weight_decay=config.weight_decay,
+    )
+    best_ap, best_mrr = _metrics_from_model_streaming(
+        model,
+        val_features,
+        mean,
+        std,
+        config.batch_size,
+        feature_indices,
+        context_transform_version=config.context_transform_version,
+    )
+    best_score = _selected_metric(best_ap, best_mrr, selection_metric)
+    best_state = _snapshot_state(model)
+    patience_counter = 0
+    history: list[dict[str, float | int]] = []
+
+    epochs = range(1, config.epochs + 1)
+    for epoch in track(
+        epochs,
+        description=f"fusion:{candidate_name}",
+        total=config.epochs,
+        enabled=verbose,
+    ):
+        order = rng.permutation(train_size)
+        losses: list[float] = []
+        for start in range(0, train_size, config.batch_size):
+            batch_idx = order[start : start + config.batch_size]
+            selected = _prepare_fusion_features(
+                train_features[batch_idx],
+                feature_indices,
+                context_transform_version=config.context_transform_version,
+            )
+            batch_features = _normalize(selected, mean, std)
+            features = jt.array(batch_features, dtype=jt.float32)
+            logits = model(features)
+            batch_weights = (
+                None
+                if row_weights is None
+                else jt.array(row_weights[batch_idx], dtype=jt.float32)
+            )
+            loss = _listwise_positive_loss(logits, batch_weights)
+            optimizer.step(loss)
+            losses.append(float(loss.item()))
+            del selected, batch_features, features, logits, batch_weights, loss
+            if start and start % max(config.batch_size * 16, 1) == 0:
+                release_memory()
+
+        mean_loss = float(np.mean(losses)) if losses else math.nan
+        if not math.isfinite(mean_loss):
+            raise FloatingPointError(
+                f"non-finite listwise fusion loss at epoch {epoch}"
+            )
+        val_ap, val_mrr = _metrics_from_model_streaming(
+            model,
+            val_features,
+            mean,
+            std,
+            config.batch_size,
+            feature_indices,
+            context_transform_version=config.context_transform_version,
+        )
+        val_score = _selected_metric(val_ap, val_mrr, selection_metric)
+        if val_score >= best_score:
+            best_ap = val_ap
+            best_mrr = val_mrr
+            best_score = val_score
+            best_state = _snapshot_state(model)
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        history.append(
+            {
+                "epoch": int(epoch),
+                "loss": mean_loss,
+                "val_ap": float(val_ap),
+                "val_mrr": float(val_mrr),
+                "best_score": float(best_score),
+                "patience": int(patience_counter),
+            }
+        )
+        log(
+            f"[fusion:{candidate_name}] epoch={epoch} loss={mean_loss:.5f} "
+            f"val_ap={val_ap:.5f} val_mrr={val_mrr:.5f} "
+            f"best_{selection_metric}={best_score:.5f} "
+            f"patience={patience_counter}",
+            enabled=verbose,
+        )
+        release_memory()
+        if (
+            config.early_stop_patience > 0
+            and patience_counter >= config.early_stop_patience
+        ):
+            log(
+                f"[fusion:{candidate_name}] early_stop epoch={epoch}",
+                enabled=verbose,
+            )
+            break
+
+    _load_state(model, best_state)
+    return model, FusionResult(
+        best_val_ap=float(best_ap),
+        best_val_mrr=float(best_mrr),
+        state=best_state,
+        mean=mean,
+        std=std,
+        feature_indices=feature_indices,
+        candidate_name=candidate_name,
+    ), tuple(history)
+
+
+def _validate_train_row_weights(
+    train_row_weights: np.ndarray | None,
+    *,
+    train_size: int,
+) -> np.ndarray | None:
+    if train_row_weights is None:
+        return None
+    weights = np.asarray(train_row_weights, dtype=np.float32)
+    if weights.ndim != 1 or weights.shape[0] != train_size:
+        raise ValueError(
+            "listwise fusion train_row_weights must contain one weight per "
+            "training query"
+        )
+    if not np.all(np.isfinite(weights)):
+        raise ValueError("listwise fusion train_row_weights must be finite")
+    if np.any(weights <= 0.0):
+        raise ValueError("listwise fusion train_row_weights must be positive")
+    return weights
+
+
+def predict_logits(
+    model: FusionMLP,
+    features: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> np.ndarray:
+    prepared = align_fusion_input_features(
+        features,
+        expected_dim=int(np.asarray(mean).shape[0]),
+    )
+    normalized = _normalize(prepared, mean, std)
     with jt.no_grad():
         logits = model(jt.array(normalized, dtype=jt.float32))
         return np.asarray(logits.numpy(), dtype=np.float32)
 
 
 def build_fusion_from_state(input_dim: int, hidden_dim: int, state: dict[str, np.ndarray]) -> FusionMLP:
+    first_layer = state.get("linear1.weight")
+    if first_layer is not None:
+        first_layer_shape = np.asarray(first_layer).shape
+        if len(first_layer_shape) != 2 or first_layer_shape[1] <= 0:
+            raise ValueError(
+                "fusion state linear1.weight must have shape "
+                "[hidden_dim, input_dim]"
+            )
+        input_dim = int(first_layer_shape[1])
     model = FusionMLP(input_dim=input_dim, hidden_dim=hidden_dim)
     _load_state(model, state)
     return model
 
 
-def _feature_normalizer(features: np.ndarray, feature_indices: tuple[int, ...]) -> tuple[np.ndarray, np.ndarray]:
-    selected = _select_features(features, feature_indices)
+def _feature_normalizer(
+    features: np.ndarray,
+    feature_indices: tuple[int, ...],
+    *,
+    context_transform_version: int = 0,
+    batch_size: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if context_transform_version != 0:
+        return _feature_normalizer_streaming(
+            features,
+            feature_indices,
+            batch_size=max(int(batch_size or 512), 1),
+            context_transform_version=context_transform_version,
+        )
+    selected = _prepare_fusion_features(
+        features,
+        feature_indices,
+        context_transform_version=context_transform_version,
+    )
     flat = selected.reshape((-1, selected.shape[-1]))
     mean = flat.mean(axis=0).astype(np.float32)
     std = flat.std(axis=0).astype(np.float32)
@@ -249,29 +643,70 @@ def _feature_normalizer_streaming(
     features: np.ndarray,
     feature_indices: tuple[int, ...],
     batch_size: int,
+    *,
+    context_transform_version: int = 0,
+    row_weights: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    total = 0
+    weights = _validate_train_row_weights(
+        row_weights,
+        train_size=int(features.shape[0]),
+    )
+    total_weight = 0.0
     feature_sum: np.ndarray | None = None
     feature_sq_sum: np.ndarray | None = None
     step = max(int(batch_size), 1)
     for start in range(0, features.shape[0], step):
         end = min(start + step, features.shape[0])
-        selected = _select_features(features[start:end], feature_indices).astype(np.float64, copy=False)
+        selected = _prepare_fusion_features(
+            features[start:end],
+            feature_indices,
+            context_transform_version=context_transform_version,
+        ).astype(np.float64, copy=False)
         flat = selected.reshape((-1, selected.shape[-1]))
-        batch_sum = flat.sum(axis=0)
-        batch_sq_sum = (flat * flat).sum(axis=0)
+        if weights is None:
+            batch_sum = flat.sum(axis=0)
+            batch_sq_sum = (flat * flat).sum(axis=0)
+            batch_weight = float(flat.shape[0])
+        else:
+            batch_weights = weights[start:end].astype(
+                np.float64,
+                copy=False,
+            )
+            batch_sum = np.einsum(
+                "qcf,q->f",
+                selected,
+                batch_weights,
+                optimize=True,
+            )
+            batch_sq_sum = np.einsum(
+                "qcf,qcf,q->f",
+                selected,
+                selected,
+                batch_weights,
+                optimize=True,
+            )
+            batch_weight = float(
+                batch_weights.sum(dtype=np.float64) * selected.shape[1]
+            )
         if feature_sum is None:
             feature_sum = batch_sum
             feature_sq_sum = batch_sq_sum
         else:
             feature_sum += batch_sum
             feature_sq_sum += batch_sq_sum
-        total += flat.shape[0]
+        total_weight += batch_weight
         del selected, flat, batch_sum, batch_sq_sum
-    if total <= 0 or feature_sum is None or feature_sq_sum is None:
+    if (
+        total_weight <= 0.0
+        or feature_sum is None
+        or feature_sq_sum is None
+    ):
         raise ValueError("fusion reranker requires non-empty training features")
-    mean64 = feature_sum / total
-    variance64 = np.maximum(feature_sq_sum / total - mean64 * mean64, 0.0)
+    mean64 = feature_sum / total_weight
+    variance64 = np.maximum(
+        feature_sq_sum / total_weight - mean64 * mean64,
+        0.0,
+    )
     mean = mean64.astype(np.float32)
     std = np.sqrt(variance64).astype(np.float32)
     std[std < 1e-6] = 1.0
@@ -292,6 +727,58 @@ def _select_features(features: np.ndarray, feature_indices: tuple[int, ...]) -> 
     return features[..., feature_indices]
 
 
+def _prepare_fusion_features(
+    features: np.ndarray,
+    feature_indices: tuple[int, ...],
+    *,
+    context_transform_version: int,
+) -> np.ndarray:
+    selected = _select_features(features, feature_indices)
+    if context_transform_version == 0:
+        return selected
+    from .setwise import setwise_context_features  # noqa: PLC0415
+
+    return setwise_context_features(
+        selected,
+        transform_version=context_transform_version,
+    )
+
+
+def align_fusion_input_features(
+    features: np.ndarray,
+    *,
+    expected_dim: int,
+) -> np.ndarray:
+    """Match raw selected features to a stored FusionMLP input contract."""
+
+    values = np.asarray(features)
+    if values.ndim != 3 or values.shape[-1] <= 0:
+        raise ValueError(
+            "fusion features must have shape [queries, candidates, features]"
+        )
+    expected_dim = int(expected_dim)
+    if expected_dim <= 0:
+        raise ValueError("fusion expected feature dimension must be positive")
+    if values.shape[-1] == expected_dim:
+        return values
+
+    multiplier_to_version = {3: 1, 5: 2}
+    if expected_dim % values.shape[-1] == 0:
+        multiplier = expected_dim // values.shape[-1]
+        transform_version = multiplier_to_version.get(multiplier)
+        if transform_version is not None:
+            from .setwise import setwise_context_features  # noqa: PLC0415
+
+            return setwise_context_features(
+                values,
+                transform_version=transform_version,
+            )
+    raise ValueError(
+        "fusion feature dimension does not match its stored normalizer: "
+        f"features={values.shape[-1]} expected={expected_dim}"
+    )
+
+
 def _metrics_from_model(
     model: FusionMLP,
     features: np.ndarray,
@@ -299,12 +786,22 @@ def _metrics_from_model(
     std: np.ndarray,
     batch_size: int,
     feature_indices: tuple[int, ...],
+    *,
+    context_transform_version: int = 0,
 ) -> tuple[float, float]:
     scores = np.empty(features.shape[:2], dtype=np.float32)
     with jt.no_grad():
         for start in range(0, features.shape[0], max(int(batch_size), 1)):
             end = min(start + max(int(batch_size), 1), features.shape[0])
-            normalized = _normalize(_select_features(features[start:end], feature_indices), mean, std)
+            normalized = _normalize(
+                _prepare_fusion_features(
+                    features[start:end],
+                    feature_indices,
+                    context_transform_version=context_transform_version,
+                ),
+                mean,
+                std,
+            )
             batch_scores = model(jt.array(normalized, dtype=jt.float32))
             scores[start:end] = np.asarray(batch_scores.numpy(), dtype=np.float32)
     return _ap_from_scores(scores), _mrr_from_scores(scores)
@@ -317,13 +814,23 @@ def _metrics_from_model_streaming(
     std: np.ndarray,
     batch_size: int,
     feature_indices: tuple[int, ...],
+    *,
+    context_transform_version: int = 0,
 ) -> tuple[float, float]:
     flat_scores = np.empty(features.shape[0] * features.shape[1], dtype=np.float32)
     reciprocal_rank_sum = 0.0
     with jt.no_grad():
         for start in range(0, features.shape[0], max(int(batch_size), 1)):
             end = min(start + max(int(batch_size), 1), features.shape[0])
-            normalized = _normalize(_select_features(features[start:end], feature_indices), mean, std)
+            normalized = _normalize(
+                _prepare_fusion_features(
+                    features[start:end],
+                    feature_indices,
+                    context_transform_version=context_transform_version,
+                ),
+                mean,
+                std,
+            )
             batch_scores = model(jt.array(normalized, dtype=jt.float32))
             score_array = np.asarray(batch_scores.numpy(), dtype=np.float32)
             flat_scores[start * features.shape[1] : end * features.shape[1]] = score_array.ravel()

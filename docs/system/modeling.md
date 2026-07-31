@@ -215,6 +215,11 @@ two_tower_cosine
 
 Two-Tower 不替代统计和结构特征，而是补充低维表示相似度。
 
+Two-Tower 还提供默认关闭的 in-batch auxiliary objective。打开后，同一
+mini-batch 中其他正目标构成额外对比集合；重复 destination 通过
+multi-positive softmax 合并为正例，避免制造 false negative。该辅助项只参与训练，
+验证和 early stopping 仍基于原始完整候选组。
+
 ### GraphTower
 
 图塔支持 XSimGCL 和 LightGCN。当前冲分主线使用：
@@ -245,6 +250,14 @@ src: dst_1, dst_2, dst_3, ...
 
 当前支持 SASRec/GRU 方向的序列特征。预测时输出候选目标与源节点历史状态的匹配分数。序列塔用于捕捉短期兴趣转移，
 与图塔的静态协同信号互补。
+
+### 塔级优化器实验
+
+GNN、GRU sequence、Two-Tower 和 SourceProfile item2vec 均可独立设置
+learning rate、`constant/cosine` epoch scheduler、最低学习率比例和 weight
+decay。新字段默认解析为固定学习率、最低比例 0、weight decay 0，因此旧 checkpoint
+回放不会被隐式改变。生产默认值只有在 rolling-origin 与 external gate 通过后才能更新；
+单切分塔级指标不能直接写回冠军配置。
 
 ## 融合器
 
@@ -287,7 +300,12 @@ p_{i,j}
 = \frac{1}{B}\sum_{i=1}^{B}\frac{1}{\operatorname{rank}_i}
 \]
 
-默认 `selection_metric=ap`，也可以设置 `--selection-metric mrr` 与线上 MRR 评分口径对齐。
+默认 `selection_metric=mrr` 与线上 query-level MRR 评分口径对齐；`ap` 保留为显式复现实验选项。
+异构 MLP/LGBM 专家默认采用 RRF 秩融合，另提供 legacy probability 混合和基于验证 NLL 的独立温度标定。
+基础 FusionMLP 对每个被 mask 保留的 raw 特征 \(x\) 默认构造
+\([x,\ x-\operatorname{rowmean}(x),\ x-\operatorname{rowmax}(x)]\)，
+使所有塔的分数和统计量都获得 query 内相对位置；该变换按 batch 计算。
+LGBM 保持 raw 输入，独立 Setwise 专家已是上下文化输入时不会重复变换。
 
 ## Dataset1 与 Dataset2 的建模差异
 
