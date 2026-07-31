@@ -96,7 +96,7 @@ def run(command: str) -> int:
     creds = _read_creds()
     client = _client(creds)
     try:
-        stdin, stdout, stderr = client.exec_command(command, get_pty=True, timeout=None)
+        _stdin, stdout, stderr = client.exec_command(command, get_pty=True, timeout=None)
         for line in iter(stdout.readline, ""):
             encoding = sys.stdout.encoding or "utf-8"
             sys.stdout.write(

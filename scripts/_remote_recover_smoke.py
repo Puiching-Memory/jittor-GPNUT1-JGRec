@@ -45,7 +45,7 @@ def main() -> int:
                 encoding="utf-8",
             )
             return stdout.channel.recv_exit_status()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             LOG_PATH.write_text(
                 f"attempt={attempt}\nerror={type(exc).__name__}: {exc}\n",
                 encoding="utf-8",

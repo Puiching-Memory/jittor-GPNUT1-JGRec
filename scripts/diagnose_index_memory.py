@@ -19,8 +19,6 @@ import tracemalloc
 from pathlib import Path
 from time import perf_counter
 
-import numpy as np
-
 from jgrec.core.io import read_interactions
 from jgrec.rankers.common.temporal_index import TemporalInteractionIndex
 

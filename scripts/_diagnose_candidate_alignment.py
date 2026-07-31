@@ -62,7 +62,7 @@ def main() -> int:
         "shape_reference": list(reference.shape),
         "dtype_current": str(current.dtype),
         "dtype_reference": str(reference.dtype),
-        "differing_rows": int(len(differing_rows)),
+        "differing_rows": len(differing_rows),
         "differing_cells": int(difference.sum()),
         "differing_cells_by_column": difference.sum(axis=0).tolist(),
         "first_diff_row": first,

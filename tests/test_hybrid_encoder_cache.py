@@ -336,7 +336,7 @@ def test_time_decay_feature_is_appended_without_changing_legacy_feature_columns(
     legacy_features = legacy_encoder.features_for_queries(queries)
     enabled_features = enabled_encoder.features_for_queries(queries)
 
-    assert legacy_encoder.feature_dim == 63
-    assert enabled_encoder.feature_dim == 64
+    assert legacy_encoder.feature_dim == 66
+    assert enabled_encoder.feature_dim == 67
     assert enabled_encoder.feature_names[-1] == "cooccur_time_decay_score"
-    np.testing.assert_array_equal(enabled_features[..., :63], legacy_features)
+    np.testing.assert_array_equal(enabled_features[..., :66], legacy_features)

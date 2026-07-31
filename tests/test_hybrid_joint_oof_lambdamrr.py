@@ -1,10 +1,19 @@
+import importlib.util
+import sys
+from pathlib import Path
+
 import jittor as jt
 import numpy as np
-from scripts.train_dataset2_joint_oof_lambdamrr import (
-    JointCandidateFeatureView,
-)
 
-from jgrec.rankers.hybrid.joint_oof_lambdamrr import (
+_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "train_dataset2_joint_oof_lambdamrr.py"
+_SPEC = importlib.util.spec_from_file_location("train_dataset2_joint_oof_lambdamrr_under_test", _SCRIPT_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+_train_module = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _train_module
+_SPEC.loader.exec_module(_train_module)
+JointCandidateFeatureView = _train_module.JointCandidateFeatureView
+
+from jgrec.rankers.hybrid.joint_oof_lambdamrr import (  # noqa: E402
     JointOOFLambdaMRRConfig,
     JointOOFLambdaMRRModel,
     JointOOFLambdaMRRTrainingConfig,

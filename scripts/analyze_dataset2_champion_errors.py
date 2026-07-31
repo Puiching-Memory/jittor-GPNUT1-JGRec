@@ -55,8 +55,8 @@ FEATURE_FAMILIES: dict[str, tuple[str, ...]] = {
     "sequence": SEQUENCE_FEATURE_NAMES,
 }
 FEATURE_NAMES = tuple(feature for family_features in FEATURE_FAMILIES.values() for feature in family_features)
-if len(FEATURE_NAMES) != 63 or len(set(FEATURE_NAMES)) != 63:
-    raise RuntimeError("the frozen Dataset2 feature schema must contain 63 unique columns")
+if len(FEATURE_NAMES) != 66 or len(set(FEATURE_NAMES)) != 66:
+    raise RuntimeError("the frozen Dataset2 feature schema must contain 66 unique columns")
 
 
 def ranking_arrays(probabilities: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -738,7 +738,7 @@ def _validate_aligned_assets(
     if candidates.shape != probabilities.shape:
         raise ValueError("candidate sidecar shape differs from probabilities")
     if features.shape != (*probabilities.shape, len(FEATURE_NAMES)):
-        raise ValueError("feature cache must align with probabilities and contain the frozen 63 columns")
+        raise ValueError("feature cache must align with probabilities and contain the frozen 66 columns")
     expected_sidecar_shape = (probabilities.shape[0],)
     if any(np.asarray(values).shape != expected_sidecar_shape for values in (val_src, val_dst, val_time)):
         raise ValueError("src/dst/time sidecars do not align with probabilities")
